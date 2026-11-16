@@ -1,0 +1,55 @@
+name: SM8850 port CI
+on:
+  push:
+    branches: ['feat/oneios-sm8850-m3q']
+  pull_request:
+    branches: [oneios]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: read
+
+concurrency:
+  group: sm8850-oneos-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  android:
+    name: OneOS tests and full debug APK
+    runs-on: ubuntu-24.04
+    timeout-minutes: 65
+    env:
+      GH_PACKAGES_USER: ${{ secrets.GH_PACKAGES_USER || github.actor }}
+      GH_PACKAGES_TOKEN: ${{ secrets.GH_PACKAGES_TOKEN || secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate changes
+        run: git diff --check
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Install Android SDK platform 37
+        run: |
+          sdkmanager=$(ls "$ANDROID_HOME"/cmdline-tools/*/bin/sdkmanager | tail -n 1)
+          yes | "$sdkmanager" --licenses >/dev/null || true
+          "$sdkmanager" "platforms;android-37.0" "build-tools;37.0.0"
+      - name: Build the guest manager needed by the full app
+        run: scripts/build-guest-manager.sh --debug
+      - name: Install mksh for shell regression tests
+        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends mksh
+      - name: Kotlin and root-script unit tests
+        working-directory: app-android
+        run: ./gradlew --max-workers=3 :core:model:test :core:safety:test :core:root:testDebugUnitTest
+      - name: Build full debug APK (never release)
+        working-directory: app-android
+        run: ./gradlew --max-workers=3 :app:assembleFullDebug
+      - name: Upload debug APK for manual inspection only
+        uses: actions/upload-artifact@v4
+        with:
+          name: OneOS-SM8850-diagnostics-debug
+          path: app-android/app/build/outputs/apk/full/debug/app-full-debug.apk
+          if-no-files-found: error
+          retention-days: 7
