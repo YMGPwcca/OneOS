@@ -35,8 +35,11 @@ object OneiosSystem {
     /** The manifest `format` of both a runtime package and an image set this build reads. */
     const val FORMAT = 1
 
-    /** The only phone it is offered on: the Galaxy S24 Ultra (SM-S928, e3q, SM8650). */
-    val PROFILE_IDS: Set<String> = setOf(Profiles.ID_S_ULTRA_8650)
+    /** The card and non-switching hardware diagnostics may be used on these exact device profiles. */
+    val PROFILE_IDS: Set<String> = setOf(Profiles.ID_S_ULTRA_8650, Profiles.ID_S_ULTRA_8850)
+
+    /** Only the S24 Ultra has a tested session/return path. Do not infer switch support from diagnostics. */
+    private val SWITCH_PROFILE_IDS: Set<String> = setOf(Profiles.ID_S_ULTRA_8650)
 
     const val R_NOT_THIS_PHONE = "oneios-not-this-phone"
     const val R_EXPERIMENTAL = "oneios-experimental"
@@ -48,19 +51,26 @@ object OneiosSystem {
 
     fun offeredOn(profile: PhoneProfile?): Boolean = profile != null && profile.enabled && profile.id in PROFILE_IDS
 
+    /** A separate fail-closed capability: a passing hardware probe does not certify hot-switch/return. */
+    fun canSwitchOn(profile: PhoneProfile?): Boolean = offeredOn(profile) && profile!!.id in SWITCH_PROFILE_IDS
+
     /** The phone itself, by the three ids a profile matches on. */
     fun offeredOn(model: String, device: String, soc: String, profiles: List<PhoneProfile> = Profiles.BUILT_IN): Boolean =
         offeredOn(Profiles.resolve(model, device, soc, profiles).profile)
 
     /**
-     * The system-kind gate: BLOCK on every phone but the Galaxy S24 Ultra; there a
-     * WARN the user has to tick ([ACK]) before every switch, as for an untested
-     * profile, and OK once [ticked].
+     * Switching remains blocked on diagnostics-only phones, regardless of the experimental tick.
+     * The S24 Ultra still requires acknowledgement before each experimental switch.
      */
     fun gate(profile: PhoneProfile?, ticked: Boolean): Finding = when {
         !offeredOn(profile) -> Finding(
             GATE_ID, Level.BLOCK, "$NAME is not for this phone",
             "$NAME runs on the Galaxy S24 Ultra (SM-S928) only" + (profile?.let { "; this is the ${it.label}" } ?: "") + ".",
+            R_NOT_THIS_PHONE,
+        )
+        !canSwitchOn(profile) -> Finding(
+            GATE_ID, Level.BLOCK, "$NAME: hardware diagnostics only",
+            "The ${profile?.label ?: "phone"} may run OneiOS hardware checks, but switching to iOS is disabled until the device-specific One UI recovery path is validated.",
             R_NOT_THIS_PHONE,
         )
         !ticked -> Finding(GATE_ID, Level.WARN, "$NAME is experimental", ACK, R_EXPERIMENTAL)
