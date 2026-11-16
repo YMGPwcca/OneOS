@@ -33,7 +33,8 @@ class OneiosFlowTest {
         offered: Boolean? = true,
         runtimeRecord: OneiosStaged? = null,
         imageRecord: OneiosStaged? = null,
-    ) = OneiosFlow.of(OneiosFlow.Input(st, offered, running, last, failure, runtimeRecord, imageRecord))
+        switchAllowed: Boolean = true,
+    ) = OneiosFlow.of(OneiosFlow.Input(st, offered, running, last, failure, runtimeRecord, imageRecord, switchAllowed))
 
     private fun marks(v: OneiosFlow.View) = v.rows.map { it.mark }
 
@@ -139,6 +140,17 @@ class OneiosFlowTest {
         assertEquals(OneiosFlow.Next.CHECK_AGAIN, failed.next)
         assertEquals(OneiosFlow.Next.NOT_THIS_PHONE, flow(null, offered = false).next)
         assertEquals(OneiosFlow.Mark.FAILED, flow(null, offered = false).mark(OneiosFlow.Step.PHONE))
+    }
+
+    @Test
+    fun diagnosticsOnlyS26NeverOffersHotSwitch() {
+        // Even if a stale root status claims ready, the UI must fail closed.
+        val st = status("stage present", runtime, image, "session none returned", "outcome inplace 1763000000", "ready 1")
+        val v = flow(st, switchAllowed = false)
+        assertEquals(OneiosFlow.Mark.FAILED, v.mark(OneiosFlow.Step.PHONE))
+        assertEquals(OneiosFlow.Next.NOT_THIS_PHONE, v.next)
+        assertFalse(v.ready)
+        assertTrue(v.row(OneiosFlow.Step.PHONE).line!!.contains("Hardware checks only"))
     }
 
     @Test
