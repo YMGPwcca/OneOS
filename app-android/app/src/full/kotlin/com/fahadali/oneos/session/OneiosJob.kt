@@ -112,7 +112,7 @@ object OneiosJob : BackgroundJob<OneiosJob.State>(State(), "oneos-oneios") {
     @Volatile private var connection: HttpURLConnection? = null
 
     private fun othersBusy() = StageCheck.state.busy || PrepareJob.state.busy || LaunchJob.state.busy || LogJob.state.busy ||
-        OldStagesJob.state.busy || RemoveJob.state.busy || OneiosChecksJob.state.busy
+        OldStagesJob.state.busy || RemoveJob.state.busy || OneiosChecksJob.state.busy || OneiosToolJob.state.busy
 
     fun canStart(): Boolean = !state.busy && !othersBusy()
 
@@ -276,9 +276,9 @@ object OneiosJob : BackgroundJob<OneiosJob.State>(State(), "oneos-oneios") {
      * preflight both have to pass, and a refusal changes nothing. When it works
      * One UI's framework stops, and this app with it.
      */
-    fun switch(ctx: Context, ticked: Boolean) = job(ctx, Phase.SWITCHING, OneiosFlow.Job.SWITCH, "Checking before the switch…") { app ->
+    fun switch(ctx: Context, ticked: Boolean, notThisPhoneTicked: Boolean = false) = job(ctx, Phase.SWITCHING, OneiosFlow.Job.SWITCH, "Checking before the switch…") { app ->
         val profile = Profiles.resolve(FactProbe(app).collect(RootProbe(app).signals())).profile
-        val gate = OneiosSystem.gate(profile, ticked)
+        val gate = OneiosSystem.gate(profile, ticked, notThisPhoneTicked)
         if (gate.level != Level.OK) throw Failed(if (gate.level == Level.BLOCK) gate.detail else "Tick the box first: ${gate.title}.")
         // This build's session scripts and boot screen, before every switch: an app update reaches the stage
         // without a new import. A refusal here (no stage yet, an open session) is not the answer: root's

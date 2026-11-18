@@ -988,13 +988,21 @@ fi
 [ "$(id -u 2>/dev/null)" = 0 ] || refuse "not running as root"
 command -v sha256sum >/dev/null 2>&1 || refuse "no sha256sum"
 
-# This phone only: the Galaxy S24 Ultra (docs/oneios.md, "Scope").
+# Mainly tested on: the Galaxy S24 Ultra (docs/oneios.md, "Scope"): e3q on an
+# SM8650, the SM-S928 models. The owner (2026-11-16): another phone may try it,
+# told what to expect; nothing here refuses one any more.
 P_MODEL=$(getprop ro.product.model)
 P_DEVICE=$(getprop ro.product.device)
 P_SOC=$(getprop ro.soc.model)
-case "$P_MODEL" in SM-S928*) ;; *) refuse "iOS runs on the Galaxy S24 Ultra (SM-S928) only; this phone is ${P_MODEL:-unknown}" ;; esac
-[ "$P_DEVICE" = e3q ] && [ "$P_SOC" = SM8650 ] ||
-    refuse "iOS runs on the Galaxy S24 Ultra (e3q, SM8650) only; this phone is ${P_DEVICE:-?}, ${P_SOC:-?}"
+S24U=0
+case "$P_MODEL" in SM-S928*) ;; *) S24U=1 ;; esac
+[ "$P_DEVICE" = e3q ] && [ "$P_SOC" = SM8650 ] || S24U=1
+if [ "$S24U" = 1 ]; then
+    echo "WARNING: OneiOS is mainly tested and working on the Galaxy S24 Ultra 5G (an e3q on an SM8650;"
+    echo "WARNING: the SM-S928 models). This phone is ${P_MODEL:-unknown} (${P_DEVICE:-?}, ${P_SOC:-?}): on it the"
+    echo "WARNING: code may be unstable, miss pieces, or not come back to One UI. Samsung devices are the"
+    echo "WARNING: ones it is written for. Going on because you asked it to."
+fi
 
 # The stage first: without a runtime that has xnuhost, that one line is the answer.
 stage_checks
@@ -1119,11 +1127,31 @@ awk '{ print $5 }' /proc/1/mountinfo | sort > "$B/mounts"
 for bl in "$T"/sys/class/backlight/*/brightness; do
     [ -f "$bl" ] && echo "${bl#"$T"} $(cat "$bl" 2>/dev/null)"
 done > "$B/backlight" 2>/dev/null
+# The shmem THP mode as One UI has it: xnuhost's 2 MiB host pages map the
+# guest's RAM with MADV_HUGEPAGE, which shmem honours only in the advise mode
+# (OneiOS 8a9caf3, docs/booter.md 2.6c). One UI never advises, so advise
+# changes nothing for it; the return writes the old value back.
+SHMEM_EN="$T/sys/kernel/mm/transparent_hugepage/shmem_enabled"
+if [ -f "$SHMEM_EN" ]; then
+    # The node prints every mode with the active one in brackets:
+    # "always within_size advise [never] deny force". Save the bare mode (the
+    # bracketed token), never the whole line: writing the line back is EINVAL
+    # and that is what failed Gate A on 2026-11-16.
+    shmem_raw=$(cat "$SHMEM_EN" 2>/dev/null)
+    shmem_mode=$(printf '%s\n' "$shmem_raw" | sed -n 's/.*\[\([a-z_]*\)\].*/\1/p')
+    [ -n "$shmem_mode" ] || shmem_mode=$(printf '%s\n' "$shmem_raw" | awk '{ print $1 }')
+    if [ -n "$shmem_mode" ]; then
+        printf '%s\n' "$shmem_mode" > "$B/shmem_enabled" 2>/dev/null
+        if [ "$shmem_mode" != advise ] && echo advise > "$SHMEM_EN" 2>/dev/null; then
+            echo "shmem_enabled: $shmem_mode -> advise"
+        fi
+    fi
+fi
 clocks_save
 # The USB gadget and adbd as One UI has them (control/base/usb), for the
 # session's USB watcher and the return.
 usb_save
-echo "Baseline: boot $(cat "$B/boot_id"), SELinux $(cat "$B/selinux"), $(tr '\n' ' ' < "$B/pids")wifi $(cat "$B/wifi_on")"
+echo "Baseline: boot $(cat "$B/boot_id"), SELinux $(cat "$B/selinux"), shmem $(cat "$B/shmem_enabled" 2>/dev/null || echo -), $(tr '\n' ' ' < "$B/pids")wifi $(cat "$B/wifi_on")"
 
 echo "=== [2/5] $(date +%T) Arming the way back ==="
 # Before the stop: the watcher returns to One UI by itself if this script
