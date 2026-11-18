@@ -41,6 +41,9 @@ object OneiosSystem {
     /** Only the S24 Ultra has a tested session/return path. Do not infer switch support from diagnostics. */
     private val SWITCH_PROFILE_IDS: Set<String> = setOf(Profiles.ID_S_ULTRA_8650)
 
+    /** Upstream UI compatibility text only; this acknowledgement cannot override S26U's recovery gate. */
+    const val NOT_THIS_PHONE_ACK = "The iOS guest is not validated on this device. Hardware diagnostics do not enable a switch."
+
     const val R_NOT_THIS_PHONE = "oneios-not-this-phone"
     const val R_EXPERIMENTAL = "oneios-experimental"
     const val GATE_ID = "gate-oneios"
@@ -61,8 +64,9 @@ object OneiosSystem {
     /**
      * Switching remains blocked on diagnostics-only phones, regardless of the experimental tick.
      * The S24 Ultra still requires acknowledgement before each experimental switch.
+     * The additional upstream not-this-phone acknowledgement never relaxes the fail-closed profile gate.
      */
-    fun gate(profile: PhoneProfile?, ticked: Boolean): Finding = when {
+    fun gate(profile: PhoneProfile?, ticked: Boolean, notThisPhoneTicked: Boolean = false): Finding = when {
         !offeredOn(profile) -> Finding(
             GATE_ID, Level.BLOCK, "$NAME is not for this phone",
             "$NAME runs on the Galaxy S24 Ultra (SM-S928) only" + (profile?.let { "; this is the ${it.label}" } ?: "") + ".",

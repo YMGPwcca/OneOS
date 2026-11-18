@@ -1,5 +1,15 @@
 # iOS 27 (OneiOS)
 
+> **SM8850 fork safety override (2026-11-18).** This fork's `feat/oneios-sm8850-m3q`
+> branch exposes OneiOS hardware diagnostics on Galaxy S26 Ultra
+> (SM-S948*/m3q/SM8850), but **does not authorize an iOS switch** there.
+> `OneiosSystem.canSwitchOn`, the app flow and `oneios_switch.sh` all
+> refuse an unverified device. Upstream's broader "not this phone"
+> acknowledgement is not permission to bypass recovery gates. The S24 Ultra
+> remains the only switch-allowlisted profile until independent SM8850
+> recovery acceptance is documented in `docs/SM8850_PORT.md`.
+>
+
 A system kind of its own in this fork (`akshaynexus/OneOS`, branch `oneios`): Apple's iOS 27 as a OneOS-style
 session on the Galaxy S24 Ultra. One UI's framework stops, and instead of another Android framework the session
 starts **xnuhost**, OneiOS's source-built XNU running as a process on One UI's kernel, with an iOS image set the
@@ -45,12 +55,16 @@ Both are a zstd-compressed tar with a manifest at the top: `runtime.json` or `ma
 `xnuhost` (its path) and `image_formats` (the image formats it boots). The exact schema is in OneiOS's
 `oneos/interface.md`; the image side follows OneiOS's `docs/image-format.md` once that exists.
 
-## Scope: the Galaxy S24 Ultra only
+## Scope: mainly the Galaxy S24 Ultra
 
 `OneiosSystem.offeredOn` (`core/model/.../Oneios.kt`) is true for one profile, `s-ultra-8650` (SM-S928, e3q,
-SM8650), and `oneios_switch.sh` checks the same three properties itself before anything else. On every other
-phone there is no iOS card. On the S24 Ultra the card is last in Choose a system, marked Experimental, and the
-switch needs a tick every time ("I understand that iOS 27 (OneiOS) is experimental..."), like an untested profile.
+SM8650), and `oneios_switch.sh` checks the same three properties itself before anything else. On the S24 Ultra
+the card is last in Choose a system, marked Experimental, and the switch needs a tick every time ("I understand
+that iOS 27 (OneiOS) is experimental..."), like an untested profile. The owner (2026-11-16): every other phone
+is **warned, not refused** — the switch prints what to expect and goes on, the setup flows as usual, and the
+switch's confirm has a third box ("mainly tested and working on the Galaxy S24 Ultra 5G (SM-S928B); on this
+phone it may be unstable, miss pieces, or not come back to One UI"). A Samsung device is what the code is
+written for; anything else may be unstable, half-working, or not come back.
 
 It is not an `ImageRef`: it has no Android SDK, no `system.raw`, no package set and no guard jars, so none of the
 Android guests' tables, pins or tests know it.
@@ -101,7 +115,8 @@ preflight's order on the script's text).
 
 ### 1. Choose a system (pick)
 
-The iOS card, last in the carousel, marked Experimental, on the Galaxy S24 Ultra only ("Scope" above). Its
+The iOS card, last in the carousel, marked Experimental, on every phone (warned off the S24 Ultra: "Scope"
+above). Its
 button reads as an Android card's: **Set up** while root has reported no runtime or no image set, **Show
 progress** while a download or an import runs (both open Set up iOS 27), else **Open** (iOS 27's page). Before
 the app has asked root anything in this run it says Open.
@@ -253,6 +268,105 @@ spread between runs, so that hash stays as the second check. **None of
 this has been measured on the phone**: its `dd`, `head` and `sha256sum` are toybox's, its storage and cores are
 others, and the `iflag=count_bytes` branch of `copy_bytes` runs in the tests only behind a stand-in.
 
+## oneios-tool in the app
+
+From branch `app-oneios-tool` (2026-11-15). **Not run on the phone yet**: the app's side is tested on a PC against a
+stand-in of the tool; the screens are compiled, not opened. OneiOS's Rust tools come in the runtime package as
+`bin/oneios-tool` (OneiOS's `docs/releases.md`, "oneios-tool for the phone": why there and not in the APK). The app
+runs that file as root, **one process per flow**, `oneios-tool serve`, and the tool does the work, the checks and the
+step decisions on its own worker threads (all cores, nice 10, its own heat and battery stop); the app only starts it,
+sends requests and shows what comes back. The protocol is the tool's (OneiOS's `tools/oneios-tool/README.md`,
+"serve": one JSON object a line each way, protocol 1); `OneiosTool` (`core/model`) reads and writes those lines.
+
+| Flow (screen, where) | Root | Requests | Shown |
+|---|---|---|---|
+| **Make iOS image** (Set up iOS 27's image step: "I have the file", "Make iOS image", "How to build it"; Tools on iOS 27's page) | `begin image`, `tool work`, then `finish image <files> <format> <version> <build>` with the tool's result | `fetch` (the runtime's `lib/profiles/ios-27.0.1-iPhone18-2.toml`, `indir` `<stage>/make/inputs`, `resume`), `make-image` (`out` `image.new`, `sums_list`, `ids_list`, `work` `<stage>/make`), `tweaks` | the tool's steps, what runs and what is next, progress and time left, the space it needs and has, a heat pause, and its refusal or failure with its code |
+| **Check every file** (Tools) | `tool read` | `sums` of `runtime/` and of `image/` against the lists root wrote at staging, `strict` | each file hashed again, all of them, on all cores; a difference is the tool's `refused` `mismatch` |
+| **CPU, clocks and threads** (Hardware checks, "With oneios-tool") | `tool read` | `cpu` | the tool's report lines and its `cpu` rows |
+| **Analyse the last session**, **iOS's own log: boots**, **last boot** (Session logs, "With oneios-tool") | `tool read` | `log-list` and `log` (`file` `xnuhost`); `ioslog-boots`; `ioslog-show` (`boot` `last`), on `<stage>/data/data.img` | the tool's lines and rows |
+
+A flow stops at the first request that does not end with `ok` and shows that request's text. Make iOS image first fetches
+the IPSW's members from Apple's server by range requests (the tool's `fetch`, which works today: about 10.6 GiB into
+`<stage>/make/inputs`, each member checked against the profile's pins; tried on the Linux PC with one small member,
+and again, "already complete"). **`make-image` is not in
+the tool yet**, nor are the root tweaks (still Python: the tool's `tweaks` answers `not-ported`), `scripts/image/
+build.sh`'s order and checks, and the AEA decryption. So after the fetch Make iOS image sends `make-image` and `tweaks`, shows
+both answers under "Not done, as the tool says" (`unknown`: `this tool has no command "make-image" ...`;
+`not-ported`: `The root tweaks are not in this tool yet: ...`, the tool's own words) and stages nothing. When the
+tool has `make-image`, the `tweaks` request goes (a comment in `OneiosToolJob` says so). What the app needs from it is
+in OneiOS's `oneos/interface.md` section 9.
+
+**How a flow runs** (`OneiosToolJob`, app; `OneiosToolSession`, `core/root`):
+- On the job's own thread (never the main thread), inside `OneiosService`, the foreground service of the import,
+  which keeps the app and the CPU awake while it runs and whose notification shows the running step and its progress.
+- `status` first (it puts this build's root script in the stage), then one `su -c "<launcher of tool work|read>"`.
+  `oneios_root.sh tool` refuses without a staged runtime, when the runtime has no `bin/oneios-tool` ("get a newer
+  runtime"), when that file is not the one root hashed at staging, and (`work`) during a session; else it `exec`s
+  `nice -n 10 <stage>/runtime/bin/oneios-tool serve --stage <stage>` with `TMPDIR` `<stage>/tool`, on the app's pipe.
+  Root's refusal before the tool starts is the flow's answer; so is a tool of another protocol (`hello`'s `proto`).
+- The requests go one after the other on that one process. The screen hears of each step and end at once and of
+  progress four times a second at most.
+- **Stop** sends `{"cmd":"cancel","id":...}`: the tool stops at its next check, removes what it wrote and answers
+  `cancelled`. Without an answer in 15 s the app ends the session as below.
+- **Pause and Resume** (when the tool's `hello` lists `pause` and `resume`): Pause sends `{"cmd":"pause","id":...}`,
+  Resume `{"cmd":"resume","id":...}`; the screen shows the tool's `paused`/`resumed` and its `net` `waiting` (its words
+  and the seconds to its next try). How a request waits, retries and keeps its parts is the tool's.
+- **The network**: while a flow runs the app watches Android's default network (`registerDefaultNetworkCallback`);
+  lost, it sends `pause`, back, `resume`, unless the user paused (`OneiosToolPause`: the request is held while either
+  holds it). The screen says "No network" meanwhile.
+- **Started again after the app was ended**: the running flow is remembered (the app's preferences) until the tool has
+  answered its last request. When OneOS was ended in the middle (Android, a crash, a swipe: the tool gets the end of
+  its input and cancels, keeping the parts of a `resume` request), the tool's screen offers "Resume: <flow>", and the
+  flow's requests carry `resume` where the tool takes it (`fetch`), so the tool goes on from what it kept.
+- **Notifications**: the tool's screen and Set up iOS 27 ask for `POST_NOTIFICATIONS` once (Android 13+), as
+  Setting up does; the flow runs without its notification when it is refused.
+- **The end** (the flow's last request, a Stop that got no answer, or `OneiosService` stopping): the app closes the
+  tool's standard input; the tool cancels what runs, says `bye` and exits. When it has not ended 10 s later the app
+  runs `oneios_root.sh untool` as a root command of its own (with KernelSU the tool is root's, out of the app's
+  signals): every process whose command line holds `<stage>/runtime/bin/oneios-tool serve`, and their children four
+  levels down, get SIGTERM, then SIGKILL 2 s later. Only then does the app end its `su` (first ending it would leave
+  the tool's children to init, where `untool` could no longer tell them by their parent). A request with no line from the tool for 120 s (outside a heat pause)
+  ends the session the same way.
+
+**On the phone (S24 Ultra, KernelSU; read through, not run).** `su -c` from the app becomes root in place (KernelSU),
+so the tool, after the launcher's `exec`s, is the app's own child with the app's pipes: its standard input's end is the
+app's close, and the app's signals cannot reach it (root's `untool` can). The stage's `runtime/bin` is run from as the
+hardware checks run their tools (`check`: the same KernelSU domain, the same `shell_data_file` folder). The tool's
+lines are flushed one by one (Rust's standard output is line-buffered). `untool` was made cheap for a phone with a
+thousand processes: one `grep -l` over every `/proc/*/cmdline` instead of a `tr` per process, one pass of builtin `read`s
+over `/proc/*/stat` per level for the children, and the wait after SIGTERM looks only at the processes found; it runs
+under mksh in the tests. `OneiosService` is the import's `dataSync` foreground service, started from the screen the
+user tapped (Android 14 allows that), with the 6 h a day limit of Android 15 ending the flow (`serviceStopped`).
+
+**What the root scripts keep.** The switch, the return and every check of theirs are as before: the preflight still
+hashes the runtime and the small image files itself, `receive` still checks each imported file's size and SHA-256
+itself. The tool's `sums` is an extra, complete check (every file, the large ones too), not a replacement of the
+preflight's. The import's receive check moves to the tool's `receive` only when the import does (see "Not done
+yet").
+
+**Tests** (`./gradlew :core:model:test :core:root:testDebugUnitTest`): `OneiosToolTest` (`core:model`, 8): the
+request lines and the README's own event lines, the step marks of the tool's rule, a heat pause, pause/resume and the network's lines, the output limits.
+`OneiosToolSessionTest` (`core:root`, 13) against `src/test/resources/oneios/serve-standin.sh`, a POSIX-sh stand-in
+that speaks the protocol (start, space, step, progress, ok, refused, failed, cancelled, line, row, bye; a child
+process per request, an idle end, a mode that ignores the end of its input): steps, progress and the result; two
+requests on one process; a refusal and a failure with their codes; a cancel that ends the request and its child
+while the session goes on; the end of input during a request (cancelled, by eof); a tool that does not end, ended
+by the backstop; the idle end; a silent tool given up, but not during a heat pause, a pause or a wait for the network; Pause holding a request with no progress past the silence limit and Resume letting it finish; the user and the network holding one request together (`OneiosToolPause`); root's refusal before the tool; another protocol refused.
+After each, no process the session started is left (the `su` stand-in, the tool, the tool's children: by
+`ProcessHandle`). `OneiosToolScriptTest` (`core:root`, 4, each under every shell the machine has: sh, dash, mksh (the phone's), bash) runs the stand-in as the staged `bin/oneios-tool` through
+the launcher and `oneios_root.sh tool` in a fake root: only the file hashed at staging runs; `work` is refused in a
+session, `read` is not; and `untool` ends a tool that ignores the end of its input, and its child (Linux only:
+it reads `/proc`). `OneiosToolRealTest` (`core:root`, 1; skipped unless `ONEIOS_TOOL_SERVE` names a host build of
+OneiOS's `oneios-tool`) runs the same session against the real `serve`: `hello`, `ping`, `wait` with its steps and
+progress, `make-image` refused `unknown`, a cancel (`by` `request`), the end of input (`bye`, `eof`). It passed on
+the Linux PC against a host build of OneiOS `tool-app-progress` (PR #52, now in main) (`ONEIOS_TOOL_SERVE=... ./gradlew --no-daemon
+:core:root:testDebugUnitTest --tests '*OneiosToolRealTest*'`).
+`OneiosToolScreensTest` (`core:root`, 2) reads the full edition's manifest and sources: every iOS activity the code
+starts is declared (`OneiosToolActivity` among them), `OneiosService` is a `dataSync` foreground service (Android 14
+refuses one without a declared type), and `FOREGROUND_SERVICE_DATA_SYNC`, `POST_NOTIFICATIONS`, `ACCESS_NETWORK_STATE`
+and `WAKE_LOCK` are asked for. No emulator or Robolectric runs the screens: the build box has neither; the phone test
+plan (OneiOS's `docs/building.md` section 7) opens each one.
+
 ## Hardware checks
 
 iOS 27 (OneiOS) → **Hardware checks**: OneiOS's own phone tools, run as root **while One UI keeps running**, one row
@@ -395,6 +509,7 @@ and neither kind of session starts while the other's stage has anything mounted.
 | `control/` | the way back's own: the session's state, the baseline, xnuhost's pid and namespace as the switch recorded them, the watcher's and key readers' pids, the return's lock and guard; `bootui/` (the boot screen's status files and pids) and `bootui.log` (the switch's lines about it). Read-only in xnuhost's namespace, like the two session scripts and `bin/` |
 | `logs/` | the five sessions before the last: `xnuhost-<epoch>.log`, moved there by the next switch (the epoch is that switch's time; the file's own time is its session's last line) |
 | `checks/` | the hardware checks' own: each check's last output (`<id>.log`), the camera pictures (`camera.png`, `camera-hal.png`), the values to put back (`saved.backlight`, `saved.als`), the tools' temporary files |
+| `tool/`, `make/` | `TMPDIR` of `runtime/bin/oneios-tool serve` ("oneios-tool in the app"); Make iOS image's work folder, which the tool removes on a cancel or a failure |
 | `switch.log`, `return.log`, `return.outcome` | the switch's output; the return's, the watcher's and the key readers'; how the last return ended. `control/display.log`, `control/watchdog_feeder.log` and `control/usb.log` are the display helper's, the watchdog feeder's and the USB watcher's ("USB and adb during a session") |
 
 ## Session flow
@@ -414,7 +529,11 @@ runtime with xnuhost is staged, this is where every switch ends.**
 **Then:**
 
 1. Session folder, control folder and baseline: boot id, SELinux mode, properties, the pids of vold, keystore2,
-   surfaceflinger and servicemanager, init's mount points, the panel's brightness, and **One UI's clock caps**
+   surfaceflinger and servicemanager, init's mount points, the panel's brightness, the shmem THP mode
+   (`control/base/shmem_enabled`: the switch writes `advise` for xnuhost's 2 MiB host pages, OneiOS 8a9caf3, and the
+   return writes the old value back before gate A). The file saves only the bare mode (`never`, `advise`, ...), parsed
+   from the bracketed token of the node's annotated line; both sides compare bare modes, because writing the whole
+   `always within_size advise [never] deny force` line back is `EINVAL` (the 2026-11-16 Gate A failure and reboot), and **One UI's clock caps**
    (`control/base/clocks`: each node, One UI's value, the session's): Samsung's `cpufreq_limit`
    (`/sys/devices/system/cpu/cpufreq_limit/cpufreq_max_limit` and `cpufreq_min_limit`, `drivers/cpufreq/cpufreq_limit.c`
    of the SM8650 kernel: SSRM's one value for every cluster, a freq QoS request of its own, so `scaling_max_freq`
@@ -987,6 +1106,19 @@ interfere: different repositories, runs and releases.
 
 ## Not done yet
 
+- **oneios-tool in the app has not run on the phone** (branch `app-oneios-tool`). Unknown until it does: whether
+  KernelSU's `su` from the app runs the staged `bin/oneios-tool` (it runs the checks' tools the same way, also never
+  tried); the times of each flow on the phone (OneiOS's `docs/building.md` section 7 has the Mac's steps to measure
+  them). Waiting on the tool: `make-image` (Make iOS image is refused until then). **The import still goes through
+  root's `receive`**: the tool's `receive` (`from` a FIFO the app writes, the size and SHA-256 checked as it writes,
+  the lines of `image.new.sha256` and `.ids` as root writes them) would replace that for the image set, with the
+  app's own hash taken out; it needs a FIFO in the app's folder that root's tool reads (not tried under the phone's
+  SELinux), and the app's open of the FIFO must not wait for a tool that refused before it opened it. The
+  runtime's import stays root's: it may be what replaces the tool. **Pause, Resume and the `net` event** follow the
+  tool's README (branch `tool-download-resume`, "Downloads on a mobile network": `{"cmd":"pause","id":...}`,
+  `{"cmd":"resume","id":...}`; `paused`, `resumed`, `net` with `state`, `next`, `text`; an `error` with the id and a code such
+  as `not-pausable` for a request that is no download, shown as "The tool says"). Tested against the stand-in only: the
+  tool of that branch was not built here. A tool whose `hello` does not list `pause` and `resume` shows no Pause button.
 - **The redesigned iOS screens have not been compiled, opened or seen** (2026-11-15): Set up iOS 27, iOS 27's
   page, the Switch confirm and the switching screen were written on a box without JDK 21 or the Android SDK. The
   first build (`./gradlew test assembleFullDebug`) and a click-through on the phone are their first run; real

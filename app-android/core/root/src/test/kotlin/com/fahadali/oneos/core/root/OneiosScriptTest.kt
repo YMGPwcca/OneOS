@@ -609,6 +609,21 @@ class OneiosScriptTest {
         assertTrue(sw.contains("SM-S928*") && sw.contains("e3q") && sw.contains("SM8650"))
     }
 
+    /** The S26 Ultra may run hardware diagnostics, but the root switch must fail closed until recovery is proven. */
+    @Test
+    fun theSwitchRefusesUnverifiedPhonesBeforeAnySessionChange() {
+        val lines = code(switchScript)
+        val sw = lines.joinToString("\n")
+        assertTrue(sw.contains("SM-S928*:e3q:SM8650"))
+        assertTrue(sw.contains("SM8850 hardware diagnostics do not certify recovery"))
+        val permission = lines.indexOfFirst { it.contains("SM-S928*:e3q:SM8650") }
+        val session = lines.indexOfFirst { it.contains("=== [1/5]") }
+        assertTrue(permission > 0 && permission < session)
+        val preflight = lines.subList(permission, session).joinToString("\n")
+        assertTrue(preflight.contains("refuse \"OneiOS switch is currently limited"))
+        assertFalse(sw.contains("Going on because you asked it to."))
+    }
+
     /** Every refusal of the switch comes before its first change: nothing above "THE SESSION" stops or starts anything. */
     @Test
     fun theSwitchRefusesBeforeItChangesAnything() {
@@ -792,6 +807,47 @@ class OneiosScriptTest {
         // In a session of its own: the return ends the readers' process groups, and it came from one.
         assertTrue(f.lines("log/busybox").any { it.startsWith("setsid ") && it.endsWith("oneios_return.sh keys-direct") })
         f.assertInPlace()
+    }
+
+    /** The shmem THP mode the switch wrote (advise, for the 2 MiB host pages) comes back at the return. The node
+     *  carries every mode with the active one in brackets ("always within_size [advise] deny force"): the base keeps
+     *  the bare mode, and the return compares and restores the bare mode (2026-11-16: the whole line written back was
+     *  EINVAL and that rebooted the phone out of Gate A). */
+    @Test
+    fun shmemEnabledComesBackAtTheReturn() = each { f ->
+        f.phone()
+        File(f.root, "sys/kernel/mm/transparent_hugepage").mkdirs()
+        File(f.root, "sys/kernel/mm/transparent_hugepage/shmem_enabled").writeText("always within_size [advise] deny force\n")
+        File(f.control, "base/shmem_enabled").writeText("never\n")
+        f.returns()
+        f.assertInPlace()
+        assertEquals("never\n", f.file("sys/kernel/mm/transparent_hugepage/shmem_enabled").readText())
+        assertFalse(File(f.control, "base/shmem_enabled").exists())
+    }
+
+    /** The node is already at the mode the switch found (bracketed, in the annotated line): nothing is written. */
+    @Test
+    fun shmemAlreadyBackIsNotWrittenAgain() = each { f ->
+        f.phone()
+        File(f.root, "sys/kernel/mm/transparent_hugepage").mkdirs()
+        val line = "always within_size advise [never] deny force\n"
+        File(f.root, "sys/kernel/mm/transparent_hugepage/shmem_enabled").writeText(line)
+        File(f.control, "base/shmem_enabled").writeText("never\n")
+        f.returns()
+        f.assertInPlace()
+        assertEquals(line, f.file("sys/kernel/mm/transparent_hugepage/shmem_enabled").readText())
+        assertFalse(File(f.control, "base/shmem_enabled").exists())
+    }
+
+    /** The switch never wrote (no value in the base): the return touches nothing. */
+    @Test
+    fun shmemLeftAloneWhenTheSwitchNeverWrote() = each { f ->
+        f.phone()
+        File(f.root, "sys/kernel/mm/transparent_hugepage").mkdirs()
+        File(f.root, "sys/kernel/mm/transparent_hugepage/shmem_enabled").writeText("always within_size advise [never] deny force\n")
+        f.returns()
+        f.assertInPlace()
+        assertEquals("always within_size advise [never] deny force\n", f.file("sys/kernel/mm/transparent_hugepage/shmem_enabled").readText())
     }
 
     private fun watcher(f: Fake, max: Int = 600): Process {
