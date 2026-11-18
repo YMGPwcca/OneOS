@@ -459,11 +459,38 @@ any package set. The full edition links `com.github.luben:zstd-jni` (the `.tar.z
 Requirements: JDK 21 installed (the build uses a JDK 21 toolchain and never
 downloads one; Gradle itself may run on JDK 21 or 25), Android SDK with
 platform `android-37` (`ANDROID_HOME`, or `sdk.dir` in `local.properties`),
-internet to Google Maven and Maven Central. No GitHub token is needed. Build
+internet to Google Maven, Maven Central **and Tribalfs GitHub Packages**.
+The pinned SESL9 and `io.github.tribalfs:oneui-design` libraries require a
+GitHub **personal access token (classic)** with `read:packages` (including
+public packages). Gradle reads `GH_PACKAGES_USER`/`GH_PACKAGES_TOKEN` from
+the environment first, then `~/.config/twidget/github.properties` keys
+`ghUsername`/`ghAccessToken`. Never commit a token or paste one into logs.
+The package registries are `tribalfs/oneui-design`, `tribalfs/sesl-androidx`,
+and `tribalfs/sesl-material-components-android`. An HTTP 401 means credentials
+or package access must be fixed, not the Java toolchain. Build
 2 also needs the server's overlay sets in `../out/overlays`,
 `../out/overlays_x9u` and (0.3.7) `../out/overlays_pixel_yogi` (out/ is not in
 git; 0.3.3-0.3.6 also needed `../out/overlays_x9u_in`) and `dash` or
 `busybox` for the root script's tests.
+
+For a development/diagnostic build, build the guest manager **first**
+from the OneOS repository root; use `--debug` without the private release
+signing key:
+
+```sh
+# From ~/projects/OneiOS/app, with GH_PACKAGES_USER and GH_PACKAGES_TOKEN set:
+./scripts/build-guest-manager.sh --debug
+cd app-android
+./gradlew :core:model:test :core:safety:test :core:root:testDebugUnitTest :app:assembleFullDebug
+```
+
+The resulting app APK is
+`app-android/app/build/outputs/apk/full/debug/app-full-debug.apk`.
+An APK built here does **not** enable an SM8850 OneiOS switch: its
+device-specific recovery guard stays fail-closed.
+
+Older/release build examples, which require additional signing and package
+prerequisites:
 
 ```sh
 cd app-android
