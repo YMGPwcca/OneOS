@@ -63,7 +63,8 @@ object OneiosSystem {
 
     /**
      * Switching remains blocked on diagnostics-only phones, regardless of the experimental tick.
-     * The S24 Ultra still requires acknowledgement before each experimental switch.\n     * The additional upstream not-this-phone acknowledgement never relaxes the fail-closed profile gate.
+     * The S24 Ultra still requires acknowledgement before each experimental switch.
+     * The additional upstream not-this-phone acknowledgement never relaxes the fail-closed profile gate.
      */
     fun gate(profile: PhoneProfile?, ticked: Boolean, notThisPhoneTicked: Boolean = false): Finding = when {
         !offeredOn(profile) -> Finding(
