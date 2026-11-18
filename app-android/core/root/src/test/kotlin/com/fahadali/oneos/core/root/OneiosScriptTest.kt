@@ -617,9 +617,10 @@ class OneiosScriptTest {
         assertTrue(sw.contains("SM-S928*:e3q:SM8650"))
         assertTrue(sw.contains("SM8850 hardware diagnostics do not certify recovery"))
         val permission = lines.indexOfFirst { it.contains("SM-S928*:e3q:SM8650") }
-        val stageCheck = lines.indexOfFirst { it.contains("# The stage first:") }
         val session = lines.indexOfFirst { it.contains("=== [1/5]") }
-        assertTrue(permission > 0 && permission < stageCheck && stageCheck < session)
+        assertTrue(permission > 0 && permission < session)
+        val preflight = lines.subList(permission, session).joinToString("\n")
+        assertTrue(preflight.contains("refuse \"OneiOS switch is currently limited"))
         assertFalse(sw.contains("Going on because you asked it to."))
     }
 
