@@ -609,12 +609,18 @@ class OneiosScriptTest {
         assertTrue(sw.contains("SM-S928*") && sw.contains("e3q") && sw.contains("SM8650"))
     }
 
-    /** The owner (2026-11-16): another phone may try it, told what to expect — a warning, not a refusal. */
+    /** The S26 Ultra may run hardware diagnostics, but the root switch must fail closed until recovery is proven. */
     @Test
-    fun theSwitchWarnsOtherPhonesInsteadOfRefusingThem() {
-        val sw = code(switchScript).joinToString("\n")
-        assertTrue(sw.contains("WARNING: OneiOS is mainly tested and working on the Galaxy S24 Ultra 5G"))
-        assertFalse(sw.contains("refuse \"iOS runs on the Galaxy S24 Ultra"))
+    fun theSwitchRefusesUnverifiedPhonesBeforeAnySessionChange() {
+        val lines = code(switchScript)
+        val sw = lines.joinToString("\n")
+        assertTrue(sw.contains("SM-S928*:e3q:SM8650"))
+        assertTrue(sw.contains("SM8850 hardware diagnostics do not certify recovery"))
+        val permission = lines.indexOfFirst { it.contains("SM-S928*:e3q:SM8650") }
+        val stageCheck = lines.indexOfFirst { it.contains("# The stage first:") }
+        val session = lines.indexOfFirst { it.contains("=== [1/5]") }
+        assertTrue(permission > 0 && permission < stageCheck && stageCheck < session)
+        assertFalse(sw.contains("Going on because you asked it to."))
     }
 
     /** Every refusal of the switch comes before its first change: nothing above "THE SESSION" stops or starts anything. */
