@@ -1,5 +1,15 @@
 # iOS 27 (OneiOS)
 
+> **SM8850 fork safety override (2026-11-18).** This fork's `feat/oneios-sm8850-m3q`
+> branch exposes OneiOS hardware diagnostics on Galaxy S26 Ultra
+> (SM-S948*/m3q/SM8850), but **does not authorize an iOS switch** there.
+> `OneiosSystem.canSwitchOn`, the app flow and `oneios_switch.sh` all
+> refuse an unverified device. Upstream's broader "not this phone"
+> acknowledgement is not permission to bypass recovery gates. The S24 Ultra
+> remains the only switch-allowlisted profile until independent SM8850
+> recovery acceptance is documented in `docs/SM8850_PORT.md`.
+>
+
 A system kind of its own in this fork (`akshaynexus/OneOS`, branch `oneios`): Apple's iOS 27 as a OneOS-style
 session on the Galaxy S24 Ultra. One UI's framework stops, and instead of another Android framework the session
 starts **xnuhost**, OneiOS's source-built XNU running as a process on One UI's kernel, with an iOS image set the
