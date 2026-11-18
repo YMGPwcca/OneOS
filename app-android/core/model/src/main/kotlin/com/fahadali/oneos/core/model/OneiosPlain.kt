@@ -138,6 +138,13 @@ object OneiosPlain {
             )
 
             // The phone and root (the preflight's first checks).
+            // The SM8850 fork's root-level fail-closed switch gate uses "S24 Ultra",
+            // without "Galaxy": this must remain a PHONE refusal, never a generic error.
+            p.startsWith("oneios switch is currently limited to the s24 ultra") -> m(
+                "iOS switching isn't enabled",
+                "Only the Galaxy S24 Ultra can switch currently. Device-specific One UI recovery has not been verified for this phone.",
+                OneiosFix.NONE, OneiosPart.PHONE,
+            )
             "galaxy s24 ultra" in p -> m(
                 "iOS 27 isn't for this phone", "It runs on the Galaxy S24 Ultra (SM-S928) only.", OneiosFix.NONE, OneiosPart.PHONE,
             )

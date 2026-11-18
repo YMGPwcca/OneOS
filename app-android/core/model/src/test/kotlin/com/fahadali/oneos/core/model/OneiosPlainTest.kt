@@ -71,6 +71,26 @@ class OneiosPlainTest {
     }
 
     @Test
+    fun sm8850RootSwitchRefusalIsExplainedAsAnUnverifiedPhone() {
+        // Root's own switch script refuses before stage_checks or any framework change.
+        // This text intentionally lacks "Galaxy" so a legacy substring match misses it.
+        val rootRefusal = "OneiOS switch is currently limited to the S24 Ultra " +
+            "(SM-S928/e3q/SM8650); this phone is SM-S948B/m3q/SM8850; " +
+            "SM8850 hardware diagnostics do not certify recovery"
+        for (kind in listOf(null, OneiosKind.RUNTIME, OneiosKind.IMAGE)) {
+            val message = of("PREFLIGHT REFUSED: $rootRefusal", kind)
+            assertEquals("iOS switching isn't enabled", message.title)
+            assertEquals(OneiosPart.PHONE, message.part)
+            assertEquals(OneiosFix.NONE, message.fix)
+            assertEquals(Level.BLOCK, message.level)
+            assertEquals(rootRefusal, message.detail)
+            assertPlain(message)
+        }
+        // Do not accidentally classify other unknown errors as device refusals.
+        assertEquals("Couldn't finish", of("unexpected SM8850 diagnostic error").title)
+    }
+
+    @Test
     fun theFixIsTheOneThatHelps() {
         assertEquals(OneiosFix.GET_RUNTIME, of("runtime.sha256 is missing or not root's: stage the runtime again").fix)
         assertEquals(OneiosFix.IMPORT_IMAGE, of("image/ holds files its list does not name (x ): stage the image again").fix)
