@@ -988,21 +988,16 @@ fi
 [ "$(id -u 2>/dev/null)" = 0 ] || refuse "not running as root"
 command -v sha256sum >/dev/null 2>&1 || refuse "no sha256sum"
 
-# Mainly tested on: the Galaxy S24 Ultra (docs/oneios.md, "Scope"): e3q on an
-# SM8650, the SM-S928 models. The owner (2026-11-16): another phone may try it,
-# told what to expect; nothing here refuses one any more.
+# SM8850's One UI 9 recovery gates have not been validated. This is a
+# fail-closed root permission boundary, separate from app-side diagnostics:
+# even an experimental or not-this-phone acknowledgement cannot override it.
 P_MODEL=$(getprop ro.product.model)
 P_DEVICE=$(getprop ro.product.device)
 P_SOC=$(getprop ro.soc.model)
-S24U=0
-case "$P_MODEL" in SM-S928*) ;; *) S24U=1 ;; esac
-[ "$P_DEVICE" = e3q ] && [ "$P_SOC" = SM8650 ] || S24U=1
-if [ "$S24U" = 1 ]; then
-    echo "WARNING: OneiOS is mainly tested and working on the Galaxy S24 Ultra 5G (an e3q on an SM8650;"
-    echo "WARNING: the SM-S928 models). This phone is ${P_MODEL:-unknown} (${P_DEVICE:-?}, ${P_SOC:-?}): on it the"
-    echo "WARNING: code may be unstable, miss pieces, or not come back to One UI. Samsung devices are the"
-    echo "WARNING: ones it is written for. Going on because you asked it to."
-fi
+case "$P_MODEL:$P_DEVICE:$P_SOC" in
+    SM-S928*:e3q:SM8650) ;;
+    *) refuse "OneiOS switch is currently limited to the S24 Ultra (SM-S928/e3q/SM8650); this phone is ${P_MODEL:-unknown}/${P_DEVICE:-unknown}/${P_SOC:-unknown}; SM8850 hardware diagnostics do not certify recovery" ;;
+esac
 
 # The stage first: without a runtime that has xnuhost, that one line is the answer.
 stage_checks
