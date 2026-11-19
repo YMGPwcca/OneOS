@@ -61,6 +61,15 @@ S="$T/data/local/tmp/oneios"
 # filesystem (the source of a bind from it, mountinfo's fourth field).
 SM=/data/local/tmp/oneios
 SRC=/local/tmp/oneios
+FRAMEWORK=0
+case "$0" in
+    /data/adb/oneios-m3q-framework/oneios_return.sh)
+        FRAMEWORK=1
+        SM=/data/adb/oneios-m3q-framework
+        SRC=/adb/oneios-m3q-framework
+        S=$SM ;;
+esac
+if [ -n "$T" ] && [ "${ONEIOS_TEST_FRAMEWORK:-}" = 1 ]; then FRAMEWORK=1; fi
 # The way back's own folder (oneios_switch.sh): the state, the baseline, the
 # pids. Read-only in xnuhost's namespace.
 CTL=$S/control
@@ -176,6 +185,31 @@ restore_shmem() {
     [ "$shmem_now" = "$shmem_old" ] || say "shmem_enabled back: $shmem_old"
 }
 
+restore_map_count() {
+    [ -e "$BASE/max_map_count" ] || return 0
+    read -r original temporary extra < "$BASE/max_map_count" || failsafe "cannot read max_map_count baseline"
+    case "$original:$temporary" in :*|*:|*[!0-9:]*) failsafe "invalid max_map_count baseline" ;; esac
+    [ -z "$extra" ] && [ "$original" -gt 0 ] && [ "$temporary" -ge "$original" ] ||
+        failsafe "invalid max_map_count baseline"
+    node="$P/sys/vm/max_map_count"
+    current=$(cat "$node" 2>/dev/null) || failsafe "cannot read vm.max_map_count"
+    if [ "$current" != "$original" ]; then
+        [ "$current" = "$temporary" ] || failsafe "vm.max_map_count changed outside the session"
+        echo "$original" > "$node" && [ "$(cat "$node")" = "$original" ] ||
+            failsafe "cannot restore vm.max_map_count to $original"
+    fi
+    say "vm.max_map_count restored to $original"
+}
+
+framework_services_intact() {
+    [ -s "$BASE/framework_services" ] || failsafe "missing protected service baseline"
+    while read -r svc saved_pid; do
+        [ "$(getprop "init.svc.$svc")" = running ] &&
+            [ "$(getprop "init.svc_debug_pid.$svc")" = "$saved_pid" ] &&
+            [ -d "$P/$saved_pid" ] || failsafe "protected service $svc did not keep PID $saved_pid"
+    done < "$BASE/framework_services"
+}
+
 base_prop() { sed -n "s/^\[$1\]: \[\(.*\)\]\$/\1/p" "$BASE/props" 2>/dev/null | head -n 1; }
 base_has() { grep -q "^\[$1\]: " "$BASE/props" 2>/dev/null; }
 # A non-persist prop back to its value at the switch, in memory only
@@ -202,7 +236,117 @@ end_helper() { # <pid file> <mode word>
 }
 # End the feeder before init can fork any framework that needs to open the
 # watchdog. A returning session with a failed handoff cannot certify recovery.
+wd_now() {
+    read -r wd_uptime _ < "$P/uptime" || return 1
+    case "$wd_uptime" in *.[0-9][0-9]) ;; *) return 1 ;; esac
+    wd_sec=${wd_uptime%.*}
+    case "$wd_sec" in ''|0[0-9]*|*[!0-9]*|??????????*) return 1 ;; esac
+    printf '%s\n' "$wd_sec"
+}
+
+wd_process_birth() {
+    sed 's/^.*) //' "$P/$1/stat" 2>/dev/null | awk '$1 != "Z" && $1 != "X" { print $20; exit }'
+}
+
+wd_handback_expired() {
+    [ -e "$CTL/watchdog.handback" ] || return 1
+    if ! read -r hb_gen hb_until hb_extra 2>/dev/null < "$CTL/watchdog.handback"; then
+        [ -e "$CTL/watchdog.handback" ]
+        return
+    fi
+    case "$hb_until" in ''|0[0-9]*|*[!0-9]*|??????????*) return 0 ;; esac
+    [ -z "$hb_extra" ] && [ "$hb_gen" = "$(cat "$CTL/watchdog.generation" 2>/dev/null)" ] &&
+        hb_now=$(wd_now) && [ "$hb_now" -lt "$hb_until" ] || return 0
+    return 1
+}
+
+framework_watchdog_loaded() {
+    wd_target=$(cat "$CTL/watchdog.target") || return 1
+    wd_node=${wd_target%% *}
+    case "${wd_node#watchdog}" in ''|*[!0-9]*) return 1 ;; esac
+    case "$wd_node" in watchdog*) ;; *) return 1 ;; esac
+    wd_attr="$T/sys/class/watchdog/$wd_node"
+    wd_gen=$(cat "$CTL/watchdog.generation") && [ -n "$wd_gen" ] &&
+        read -r wd_mode wd_timeout wd_budget wd_binary < "$CTL/watchdog.plan" || return 1
+    case "$wd_budget" in ''|*[!0-9]*) return 1 ;; esac
+    [ "$wd_budget" -ge 5 ] && [ "$wd_budget" -le 30 ] &&
+        { [ "$wd_mode" = 0 ] || [ "$wd_mode" = 1 ]; }
+}
+
+framework_watchdog_handoff() {
+    framework_watchdog_loaded || failsafe "missing qualified watchdog plan at handback"
+    wd_proof=$($SH "$S/oneios_switch.sh" --watchdog-health) ||
+        failsafe "native supervisor has no fresh heartbeat before handback"
+    wd_pid=${wd_proof%% *}
+    wd_birth=${wd_proof#* }
+    wd_begin=$(wd_now) || failsafe "monotonic clock unavailable during handback"
+    printf '%s %s\n' "$wd_gen" "$((wd_begin + wd_budget))" > "$CTL/watchdog.handback.tmp" &&
+        mv -f "$CTL/watchdog.handback.tmp" "$CTL/watchdog.handback" ||
+        failsafe "could not arm the handback guard"
+    true > "$CTL/feeder.off" || failsafe "could not request native supervisor release"
+    while :; do
+        [ ! -e "$CTL/feeder.failed" ] || failsafe "native supervisor failed during handback"
+        wd_handback_expired && failsafe "watchdog handback timed out before descriptor closed"
+        if [ -s "$CTL/feeder.released" ] && [ "$(wd_process_birth "$wd_pid")" != "$wd_birth" ]; then
+            break
+        fi
+        sleep 0.2
+    done
+    read -r ack_gen ack_pid ack_birth ack_mode ack_at ack_extra < "$CTL/feeder.released" ||
+        failsafe "could not read descriptor release receipt"
+    case "$ack_at" in ''|0[0-9]*|*[!0-9]*|??????????*) failsafe "invalid descriptor release time" ;; esac
+    [ -z "$ack_extra" ] && [ "$ack_gen $ack_pid $ack_birth $ack_mode" = "$wd_gen $wd_pid $wd_birth $wd_mode" ] &&
+        [ "$(cat "$CTL/watchdog.phase")" = "$wd_gen RETURN_PENDING" ] &&
+        [ "$ack_at" -ge "$wd_begin" ] && [ "$ack_at" -le "$(wd_now)" ] ||
+        failsafe "stale or mismatched descriptor release receipt"
+    case "$(cat "$wd_attr/nowayout" 2>/dev/null):$wd_mode" in 0:0|N:0|1:1|Y:1) ;; *)
+        failsafe "watchdog nowayout changed during handback" ;; esac
+    wd_state=$(cat "$wd_attr/state" 2>/dev/null)
+    if [ "$wd_mode" = 0 ]; then
+        [ "$wd_state" = inactive ] || failsafe "magic close did not stop the qualified watchdog"
+    else
+        wd_left=$(cat "$wd_attr/timeleft" 2>/dev/null)
+        [ "$wd_state" = active ] && [ "${wd_left:-0}" -ge "$((wd_budget + 15))" ] 2>/dev/null ||
+            failsafe "armed watchdog lacks verified handback time remaining"
+    fi
+    say "RETURN_PENDING: native descriptor closed before zygote start, nowayout=$wd_mode state=$wd_state uptime=$ack_at"
+}
+
+framework_watchdog_reacquire() {
+    new_owner="" prior_left=""
+    old_owner=$(cat "$CTL/watchdog.owner") || failsafe "original watchdog owner is missing"
+    while ! wd_handback_expired; do
+        candidate=$(pidof system_server 2>/dev/null)
+        case "$candidate" in ''|0|1|*[!0-9]*) candidate="" ;; esac
+        birth=""
+        [ -z "$candidate" ] || birth=$(wd_process_birth "$candidate")
+        if [ -n "$birth" ] && [ "$candidate" != "$old_owner" ] &&
+           [ "$(timeout 2 $SH "$S/oneios_switch.sh" --watchdog-probe 2>/dev/null)" = "$wd_target" ] &&
+           [ "$(pidof system_server)" = "$candidate" ] && [ "$(wd_process_birth "$candidate")" = "$birth" ]; then
+            sample=$(cat "$wd_attr/timeleft" 2>/dev/null)
+            case "$sample" in ''|*[!0-9]*) sample="" ;; esac
+            if [ -n "$sample" ] && [ "$sample" -le "$wd_timeout" ] &&
+               [ "$new_owner" = "$candidate:$birth" ] && [ -n "$prior_left" ] && [ "$sample" -gt "$prior_left" ]; then
+                wd_handback_expired && break
+                printf '%s FRAMEWORK_REACQUIRED\n' "$wd_gen" > "$CTL/watchdog.phase" &&
+                    rm -f "$CTL/watchdog.handback" || failsafe "could not complete handback record"
+                say "FRAMEWORK_REACQUIRED: system_server $candidate timeleft $prior_left -> $sample"
+                return 0
+            fi
+            new_owner="$candidate:$birth"; prior_left="$sample"
+        else
+            new_owner=""; prior_left=""
+        fi
+        sleep 1
+    done
+    failsafe "watchdog handback timed out waiting for the new framework's first observed keepalive"
+}
+
 watchdog_handoff() {
+    if [ "$FRAMEWORK" = 1 ] && [ -f "$CTL/watchdog.target" ]; then
+        framework_watchdog_handoff
+        return
+    fi
     wd_birth=""
     if [ -f "$CTL/watchdog.target" ]; then
         wd_proof=$($SH "$S/oneios_switch.sh" --watchdog-health) ||
@@ -358,6 +502,14 @@ if [ "$WHO" = --guard ]; then
     t=0 last="" in=0
     while [ $t -lt $GUARD_MAX ]; do
         [ "$(cat "$CTL/return.guard" 2>/dev/null)" = "$tok" ] || exit 0
+        if [ "$FRAMEWORK" = 1 ]; then
+            if wd_handback_expired; then
+                failsafe "independent guard saw watchdog handback timeout"
+            fi
+            if [ -f "$CTL/feeder.failed" ] && [ -f "$CTL/stopped" ]; then
+                failsafe "independent guard saw native watchdog supervisor failure"
+            fi
+        fi
         # The session watcher yields once a return owns the session. Still
         # record lost progress before handoff, while the existing step guard
         # bounds a return that is stuck. The normal close ends supervision.
@@ -391,7 +543,7 @@ if [ "$WHO" = --usb-restore ]; then
 fi
 
 # A delayed watcher from a previous generation must leave this session alone.
-if [ "$WHO" = watcher ] && [ -n "$2" ] &&
+if { [ "$WHO" = watcher ] || [ "$WHO" = framework-deadline ]; } && [ -n "$2" ] &&
    [ "$(cat "$CTL/watchdog.generation" 2>/dev/null)" != "$2" ]; then
     exit 0
 fi
@@ -420,7 +572,7 @@ case "$(cat "$CTL/state" 2>/dev/null)" in
         fi ;;
     '')
         case "$WHO" in
-            watcher|keys-direct)
+            watcher|keys-direct|framework-deadline)
                 [ "$(getprop init.svc.zygote)" = running ] || pidof system_server >/dev/null 2>&1 ||
                     failsafe "the session's state cannot be read ($CTL/state) and One UI's framework is not running" ;;
         esac
@@ -630,11 +782,12 @@ fi
 [ -z "$CG" ] || rmdir "$CG" 2>/dev/null || say "the session's cgroup $CG is empty but could not be removed (logged only)"
 early=0
 if [ ! -e "$CTL/stopped" ] && ! framework_down; then early=1; fi
-if [ "$early" = 0 ] || [ -e "$BASE/shmem_enabled" ]; then
+if [ "$early" = 0 ] || [ -e "$BASE/shmem_enabled" ] || [ -e "$BASE/max_map_count" ]; then
     saved_boot=$(cat "$BASE/boot_id" 2>/dev/null)
     [ -n "$saved_boot" ] || failsafe "no baseline of the switch ($BASE)"
     [ "$saved_boot" = "$(cat "$P/sys/kernel/random/boot_id" 2>/dev/null)" ] || failsafe "the baseline is another boot's"
 fi
+[ "$FRAMEWORK" = 0 ] || restore_map_count
 # The stage, in every process's mount table and not only init's (OneOS run 45:
 # another namespace kept its own copy of a stage mount). By mount point or by
 # source. Nothing is unmounted here: a namespace that still has the stage as
@@ -669,8 +822,10 @@ while read -r name pids; do
     now=$(pidof "$name" 2>/dev/null | tr ' ' ',')
     if [ "$name" = surfaceflinger ]; then
         SF_BASE=$pids
-        [ "$now" = "$pids" ] || say "surfaceflinger is ${now:-not running} now, was $pids at the switch (it is restarted below)"
-        continue
+        if [ "$FRAMEWORK" = 0 ]; then
+            [ "$now" = "$pids" ] || say "surfaceflinger is ${now:-not running} now, was $pids at the switch (it is restarted below)"
+            continue
+        fi
     fi
     [ "$now" = "$pids" ] || failsafe "One UI's $name is ${now:-not running} now, was $pids at the switch"
 done < "$BASE/pids"
@@ -728,6 +883,12 @@ fi
 # the old display state is trusted: the composer is restarted, surfaceflinger
 # with it, and the boot animation covers One UI's start. Each must come back,
 # or the phone reboots.
+if [ "$FRAMEWORK" = 1 ]; then
+    framework_services_intact
+    wait_found android.hardware.graphics.composer3.IComposer/default 5 ||
+        failsafe "the existing composer is no longer registered"
+    say "display and vendor services kept their original PIDs"
+else
 COMPOSER_SVC=""
 for c in vendor.qti.hardware.display.composer vendor.hwcomposer-3; do
     [ -n "$(getprop init.svc.$c)" ] && { COMPOSER_SVC=$c; break; }
@@ -797,6 +958,7 @@ for svc in perfmond media.tuner; do
     [ "$(base_prop init.svc.$svc)" = running ] && setprop ctl.restart $svc
 done
 say "audioserver, cameraserver, media and wificond restarted"
+fi
 
 # Everything One UI's framework waits for, with nothing of the session left.
 left=$(session_left)
@@ -808,12 +970,18 @@ say "Gate B: display, audio and One UI's services up, SELinux $(getenforce 2>/de
 
 step "[4/5] Starting One UI in place" 45
 # The USB gadget and adbd as One UI left them, before its UsbDeviceManager starts.
-usb_restore
+[ "$FRAMEWORK" = 1 ] || usb_restore
 # zygote's onrestart by hand: abort the FUSE connections the old framework left.
 timeout 10 vdc volume abort_fuse >/dev/null 2>&1
 watchdog_handoff
 # One UI's zygote_next ran through the session with the old framework's
 # children: a fresh one, as a boot gives (return_to_oneui.sh).
+if [ "$FRAMEWORK" = 1 ]; then
+    if [ "$(base_prop init.svc.zygote_next)" = running ]; then
+        setprop ctl.start zygote_next
+    fi
+    setprop ctl.start zygote
+else
 if [ -n "$(pidof zygote_next 2>/dev/null)" ] && [ "$(base_prop init.svc.zygote_next)" = running ]; then
     setprop ctl.restart zygote_next
 fi
@@ -823,6 +991,7 @@ setprop ctl.restart netd
 n=0
 while [ $n -lt 20 ] && [ "$(getprop init.svc.zygote)" != running ]; do sleep 0.5; n=$((n + 1)); done
 [ "$(getprop init.svc.zygote)" = running ] || setprop ctl.start zygote
+fi
 if [ "$(base_prop init.svc.zygote_secondary)" = running ] && [ "$(getprop init.svc.zygote_secondary)" != running ]; then
     setprop ctl.start zygote_secondary
     say "One UI's zygote_secondary started"
@@ -831,6 +1000,9 @@ n=0
 while [ $n -lt 20 ] && [ "$(getprop init.svc.zygote)" != running ]; do sleep 0.5; n=$((n + 1)); done
 [ "$(getprop init.svc.zygote)" = running ] || failsafe "One UI's zygote did not start ($(getprop init.svc.zygote))"
 say "One UI's zygote started"
+if [ "$FRAMEWORK" = 1 ] && [ -f "$CTL/watchdog.target" ]; then
+    framework_watchdog_reacquire
+fi
 
 step "[5/5] Gate C: One UI's system_server" 290
 # By the clock, not by counting rounds: one round's "am" alone takes a second.
@@ -865,6 +1037,38 @@ if [ -f "$CTL/watchdog.target" ]; then
     [ -n "$wd_expected" ] && [ "$wd_current" = "$wd_expected" ] ||
         failsafe "system_server did not reacquire the watchdog"
     say "watchdog ownership confirmed on the returned framework ($wd_current)"
+fi
+if [ "$FRAMEWORK" = 1 ]; then
+    framework_services_intact
+    [ "$(base_prop init.svc.zygote_next)" != running ] || [ "$(getprop init.svc.zygote_next)" = running ] ||
+        failsafe "zygote_next did not return"
+    for input_service in inputflinger input; do
+        [ "$(timeout 4 dumpsys --pid "$input_service" 2>/dev/null)" = "$ss" ] ||
+            failsafe "the restored system_server does not provide $input_service"
+    done
+    timeout 5 dumpsys input > "$CTL/input-after.txt" 2>&1 &&
+        grep -q 'Input Reader State' "$CTL/input-after.txt" &&
+        grep -q 'Input Dispatcher State' "$CTL/input-after.txt" &&
+        grep -q 'sec_touchscreen' "$CTL/input-after.txt" ||
+        failsafe "the restored input reader or dispatcher did not report the touchscreen"
+    timeout 5 input keyevent KEYCODE_SHIFT_LEFT >/dev/null 2>&1 ||
+        failsafe "the restored input service did not accept a test key"
+    say "restored input and inputflinger owned by system_server $ss, touchscreen reported and test key accepted"
+    if [ -s "$CTL/framework.elapsed" ] && [ "$(cat "$CTL/framework.elapsed")" = "$(cat "$S/session/return.request" 2>/dev/null)" ]; then
+        case "$(cat "$CTL/framework.mode" 2>/dev/null)" in
+            smoke)
+                echo "smoke complete" > "$CTL/framework.result" || failsafe "could not record smoke result"
+                cat "$BASE/boot_id" > "$S/smoke.accepted" || failsafe "could not save smoke admission" ;;
+            run)
+                if grep -Fq 'locked (mlock: the host cannot swap it)' "$S/session/xnuhost.log" &&
+                    grep -q 'first frame posted' "$CTL/display.log" &&
+                    [ -s "$CTL/captures/frame-0.png" ] && [ -e "$S/session/ready" ]; then
+                    echo "run complete" > "$CTL/framework.result"
+                else
+                    echo "run evidence incomplete" > "$CTL/framework.result"
+                fi ;;
+        esac
+    fi
 fi
 echo "inplace $(date +%s) $(cat "$P/sys/kernel/random/boot_id" 2>/dev/null)" > "$S/return.outcome"
 finished

@@ -662,15 +662,19 @@ class OneiosScriptTest {
         val after = lines.subList(session, lines.size).joinToString("\n")
         assertFalse("a refusal after the first change", Regex("""(^|\s)refuse "(?!\${'$'}SESSION is a symlink|\${'$'}CTL is a symlink|could not make)""").containsMatchIn(after))
         // The way back is armed before One UI's zygote stops.
-        assertTrue(after.indexOf("--watch") in 0 until after.indexOf("setprop ctl.stop zygote"))
-        assertTrue(after.indexOf("--keys") in 0 until after.indexOf("setprop ctl.stop zygote"))
+        assertTrue(after.indexOf("--watch") in 0 until after.indexOf("if ! stop_android_framework; then"))
+        assertTrue(after.indexOf("--keys") in 0 until after.indexOf("if ! stop_android_framework; then"))
         // The return starts One UI's zygote only after its checks, and reboots when one fails.
         val ret = code(returnScript).joinToString("\n")
         assertTrue(ret.indexOf("Gate A") in 0 until ret.indexOf("setprop ctl.start zygote"))
         assertTrue(ret.contains("failsafe \"processes still in the session's namespace"))
         assertTrue(ret.contains("setprop sys.powerctl \"reboot,\$1\""))
-        // An unmarked stop can return after cleanup and shmem restoration, before service restarts.
-        assertTrue(after.indexOf("\"\$CTL/stopped\"") in 0 until after.indexOf("setprop ctl.stop zygote"))
+        // The helper guards the experimental stop and records the stop before making any init request.
+        val stop = lines.joinToString("\n").substringAfter("stop_android_framework() {").substringBefore("framework_probe() {")
+        val mark = stop.indexOf("> \"\$CTL/stopped\"")
+        assertTrue(stop.indexOf("framework_recovery_ready || return 1") in 0 until mark)
+        assertTrue(mark in 0 until stop.indexOf("setprop ctl.stop zygote"))
+        // An unmarked session can return after cleanup and shmem restoration, before service restarts.
         val unmarked = ret.indexOf("if [ ! -e \"\$CTL/stopped\" ] && ! framework_down; then")
         val early = ret.indexOf("if [ \"\$early\" = 1 ]; then", unmarked)
         val restore = ret.indexOf("restore_shmem", early)
@@ -1266,14 +1270,13 @@ class OneiosScriptTest {
         val saveShmem = sw.indexOf("mv -f \"\$B/shmem_enabled.tmp\" \"\$B/shmem_enabled\"", inside)
         val setShmem = sw.indexOf("echo advise 2>/dev/null > \"\$SHMEM_EN\"", saveShmem)
         val afterShmem = sw.indexOf(cancel, setShmem)
-        val mark = sw.indexOf("echo \"\$(date +%s)\" > \"\$CTL/stopped\"", afterShmem)
-        val stop = sw.indexOf("setprop ctl.stop zygote", mark)
-        val unlock = sw.indexOf("\nrelease_stop_lock", stop)
+        val stop = sw.indexOf("if ! stop_android_framework; then", afterShmem)
+        val unlock = sw.indexOf("\n    release_stop_lock\n    clocks_tops", stop)
         val step4 = sw.indexOf("return_asked && end_for_return \"xnuhost was started\"", unlock)
         val start = sw.indexOf("=== [4/5]", step4)
         val failed = sw.indexOf("xnuhost did not start after", start)
         val back = sw.indexOf("\$SH \"\$STAGE/oneios_return.sh\" switch-failed", failed)
-        val order = listOf(arm, before, lock, owner, inside, saveShmem, setShmem, afterShmem, mark, stop, unlock, step4, start, failed, back)
+        val order = listOf(arm, before, lock, owner, inside, saveShmem, setShmem, afterShmem, stop, unlock, step4, start, failed, back)
         assertTrue(order.toString(), order.all { it >= 0 } && order == order.sorted())
         // The return keeps the lock and decides only after it has it.
         val rt = code(returnScript).joinToString("\n")
@@ -1953,7 +1956,7 @@ class OneiosScriptTest {
         assertTrue(sw.contains("getevent -lq \"\$kd\"") && sw.contains("getevent -pl \"\$updev\"") && sw.contains("getevent -pl \"\$downdev\""))
         assertTrue(sw.contains("*\"KEY_VOLUMEUP*\"*") && sw.contains("*\"KEY_VOLUMEDOWN*\"*"))
         val session = sw.substring(sw.indexOf("echo \"=== [1/5]"))
-        val stop = session.indexOf("setprop ctl.stop zygote")
+        val stop = session.indexOf("if ! stop_android_framework; then")
         val xnuhost = session.indexOf("unshare -m")
         // The watcher, the readers and the poll start in sessions of their own before xnuhost's namespace exists.
         for (mode in listOf("--watch", "--keys \"\$kd\"", "--keys-poll")) {
@@ -2329,7 +2332,7 @@ class OneiosScriptTest {
         val session = sw.substring(sw.indexOf("echo \"=== [1/5]"))
         // It starts only after the way back is armed and checked, and before One UI's zygote stops.
         val begin = session.indexOf("\nbootui_begin\n")
-        assertTrue(begin in session.indexOf("if [ -n \"\$armed\" ]; then") until session.indexOf("setprop ctl.stop zygote"))
+        assertTrue(begin in session.indexOf("if [ -n \"\$armed\" ]; then") until session.indexOf("if ! stop_android_framework; then"))
         // Everything of it: no key device, no property, no service, no signal, no wakelock, no return request, no reboot.
         val helpers = sw.substring(sw.indexOf("BOOTUI=\"\$CTL/bootui\""), sw.indexOf("hard_reboot() {"))
         val mode = sw.substring(sw.indexOf("    --bootui)"), sw.indexOf("    --keys)"))
@@ -2425,7 +2428,9 @@ class OneiosScriptTest {
         // The switch: until the pid is written, for as long as the inner shell runs, 30 s at most.
         val session = sw.substring(sw.indexOf("echo \"=== [4/5]"))
         val wait = session.substring(session.indexOf("unshare -m"), session.indexOf("XP=\$(cat \"\$SESSION/xnuhost.pid\""))
-        assertTrue(wait.contains("while [ \$n -lt 150 ] && [ ! -s \"\$SESSION/xnuhost.pid\" ]; do"))
+        assertTrue(wait.contains("inner_wait=150"))
+        assertTrue(wait.contains("[ \"\$FRAMEWORK\" = 0 ] || inner_wait=40"))
+        assertTrue(wait.contains("while [ \$n -lt \"\$inner_wait\" ] && [ ! -s \"\$SESSION/xnuhost.pid\" ]; do"))
         assertTrue(wait.contains("[ -n \"\$ip\" ] && kill -0 \"\$ip\" 2>/dev/null || break"))
         assertTrue(session.contains("the last lines of \$SESSION/xnuhost.log"))
     }
