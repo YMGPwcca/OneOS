@@ -227,6 +227,10 @@ object OneiosPlain {
             )
 
             // The way back and the phone's state (the preflight's last checks).
+            "watchdog recovery" in p -> m(
+                "OneOS can't verify the watchdog", "OneOS needs a verified software watchdog to return safely to One UI.",
+                OneiosFix.NONE, OneiosPart.SWITCH,
+            )
             "getevent" in p || "volume up key" in p || "volume down key" in p || "no ps:" in p -> m(
                 "OneOS can't read the volume keys", "You need them to come back to One UI. Restart your phone, then check again.",
                 OneiosFix.NONE, OneiosPart.SWITCH,

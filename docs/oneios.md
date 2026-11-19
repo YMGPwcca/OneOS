@@ -555,7 +555,10 @@ runtime with xnuhost is staged, this is where every switch ends.**
    one line each in `switch.log`: `clocks: NODE OLD -> NEW (reads N)`. The kernel's thermal zones, trips and
    cooling devices are never written, nor anything under `/sys/power` but the wakelock: the kernel's junction
    trips, LMh and xnuhost's own thermal step (OneiOS `runtime/bridges/thermal`) are what cap a session.
-   Samsung's software watchdog gets its magic close and a feeder, as in an Android session. With USB debugging on, the USB watcher starts (below): adb stays on the USB gadget across unplug and replug.
+   The S24 Ultra's identified software watchdog gets a feeder after One UI releases it. The feeder holds one
+   descriptor, uses ordinary keepalives and releases it before the framework restarts. See
+   [watchdog recovery](oneios-watchdog-recovery.md) for the compatibility checks and SM8850 evidence.
+   With USB debugging on, the USB watcher starts (below): adb stays on the USB gadget across unplug and replug.
 4. xnuhost starts in a **new mount namespace** in which the stage is bound over `/data`; `runtime`, `image`,
    `control`, `bin` and the two session scripts are read-only there. It gets a cgroup of its own
    (`/sys/fs/cgroup/oneios_session`), the v1 cpuset's root (`/dev/cpuset`: every core; the shell the app started kept the

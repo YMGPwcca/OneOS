@@ -185,7 +185,7 @@ class OneiosScriptTest {
             scripts()
             val sleep = listOf("/usr/bin/sleep", "/bin/sleep").first { File(it).canExecute() }
             val tools = OneiosScriptTest::class.java.getResourceAsStream("/oneios/phone-tools.sh")!!.readBytes().toString(Charsets.UTF_8).replace("@SLEEP@", sleep)
-            val names = listOf("getprop", "setprop", "pidof", "service", "getenforce", "am", "vdc", "sync", "renice", "lshal", "sleep", "now", "kill", "getevent")
+            val names = listOf("getprop", "setprop", "pidof", "service", "getenforce", "am", "vdc", "sync", "renice", "lshal", "sleep", "now", "kill", "getevent", "watchdog-stat", "watchdog-io")
             for (f in names.map { file("bin/$it") } + listOf(busybox, File(busybox.parentFile, "resetprop"))) {
                 f.parentFile.mkdirs()
                 f.writeText(tools)
@@ -1688,6 +1688,173 @@ class OneiosScriptTest {
         val feed = f.run("oneios_switch.sh", "--feed")
         assertEquals(feed.text, 3, feed.exit)
         assertFalse(File(f.control, "watchdog_feeder.log").exists())
+    }
+
+    private fun watchdogFixture(f: Fake, m3q: Boolean = false) {
+        val (model, device, soc) = if (m3q) Triple("SM-S948B", "m3q", "SM8850") else Triple("SM-S928B", "e3q", "SM8650")
+        f.file("props").appendText("ro.product.model=$model\nro.product.device=$device\nro.soc.model=$soc\n")
+        val nodes = mapOf("watchdog" to "a:82", "watchdog0" to "f2:0", "watchdog1" to "f2:1")
+        f.file("dev").mkdir()
+        for ((node, id) in nodes) f.file("dev/$node").writeText("$id\n")
+        Files.createSymbolicLink(f.file("dev/softdog").toPath(), f.file("dev/watchdog0").toPath())
+        f.file("sys/class/misc/watchdog").mkdirs()
+        f.file("sys/class/misc/watchdog/dev").writeText("10:130\n")
+        for ((number, name) in listOf(0 to "Software Watchdog", 1 to "Qualcomm watchdog")) {
+            val meta = f.file("sys/class/watchdog/watchdog$number").apply { mkdirs() }
+            meta.resolve("identity").writeText("$name\n")
+            meta.resolve("dev").writeText("242:$number\n")
+            meta.resolve("state").writeText("active\n")
+            meta.resolve("timeout").writeText("100\n")
+        }
+        f.file("proc/321/fd").mkdirs()
+        for ((fd, node) in listOf(5 to "watchdog", 6 to "softdog", 7 to "watchdog0")) {
+            Files.createSymbolicLink(f.file("proc/321/fd/$fd").toPath(), f.file("dev/$node").toPath())
+        }
+    }
+
+    @Test
+    fun watchdogPlanDeduplicatesAliasesForTheOwnedS24Softdog() = each { f ->
+        f.phone(stopped = false, state = "starting")
+        watchdogFixture(f)
+        val plan = f.run("oneios_switch.sh", "--watchdog-probe")
+        assertEquals(plan.text, 0, plan.exit)
+        assertEquals("watchdog0 f2:0", plan.text.trim())
+        assertTrue(f.lines("log/watchdog").isEmpty())
+        assertTrue(f.setprops.isEmpty())
+    }
+
+    @Test
+    fun watchdogPlanRefusesUnverifiedDevicesAndMissingMetadata() = each { f ->
+        f.phone(stopped = false, state = "starting")
+        watchdogFixture(f, m3q = true)
+        val m3q = f.run("oneios_switch.sh", "--watchdog-probe")
+        assertEquals(m3q.text, 2, m3q.exit)
+        assertTrue(m3q.text, m3q.text.contains("watchdog recovery"))
+        f.file("props").appendText("ro.product.model=SM-S928B\nro.product.device=e3q\nro.soc.model=SM8650\n")
+        val meta = f.file("sys/class/watchdog/watchdog0")
+        for ((name, value) in listOf("identity" to "Software Watchdog", "timeout" to "100", "state" to "active", "dev" to "242:0")) {
+            assertTrue(meta.resolve(name).delete())
+            val missing = f.run("oneios_switch.sh", "--watchdog-probe")
+            assertEquals(missing.text, 2, missing.exit)
+            meta.resolve(name).writeText("$value\n")
+        }
+        meta.resolve("identity").writeText("Qualcomm SoC watchdog\n")
+        val unsupported = f.run("oneios_switch.sh", "--watchdog-probe")
+        assertEquals(unsupported.text, 2, unsupported.exit)
+        meta.resolve("identity").writeText("Software Watchdog\n")
+        Files.createSymbolicLink(f.file("proc/321/fd/8").toPath(), f.file("dev/watchdog1").toPath())
+        val extra = f.run("oneios_switch.sh", "--watchdog-probe")
+        assertEquals(extra.text, 2, extra.exit)
+        assertTrue(f.lines("log/watchdog").isEmpty())
+        assertTrue(f.setprops.isEmpty())
+    }
+
+    @Test
+    fun watchdogFeedOpensOnlyOnceAndNeverSendsMagicClose() = each { f ->
+        f.phone()
+        watchdogFixture(f)
+        File(f.control, "watchdog.target").writeText("watchdog0 f2:0\n")
+        f.behave("watchdog_stop_after_ping")
+        val feed = f.run("oneios_switch.sh", "--watchdog-test", "feed")
+        assertEquals(feed.text, 0, feed.exit)
+        assertEquals(listOf("open watchdog0", "ping ."), f.lines("log/watchdog"))
+        assertTrue(File(f.control, "feeder.ready").isFile)
+        assertFalse(File(f.control, "feeder.failed").exists())
+    }
+
+    @Test
+    fun watchdogBusyRequestsRecoveryWithoutRetryingAnotherAlias() = each { f ->
+        f.phone()
+        watchdogFixture(f)
+        File(f.control, "watchdog.target").writeText("watchdog0 f2:0\n")
+        f.behave("watchdog_busy")
+        val feed = f.run("oneios_switch.sh", "--watchdog-test", "feed")
+        assertEquals(feed.text, 4, feed.exit)
+        assertEquals(listOf("open watchdog0"), f.lines("log/watchdog"))
+        assertFalse(File(f.control, "feeder.ready").exists())
+        assertTrue(File(f.control, "feeder.failed").isFile)
+        assertTrue(File(f.session, "return.request").readText().contains("watchdog"))
+        assertEquals(1, f.returns().exit)
+        f.assertFailsafe("watchdog feeder failed")
+    }
+
+    @Test
+    fun watchdogFeedRejectsARenumberedCharacterDeviceBeforeOpeningIt() = each { f ->
+        f.phone()
+        watchdogFixture(f)
+        File(f.control, "watchdog.target").writeText("watchdog0 f2:0\n")
+        f.file("dev/watchdog0").writeText("f3:0\n")
+        val feed = f.run("oneios_switch.sh", "--watchdog-test", "feed")
+        assertEquals(feed.text, 4, feed.exit)
+        assertTrue(f.lines("log/watchdog").isEmpty())
+        assertFalse(File(f.control, "feeder.ready").exists())
+        assertTrue(File(f.control, "feeder.failed").isFile)
+    }
+
+    @Test
+    fun watchdogWriteFailureAfterReadinessInvalidatesTheFeeder() = each { f ->
+        f.phone()
+        watchdogFixture(f)
+        File(f.control, "watchdog.target").writeText("watchdog0 f2:0\n")
+        f.behave("watchdog_ping_fails")
+        val feed = f.run("oneios_switch.sh", "--watchdog-test", "feed")
+        assertEquals(feed.text, 4, feed.exit)
+        assertEquals(listOf("open watchdog0", "ping .", "ping ."), f.lines("log/watchdog"))
+        assertFalse(File(f.control, "feeder.ready").exists())
+        assertTrue(File(f.control, "feeder.failed").isFile)
+        assertTrue(File(f.session, "return.request").isFile)
+        assertEquals(1, f.returns().exit)
+        f.assertFailsafe("watchdog feeder failed")
+    }
+
+    @Test
+    fun watchdogEarlyReturnLeavesTheRunningFrameworkInControl() = each { f ->
+        f.phone(stopped = false, state = "starting")
+        watchdogFixture(f)
+        File(f.control, "watchdog.target").writeText("watchdog0 f2:0\n")
+        val feed = f.run("oneios_switch.sh", "--watchdog-test", "feed")
+        assertEquals(feed.text, 3, feed.exit)
+        f.assertEarlyReturn(f.returns())
+        assertTrue(f.lines("log/watchdog").isEmpty())
+        assertFalse(File(f.control, "feeder.failed").exists())
+    }
+
+    @Test
+    fun watchdogReturnReleasesTheFeederBeforeRestartingNetd() = each { f ->
+        f.phone()
+        watchdogFixture(f)
+        File(f.control, "watchdog.target").writeText("watchdog0 f2:0\n")
+        File(f.control, "feeder.pid").writeText("4500\n")
+        File(f.control, "feeder.ready").writeText("4500\n")
+        f.proc(4500, "sh", cmdline = "sh /data/local/tmp/oneios/oneios_switch.sh --feed")
+        f.behave("watchdog_exclusive_handoff")
+        val r = f.returns()
+        assertEquals(r.text, 0, r.exit)
+        f.assertInPlace(r.text)
+        assertTrue(r.text, r.text.indexOf("watchdog feeder released") in 0 until r.text.indexOf("One UI's zygote started"))
+        assertFalse(f.file("proc/4500").exists())
+        assertTrue(File(f.control, "feeder.off").isFile)
+        assertTrue(f.lines("log/watchdog").isEmpty())
+    }
+
+    @Test
+    fun watchdogReturnFailsSafeIfTheFeederCannotReleaseItsDescriptor() = failsafe("watchdog feeder still holds") { f ->
+        File(f.control, "watchdog.target").writeText("watchdog0 f2:0\n")
+        File(f.control, "feeder.pid").writeText("4500\n")
+        File(f.control, "feeder.ready").writeText("4500\n")
+        f.proc(4500, "sh", cmdline = "sh /data/local/tmp/oneios/oneios_switch.sh --feed").resolve("unkillable").createNewFile()
+    }
+
+    @Test
+    fun watchdogReturnFailsSafeIfSystemServerNeverReacquiresTheWatchdog() = failsafe(
+        "system_server did not reacquire the watchdog", frameworkStarted = true,
+    ) { f ->
+        watchdogFixture(f)
+        File(f.control, "watchdog.target").writeText("watchdog0 f2:0\n")
+        File(f.control, "feeder.pid").writeText("4500\n")
+        File(f.control, "feeder.ready").writeText("4500\n")
+        f.proc(4500, "sh", cmdline = "sh /data/local/tmp/oneios/oneios_switch.sh --feed")
+        f.behave("watchdog_no_reacquire")
     }
 
     /** One return at a time; a lock whose holder is gone does not keep the next return out. */

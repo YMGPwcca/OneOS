@@ -22,7 +22,7 @@
 # weaver, the lock-screen files, SELinux's mode, persist.* properties.
 # What it changes, all undone by oneios_return.sh or a reboot: One UI's zygote
 # (and zygote_secondary) stopped, the kernel wakelock oneios_session, Samsung's
-# software watchdog closed and fed, the cgroup oneios_session (xnuhost's own),
+# software watchdog fed while One UI is down, the cgroup oneios_session (xnuhost's own),
 # OneOS's boot screen on a surfaceflinger layer until the guest's first frame,
 # and, with USB debugging on, the USB watcher's repairs (sys.usb.config, adbd
 # and the gadget's UDC, each only back to One UI's own value).
@@ -93,6 +93,134 @@ conf() { # <file> <key>: the value of key=value, first match
 boot_id() { cat "$T/proc/sys/kernel/random/boot_id" 2>/dev/null; }
 # "dev:inode:size:mtime" of a file: what root recorded when it staged it.
 file_id() { stat -c '%d:%i:%s:%Y' "$1" 2>/dev/null; }
+
+# Only the S24 Ultra's identified Linux softdog is supported. The legacy
+# misc device (10:130) and the numbered watchdog0 can represent one device.
+# Resolve the holder's device number against sysfs without opening any node.
+watchdog_profile() {
+    case "$(getprop ro.product.model)" in SM-S928*) ;; *) return 1 ;; esac
+    [ "$(getprop ro.product.device)" = e3q ] && [ "$(getprop ro.soc.model)" = SM8650 ]
+}
+watchdog_id() {
+    if [ -n "$T" ]; then "$T/bin/watchdog-stat" "$1"
+    elif [ -c "$1" ]; then stat -Lc '%t:%T' "$1" 2>/dev/null; else return 1; fi
+}
+watchdog_softdog() { # <numbered node name>; print its device number
+    wd_class="$T/sys/class/watchdog/$1"
+    [ "$(cat "$wd_class/identity" 2>/dev/null)" = "Software Watchdog" ] || return 1
+    [ "$(cat "$wd_class/state" 2>/dev/null)" = active ] || return 1
+    # The supported S24 path has at least 100 s for the return handoff.
+    wd_timeout=$(cat "$wd_class/timeout" 2>/dev/null)
+    case "$wd_timeout" in ''|*[!0-9]*) return 1 ;; esac
+    [ "$wd_timeout" -ge 100 ] 2>/dev/null || return 1
+    wd_dev=$(cat "$wd_class/dev" 2>/dev/null)
+    case "$wd_dev" in ''|:*|*:|*:*:*|*[!0-9:]*) return 1 ;; *:*) ;; *) return 1 ;; esac
+    wd_expected=$(printf '%x:%x' "${wd_dev%:*}" "${wd_dev#*:}") || return 1
+    [ "$(watchdog_id "$T/dev/$1")" = "$wd_expected" ] || return 1
+    printf '%s\n' "$wd_expected"
+}
+watchdog_target() {
+    watchdog_profile || return 1
+    wd_holder=$(pidof system_server 2>/dev/null)
+    case "$wd_holder" in ''|*[!0-9]*) return 1 ;; esac
+    wd_links=$(ls -l "$P/$wd_holder/fd" 2>/dev/null) || return 1
+    wd_fds=$(printf '%s\n' "$wd_links" | awk -v prefix="$T/dev/" '
+        NF >= 3 && $(NF-1) == "->" && index($NF, prefix) == 1 && $(NF-2) ~ /^[0-9]+$/ {
+            node = substr($NF, length(prefix) + 1)
+            if (node ~ /^(watchdog|softdog)[0-9]*$/) print $(NF-2)
+        }')
+    wd_held=""
+    for wd_fd in $wd_fds; do
+        wd_id=$(watchdog_id "$P/$wd_holder/fd/$wd_fd") || return 1
+        wd_held="$wd_held $wd_id "
+    done
+    wd_target=""
+    for wd_class in "$T"/sys/class/watchdog/watchdog*; do
+        wd_name=${wd_class##*/}
+        case "${wd_name#watchdog}" in ''|*[!0-9]*) continue ;; esac
+        wd_id=$(watchdog_softdog "$wd_name") || continue
+        if [ "$wd_name" = watchdog0 ] && [ "$(cat "$T/sys/class/misc/watchdog/dev" 2>/dev/null)" = 10:130 ]; then
+            wd_alias=a:82
+        else
+            wd_alias=$wd_id
+        fi
+        case "$wd_held" in *" $wd_id "*|*" $wd_alias "*) ;; *) continue ;; esac
+        [ -z "$wd_target" ] || return 1
+        wd_target="$wd_name $wd_id"
+    done
+    [ -n "$wd_target" ] || return 1
+    # An additional watchdog held by system_server would lose its owner too.
+    for wd_id in $wd_held; do
+        [ "$wd_id" = "${wd_target#* }" ] || {
+            [ "${wd_target%% *}" = watchdog0 ] && [ "$wd_id" = a:82 ] &&
+                [ "$(cat "$T/sys/class/misc/watchdog/dev" 2>/dev/null)" = 10:130 ]
+        } || return 1
+    done
+    printf '%s\n' "$wd_target"
+}
+watchdog_failed() {
+    echo "$(date +%T) watchdog feeder failed: $*" >> "$L"
+    true > "$CTL/feeder.failed"
+    rm -f "$CTL/feeder.ready"
+    [ -e "$SESSION/return.request" ] || echo "watchdog feeder failed: $*" > "$SESSION/return.request"
+    return 4
+}
+watchdog_pings() {
+    # Confirm the opened descriptor before sending any byte. One open for
+    # the whole session, with plain keepalives and a normal close.
+    [ -n "$T" ] || [ "$(watchdog_id "$P/$$/fd/3")" = "$wd_saved" ] || return 1
+    wd_keepalive=.
+    while [ ! -e "$CTL/feeder.off" ]; do
+        if [ -n "$T" ]; then "$T/bin/watchdog-io" ping "$wd_keepalive" || return 1
+        else printf '%s' "$wd_keepalive" >&3 || return 1; fi
+        if [ ! -e "$CTL/feeder.ready" ]; then
+            echo "Watchdog feeder ready ($wd_name, pid $$)" >> "$L"
+            echo $$ > "$CTL/feeder.ready" || return 1
+        fi
+        sleep 2 3>&-
+    done
+}
+watchdog_feed() {
+    watchdog_profile || return 3
+    [ -e "$CTL/stopped" ] && [ ! -e "$CTL/feeder.off" ] || return 3
+    wd_boot=$(boot_id)
+    [ -n "$wd_boot" ] && [ "$(cat "$CTL/boot" 2>/dev/null)" = "$wd_boot" ] || return 3
+    case "$(cat "$CTL/state" 2>/dev/null)" in starting|running|returning) ;; *) return 3 ;; esac
+    mkdir "$CTL/feeder.lock" 2>/dev/null || return 3
+    L="$CTL/watchdog_feeder.log"
+    echo $$ > "$CTL/feeder.pid" || { watchdog_failed "could not record the feeder PID"; return; }
+    read -r wd_name wd_saved wd_extra < "$CTL/watchdog.target" || { watchdog_failed "missing watchdog target"; return; }
+    case "${wd_name#watchdog}" in
+        ''|*[!0-9]*) watchdog_failed "invalid watchdog target"; return ;;
+    esac
+    case "$wd_name" in watchdog*) ;; *) watchdog_failed "invalid watchdog target"; return ;; esac
+    [ -z "$wd_extra" ] && [ -n "$wd_saved" ] && [ "$(watchdog_softdog "$wd_name")" = "$wd_saved" ] ||
+        { watchdog_failed "watchdog identity or timing changed"; return; }
+    if pidof system_server >/dev/null 2>&1 || [ "$(getprop init.svc.zygote)" = running ]; then
+        watchdog_failed "One UI still owns the watchdog"
+        return
+    fi
+    if [ -n "$T" ]; then
+        "$T/bin/watchdog-io" open "$wd_name" 2>>"$L" && watchdog_pings 2>>"$L"
+    else
+        watchdog_pings 2>>"$L" 3>"$T/dev/$wd_name"
+    fi && return 0
+    watchdog_failed "cannot open or keep alive $wd_name"
+}
+watchdog_lost() {
+    [ ! -e "$CTL/feeder.off" ] || return 1
+    [ -e "$CTL/feeder.failed" ] && return 0
+    [ -s "$CTL/feeder.ready" ] || return 1
+    wd_live=$(cat "$CTL/feeder.ready" 2>/dev/null)
+    case "$wd_live" in ''|0|1|*[!0-9]*) return 1 ;; esac
+    case "$(cat "$P/$wd_live/cmdline" 2>/dev/null | tr '\0' ' ')" in
+        *"oneios_switch.sh --feed "*) return 1 ;;
+    esac
+    [ ! -e "$CTL/feeder.off" ] || return 1
+    L="$CTL/watchdog_feeder.log"
+    watchdog_failed "the ready feeder disappeared"
+    return 0
+}
 
 # --- THE WAY BACK'S OWN HELPERS ---------------------------------------------
 # The watcher and the key readers must run whatever the guest does. They are
@@ -558,6 +686,13 @@ usb_save() {
 
 # --- INTERNAL MODES --------------------------------------------------------
 case "$MODE" in
+    --watchdog-probe)
+        watchdog_target || refuse "watchdog recovery could not identify One UI's active software watchdog"
+        exit 0 ;;
+    --watchdog-test)
+        [ -n "$T" ] && [ "$2" = feed ] || exit 3
+        watchdog_feed
+        exit $? ;;
     --key-devices)
         [ -n "$T" ] || { echo "$MODE: for the tests only"; exit 2; }
         volume_key_devices || refuse "could not validate physical volume keys in getevent (gpio-keys Volume Up, pmic_resin Volume Down)"
@@ -766,30 +901,9 @@ case "$MODE" in
         exit 0
         ;;
     --feed)
-        # One UI's system_server opened Samsung's software watchdog (100 s) and
-        # kicked it; stopped, it leaves the timer running and the phone panics
-        # ("Software Watchdog Timer expired 100s", oneos_switch.sh [4b/6]). "V"
-        # is the magic close where the driver allows it, and a kick otherwise.
-        [ -z "$T" ] || exit 3
-        L="$CTL/watchdog_feeder.log"
-        was=""
-        while [ ! -e "$CTL/feeder.off" ]; do
-            now=""
-            for wd in /dev/watchdog /dev/softdog $(cat "$CTL/softdog_nodes" 2>/dev/null); do
-                [ -c "$wd" ] || continue
-                if e=$(printf V 2>&1 > "$wd"); then now="$now $wd:written"; else now="$now $wd:refused($e)"; fi
-            done
-            for w in /sys/class/watchdog/watchdog*; do
-                [ "$(cat "$w/state" 2>/dev/null)" = active ] || continue
-                case "$(cat "$w/identity" 2>/dev/null)" in *[Ss]oft*) ;; *) continue ;; esac
-                d=/dev/${w##*/}
-                [ -c "$d" ] || continue
-                if e=$(printf V 2>&1 > "$d"); then now="$now $d:kicked"; else now="$now $d:refused($e)"; fi
-            done
-            [ "$now" = "$was" ] || { echo "$(date +%T)$now" >> "$L"; was=$now; }
-            sleep 2
-        done
-        exit 0
+        [ -z "$T" ] && [ "$(id -u 2>/dev/null)" = 0 ] || exit 3
+        watchdog_feed
+        exit $?
         ;;
     --bootui)
         # The boot screen's status line (bootui_begin starts this beside the
@@ -976,6 +1090,7 @@ case "$MODE" in
         }
         t=0
         while [ "$(cat "$CTL/state" 2>/dev/null)" = starting ]; do
+            watchdog_lost && SCREEN="The watchdog feeder failed" && go "watchdog feeder failed"
             [ -e "$SESSION/return.request" ] && SCREEN="A return to One UI was asked for" && go "return asked before xnuhost started ($(head -c 200 "$SESSION/return.request" 2>/dev/null))"
             [ $t -lt 60 ] || { SCREEN="iOS did not start within 60 s"; go "the switch did not start xnuhost within 60 s"; }
             sleep 1; t=$((t + 1))
@@ -997,6 +1112,7 @@ case "$MODE" in
             case "$(cat "$CTL/state" 2>/dev/null)" in
                 returning|returned) echo "$(date '+%F %T') watcher: a return is under way or done; nothing to do"; exit 0 ;;
             esac
+            watchdog_lost && SCREEN="The watchdog feeder failed" && go "watchdog feeder failed"
             [ -e "$SESSION/return.request" ] && SCREEN="A return to One UI was asked for" && go "return asked ($(head -c 200 "$SESSION/return.request" 2>/dev/null))"
             if ! { [ -n "$pid" ] && [ "$(readlink "$P/$pid/ns/mnt" 2>/dev/null)" = "$ns" ]; }; then
                 SCREEN=$(why_ended)
@@ -1098,6 +1214,7 @@ for p in $(head -n 3 /sys/fs/cgroup/oneios_session/cgroup.procs 2>/dev/null); do
 command -v getevent >/dev/null 2>&1 || refuse "no getevent: Volume Up + Volume Down could not return to One UI"
 command -v ps >/dev/null 2>&1 || refuse "no ps: the key readers could not be told apart"
 KDEVS=$(volume_key_devices) || refuse "could not validate physical volume keys in getevent (gpio-keys Volume Up, pmic_resin Volume Down)"
+WD_TARGET=$(watchdog_target) || refuse "watchdog recovery could not identify One UI's active software watchdog"
 BAT=/sys/class/power_supply/battery
 CAP=$(cat $BAT/capacity 2>/dev/null)
 BST=$(cat $BAT/status 2>/dev/null)
@@ -1237,14 +1354,6 @@ return_asked && end_for_return "One UI's framework was stopped"
 echo "=== [3/5] $(date +%T) Stopping the One UI framework ==="
 # The boot screen first, so that it is up when One UI's windows go.
 bootui_begin
-# The watchdog device(s) One UI's system_server keeps open, before it stops
-# (oneos_switch.sh [4b/6]: recorded for the feeder).
-for p in $(pidof system_server); do
-    for fd in /proc/$p/fd/*; do
-        t=$(readlink "$fd" 2>/dev/null)
-        case "$t" in /dev/watchdog*|/dev/softdog*) echo "$t" ;; esac
-    done
-done 2>/dev/null | sort -u > "$CTL/softdog_nodes"
 # The stop lock (above): 15 s at most; a return holds it for good.
 n=0
 until mkdir "$CTL/stop.lock" 2>/dev/null; do
@@ -1258,6 +1367,12 @@ if ! echo $$ 2>/dev/null > "$CTL/stop.lock/switch"; then
     exit 4
 fi
 return_asked && { release_stop_lock; end_for_return "One UI's framework was stopped"; }
+if [ "$(watchdog_target)" != "$WD_TARGET" ] || ! printf '%s\n' "$WD_TARGET" > "$CTL/watchdog.target"; then
+    release_stop_lock
+    echo "The watchdog recovery target could not be recorded. One UI's framework was left running."
+    $SH "$STAGE/oneios_return.sh" switch-watchdog-not-ready
+    exit 4
+fi
 # xnuhost uses advise for MADV_HUGEPAGE on the guest's RAM. Save the bare
 # active mode before writing and hold the stop lock through both operations
 # so an early return can restore it even if the framework was never stopped.
@@ -1285,6 +1400,18 @@ n=0
 while [ $n -lt 50 ] && pidof system_server >/dev/null 2>&1; do sleep 0.2; n=$((n + 1)); done
 kill -9 $(pidof system_server) 2>/dev/null
 kill -9 $(pidof zygote64) $(pidof zygote) 2>/dev/null
+"$BB" setsid $SH "$SELF" --feed </dev/null >/dev/null 2>&1 &
+wd_pid=$!
+n=0
+while [ $n -lt 10 ] && [ ! -s "$CTL/feeder.ready" ] && [ ! -e "$CTL/feeder.failed" ] &&
+    kill -0 "$wd_pid" 2>/dev/null; do sleep 0.2; n=$((n + 1)); done
+if [ ! -s "$CTL/feeder.ready" ] || [ -e "$CTL/feeder.failed" ] || ! kill -0 "$wd_pid" 2>/dev/null; then
+    L="$CTL/watchdog_feeder.log"
+    watchdog_failed "the feeder did not become ready after stopping One UI"
+    release_stop_lock
+    $SH "$STAGE/oneios_return.sh" switch-watchdog-failed
+    exit 4
+fi
 release_stop_lock
 # system_server is gone, so nothing of One UI writes the clock caps any more.
 clocks_tops
@@ -1298,13 +1425,6 @@ if [ "$(conf "$CTL/base/usb" adb)" = 1 ]; then
 else
     echo "USB watcher: not started (USB debugging was off in One UI)"
 fi
-# Samsung's software watchdog: its magic close now, then the feeder.
-for wd in /dev/watchdog /dev/softdog $(cat "$CTL/softdog_nodes"); do
-    [ -c "$wd" ] || continue
-    if e=$(printf V 2>&1 > "$wd"); then echo "Softdog: $wd closed with V"; else echo "Softdog: $wd not written ($e)"; fi
-done
-"$BB" setsid /system/bin/sh "$SELF" --feed </dev/null >/dev/null 2>&1 &
-echo $! > "$CTL/feeder.pid"
 echo "One UI's zygote: $(getprop init.svc.zygote); system_server: $(pidof system_server 2>/dev/null || echo gone); surfaceflinger $(pidof surfaceflinger) kept"
 
 # From here a return finds the mark and restores One UI in place.

@@ -200,6 +200,31 @@ end_helper() { # <pid file> <mode word>
         is_ours "$p" "oneios_switch.sh $2" && kill -9 "$p" 2>/dev/null
     done
 }
+# End the feeder before init can fork any framework that needs to open the
+# watchdog. A returning session with a failed handoff cannot certify recovery.
+watchdog_handoff() {
+    if [ -f "$CTL/watchdog.target" ]; then
+        [ -s "$CTL/feeder.ready" ] && [ ! -e "$CTL/feeder.failed" ] && [ ! -e "$CTL/feeder.off" ] ||
+            failsafe "watchdog feeder failed before handoff"
+        wd_pid=$(cat "$CTL/feeder.ready" 2>/dev/null)
+        case "$wd_pid" in ''|0|1|*[!0-9]*) failsafe "watchdog feeder failed to record its PID" ;; esac
+        [ "$wd_pid" = "$(cat "$CTL/feeder.pid" 2>/dev/null)" ] && is_ours "$wd_pid" "oneios_switch.sh --feed" ||
+            failsafe "watchdog feeder failed before handoff"
+    else
+        wd_pid=$(cat "$CTL/feeder.pid" 2>/dev/null)
+    fi
+    true > "$CTL/feeder.off" || failsafe "could not release the watchdog feeder"
+    case "$wd_pid" in ''|0|1|*[!0-9]*) return 0 ;; esac
+    wd_wait=0
+    while is_ours "$wd_pid" "oneios_switch.sh --feed"; do
+        [ $wd_wait -lt 20 ] || failsafe "watchdog feeder still holds its descriptor (pid $wd_pid)"
+        [ $wd_wait -lt 15 ] || kill -9 "$wd_pid" 2>/dev/null
+        sleep 0.2
+        wd_wait=$((wd_wait + 1))
+    done
+    [ ! -e "$CTL/feeder.failed" ] || failsafe "watchdog feeder failed during handoff"
+    say "watchdog feeder released (pid $wd_pid)"
+}
 # The USB gadget and adbd back to One UI's (oneios_switch.sh, "USB AND ADB
 # DURING A SESSION": control/base/usb, recorded at the switch), before One UI's
 # zygote starts, so that its UsbDeviceManager finds them as it left them. Only
@@ -616,6 +641,8 @@ if [ "$early" = 1 ]; then
     exit 0
 fi
 
+[ ! -e "$CTL/feeder.failed" ] || failsafe "watchdog feeder failed before handoff"
+
 added=$(awk '{ print $5 }' "$P/1/mountinfo" | sort | comm -13 "$BASE/mounts" - 2>/dev/null | grep -E '^/(data|system|vendor|product|system_ext|odm|apex)(/|$)' | head -n 3 | tr '\n' ' ')
 [ -z "$added" ] || failsafe "mounts added on One UI's partitions during the session: $added"
 # The daemons One UI cannot get back without a boot. surfaceflinger is not one
@@ -767,6 +794,7 @@ step "[4/5] Starting One UI in place" 45
 usb_restore
 # zygote's onrestart by hand: abort the FUSE connections the old framework left.
 timeout 10 vdc volume abort_fuse >/dev/null 2>&1
+watchdog_handoff
 # One UI's zygote_next ran through the session with the old framework's
 # children: a fresh one, as a boot gives (return_to_oneui.sh).
 if [ -n "$(pidof zygote_next 2>/dev/null)" ] && [ "$(base_prop init.svc.zygote_next)" = running ]; then
@@ -798,8 +826,6 @@ while [ $t -lt 60 ]; do
 done
 [ -n "$ss" ] || failsafe "One UI's system_server did not start in 60 s"
 say "One UI's system_server $ss"
-# system_server feeds Samsung's software watchdog again from here.
-true > "$CTL/feeder.off"
 t0=$(now); up=0
 while :; do
     sleep 2; t=$(($(now) - t0))
@@ -816,7 +842,13 @@ while :; do
     [ $up -gt 0 ] && [ $t -ge $((up + 20)) ] && break
     [ $up = 0 ] && [ $t -ge 180 ] && failsafe "user 0 not unlocked within 180 s"
 done
-end_helper "$CTL/feeder.pid" --feed
+if [ -f "$CTL/watchdog.target" ]; then
+    wd_expected=$(cat "$CTL/watchdog.target" 2>/dev/null)
+    wd_current=$($SH "$S/oneios_switch.sh" --watchdog-probe 2>/dev/null)
+    [ -n "$wd_expected" ] && [ "$wd_current" = "$wd_expected" ] ||
+        failsafe "system_server did not reacquire the watchdog"
+    say "watchdog ownership confirmed on the returned framework ($wd_current)"
+fi
 echo "inplace $(date +%s) $(cat "$P/sys/kernel/random/boot_id" 2>/dev/null)" > "$S/return.outcome"
 finished
 say "One UI restored in place ($(getenforce 2>/dev/null))."
