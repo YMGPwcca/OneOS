@@ -61,6 +61,15 @@ S="$T/data/local/tmp/oneios"
 # filesystem (the source of a bind from it, mountinfo's fourth field).
 SM=/data/local/tmp/oneios
 SRC=/local/tmp/oneios
+FRAMEWORK=0
+case "$0" in
+    /data/adb/oneios-m3q-framework/oneios_return.sh)
+        FRAMEWORK=1
+        SM=/data/adb/oneios-m3q-framework
+        SRC=/adb/oneios-m3q-framework
+        S=$SM ;;
+esac
+if [ -n "$T" ] && [ "${ONEIOS_TEST_FRAMEWORK:-}" = 1 ]; then FRAMEWORK=1; fi
 # The way back's own folder (oneios_switch.sh): the state, the baseline, the
 # pids. Read-only in xnuhost's namespace.
 CTL=$S/control
@@ -68,6 +77,7 @@ BASE=$CTL/base
 LOG=$S/return.log
 # xnuhost's cgroup (oneios_switch.sh --inner). Only ever this one path.
 CG="$T/sys/fs/cgroup/oneios_session"
+SHMEM_EN="$T/sys/kernel/mm/transparent_hugepage/shmem_enabled"
 WHO="${1:-manual}"
 # Every wait below has its own limit and its own failsafe; all of them
 # together, each used up to its last second, come to about 7 minutes (20 s for
@@ -141,6 +151,65 @@ failsafe() {
     echo "failsafe $(date +%s) $*" > "$S/return.outcome"
     do_reboot oneios-inplace-failsafe
 }
+
+shmem_mode() {
+    # Sysfs lists the modes with the active one in brackets. The fake node
+    # also reads back a bare mode after a write.
+    shmem_raw=$(cat "$SHMEM_EN" 2>/dev/null) || return 1
+    printf '%s\n' "$shmem_raw" | awk '
+        NF == 1 && $1 ~ /^[a-z_]+$/ { print $1; next }
+        { for (i = 1; i <= NF; i++) if ($i ~ /^\[[a-z_]+\]$/) print substr($i, 2, length($i) - 2) }
+    '
+}
+restore_shmem() {
+    shmem_saved="$BASE/shmem_enabled"
+    [ -e "$shmem_saved" ] || return 0
+    shmem_old=$(cat "$shmem_saved" 2>/dev/null) || failsafe "could not read the shmem_enabled baseline"
+    case "$shmem_old" in
+        always|within_size|advise|never|deny|force) ;;
+        *) failsafe "shmem_enabled baseline is unreadable or invalid ($shmem_saved)" ;;
+    esac
+    shmem_now=$(shmem_mode)
+    case "$shmem_now" in
+        always|within_size|advise|never|deny|force) ;;
+        *) failsafe "shmem_enabled node is unavailable or its active mode is unreadable" ;;
+    esac
+    if [ "$shmem_now" != "$shmem_old" ]; then
+        printf '%s\n' "$shmem_old" 2>/dev/null > "$SHMEM_EN" ||
+            failsafe "shmem_enabled is $shmem_now, was $shmem_old at the switch, and the write back failed"
+        shmem_readback=$(shmem_mode)
+        [ "$shmem_readback" = "$shmem_old" ] ||
+            failsafe "shmem_enabled readback is '${shmem_readback:-unavailable}', expected $shmem_old"
+    fi
+    rm -f "$shmem_saved" || failsafe "could not clear the restored shmem_enabled baseline"
+    [ "$shmem_now" = "$shmem_old" ] || say "shmem_enabled back: $shmem_old"
+}
+
+restore_map_count() {
+    [ -e "$BASE/max_map_count" ] || return 0
+    read -r original temporary extra < "$BASE/max_map_count" || failsafe "cannot read max_map_count baseline"
+    case "$original:$temporary" in :*|*:|*[!0-9:]*) failsafe "invalid max_map_count baseline" ;; esac
+    [ -z "$extra" ] && [ "$original" -gt 0 ] && [ "$temporary" -ge "$original" ] ||
+        failsafe "invalid max_map_count baseline"
+    node="$P/sys/vm/max_map_count"
+    current=$(cat "$node" 2>/dev/null) || failsafe "cannot read vm.max_map_count"
+    if [ "$current" != "$original" ]; then
+        [ "$current" = "$temporary" ] || failsafe "vm.max_map_count changed outside the session"
+        echo "$original" > "$node" && [ "$(cat "$node")" = "$original" ] ||
+            failsafe "cannot restore vm.max_map_count to $original"
+    fi
+    say "vm.max_map_count restored to $original"
+}
+
+framework_services_intact() {
+    [ -s "$BASE/framework_services" ] || failsafe "missing protected service baseline"
+    while read -r svc saved_pid; do
+        [ "$(getprop "init.svc.$svc")" = running ] &&
+            [ "$(getprop "init.svc_debug_pid.$svc")" = "$saved_pid" ] &&
+            [ -d "$P/$saved_pid" ] || failsafe "protected service $svc did not keep PID $saved_pid"
+    done < "$BASE/framework_services"
+}
+
 base_prop() { sed -n "s/^\[$1\]: \[\(.*\)\]\$/\1/p" "$BASE/props" 2>/dev/null | head -n 1; }
 base_has() { grep -q "^\[$1\]: " "$BASE/props" 2>/dev/null; }
 # A non-persist prop back to its value at the switch, in memory only
@@ -164,6 +233,163 @@ end_helper() { # <pid file> <mode word>
     for p in $(cat "$1" 2>/dev/null); do
         is_ours "$p" "oneios_switch.sh $2" && kill -9 "$p" 2>/dev/null
     done
+}
+# End the feeder before init can fork any framework that needs to open the
+# watchdog. A returning session with a failed handoff cannot certify recovery.
+wd_now() {
+    read -r wd_uptime _ < "$P/uptime" || return 1
+    case "$wd_uptime" in *.[0-9][0-9]) ;; *) return 1 ;; esac
+    wd_sec=${wd_uptime%.*}
+    case "$wd_sec" in ''|0[0-9]*|*[!0-9]*|??????????*) return 1 ;; esac
+    printf '%s\n' "$wd_sec"
+}
+
+wd_process_birth() {
+    sed 's/^.*) //' "$P/$1/stat" 2>/dev/null | awk '$1 != "Z" && $1 != "X" { print $20; exit }'
+}
+
+wd_handback_expired() {
+    [ -e "$CTL/watchdog.handback" ] || return 1
+    if ! read -r hb_gen hb_until hb_extra 2>/dev/null < "$CTL/watchdog.handback"; then
+        [ -e "$CTL/watchdog.handback" ]
+        return
+    fi
+    case "$hb_until" in ''|0[0-9]*|*[!0-9]*|??????????*) return 0 ;; esac
+    [ -z "$hb_extra" ] && [ "$hb_gen" = "$(cat "$CTL/watchdog.generation" 2>/dev/null)" ] &&
+        hb_now=$(wd_now) && [ "$hb_now" -lt "$hb_until" ] || return 0
+    return 1
+}
+
+framework_watchdog_loaded() {
+    wd_target=$(cat "$CTL/watchdog.target") || return 1
+    wd_node=${wd_target%% *}
+    case "${wd_node#watchdog}" in ''|*[!0-9]*) return 1 ;; esac
+    case "$wd_node" in watchdog*) ;; *) return 1 ;; esac
+    wd_attr="$T/sys/class/watchdog/$wd_node"
+    wd_gen=$(cat "$CTL/watchdog.generation") && [ -n "$wd_gen" ] &&
+        read -r wd_mode wd_timeout wd_budget wd_binary < "$CTL/watchdog.plan" || return 1
+    case "$wd_budget" in ''|*[!0-9]*) return 1 ;; esac
+    [ "$wd_budget" -ge 5 ] && [ "$wd_budget" -le 30 ] &&
+        { [ "$wd_mode" = 0 ] || [ "$wd_mode" = 1 ]; }
+}
+
+framework_return_guard_alive() {
+    [ -r "$CTL/watchdog.return-guard" ] &&
+        read -r guard_token guard_pid guard_birth < "$CTL/watchdog.return-guard" &&
+        [ "$guard_token" = "$GTOK" ] && [ -n "$guard_birth" ] &&
+        [ "$(wd_process_birth "$guard_pid")" = "$guard_birth" ] || return 1
+    [ -n "$T" ] || {
+        [ "$(readlink "$P/$guard_pid/ns/mnt")" = "$(readlink "$P/1/ns/mnt")" ] &&
+        [ "$(cat "$P/$guard_pid/oom_score_adj")" = -1000 ] &&
+        grep -qx '0::/' "$P/$guard_pid/cgroup"
+    }
+}
+
+framework_watchdog_handoff() {
+    framework_watchdog_loaded || failsafe "missing qualified watchdog plan at handback"
+    guard_wait=0
+    until framework_return_guard_alive; do
+        [ "$guard_wait" -lt 10 ] || failsafe "independent handback guard was not armed"
+        sleep 0.2
+        guard_wait=$((guard_wait + 1))
+    done
+    wd_proof=$($SH "$S/oneios_switch.sh" --watchdog-health) ||
+        failsafe "native supervisor has no fresh heartbeat before handback"
+    wd_pid=${wd_proof%% *}
+    wd_birth=${wd_proof#* }
+    wd_begin=$(wd_now) || failsafe "monotonic clock unavailable during handback"
+    printf '%s %s\n' "$wd_gen" "$((wd_begin + wd_budget))" > "$CTL/watchdog.handback.tmp" &&
+        mv -f "$CTL/watchdog.handback.tmp" "$CTL/watchdog.handback" ||
+        failsafe "could not arm the handback guard"
+    true > "$CTL/feeder.off" || failsafe "could not request native supervisor release"
+    while :; do
+        [ ! -e "$CTL/feeder.failed" ] || failsafe "native supervisor failed during handback"
+        wd_handback_expired && failsafe "watchdog handback timed out before descriptor closed"
+        if [ -s "$CTL/feeder.released" ] && [ "$(wd_process_birth "$wd_pid")" != "$wd_birth" ]; then
+            break
+        fi
+        sleep 0.2
+    done
+    read -r ack_gen ack_pid ack_birth ack_mode ack_at ack_extra < "$CTL/feeder.released" ||
+        failsafe "could not read descriptor release receipt"
+    case "$ack_at" in ''|0[0-9]*|*[!0-9]*|??????????*) failsafe "invalid descriptor release time" ;; esac
+    [ -z "$ack_extra" ] && [ "$ack_gen $ack_pid $ack_birth $ack_mode" = "$wd_gen $wd_pid $wd_birth $wd_mode" ] &&
+        [ "$(cat "$CTL/watchdog.phase")" = "$wd_gen RETURN_PENDING" ] &&
+        [ "$ack_at" -ge "$wd_begin" ] && [ "$ack_at" -le "$(wd_now)" ] ||
+        failsafe "stale or mismatched descriptor release receipt"
+    case "$(cat "$wd_attr/nowayout" 2>/dev/null):$wd_mode" in 0:0|N:0|1:1|Y:1) ;; *)
+        failsafe "watchdog nowayout changed during handback" ;; esac
+    wd_state=$(cat "$wd_attr/state" 2>/dev/null)
+    if [ "$wd_mode" = 0 ]; then
+        [ "$wd_state" = inactive ] || failsafe "magic close did not stop the qualified watchdog"
+    else
+        wd_left=$(cat "$wd_attr/timeleft" 2>/dev/null)
+        [ "$wd_state" = active ] && [ "${wd_left:-0}" -ge "$((wd_budget + 15))" ] 2>/dev/null ||
+            failsafe "armed watchdog lacks verified handback time remaining"
+    fi
+    say "RETURN_PENDING: native descriptor closed before zygote start, nowayout=$wd_mode state=$wd_state uptime=$ack_at"
+}
+
+framework_watchdog_reacquire() {
+    new_owner="" prior_left=""
+    old_owner=$(cat "$CTL/watchdog.owner") || failsafe "original watchdog owner is missing"
+    while ! wd_handback_expired; do
+        candidate=$(pidof system_server 2>/dev/null)
+        case "$candidate" in ''|0|1|*[!0-9]*) candidate="" ;; esac
+        birth=""
+        [ -z "$candidate" ] || birth=$(wd_process_birth "$candidate")
+        if [ -n "$birth" ] && [ "$candidate" != "$old_owner" ] &&
+           [ "$(timeout 2 $SH "$S/oneios_switch.sh" --watchdog-probe 2>/dev/null)" = "$wd_target" ] &&
+           [ "$(pidof system_server)" = "$candidate" ] && [ "$(wd_process_birth "$candidate")" = "$birth" ]; then
+            sample=$(cat "$wd_attr/timeleft" 2>/dev/null)
+            case "$sample" in ''|*[!0-9]*) sample="" ;; esac
+            if [ -n "$sample" ] && [ "$sample" -le "$wd_timeout" ] &&
+               [ "$new_owner" = "$candidate:$birth" ] && [ -n "$prior_left" ] && [ "$sample" -gt "$prior_left" ]; then
+                wd_handback_expired && break
+                printf '%s FRAMEWORK_REACQUIRED\n' "$wd_gen" > "$CTL/watchdog.phase" &&
+                    rm -f "$CTL/watchdog.handback" || failsafe "could not complete handback record"
+                say "FRAMEWORK_REACQUIRED: system_server $candidate timeleft $prior_left -> $sample"
+                return 0
+            fi
+            new_owner="$candidate:$birth"; prior_left="$sample"
+        else
+            new_owner=""; prior_left=""
+        fi
+        sleep 1
+    done
+    failsafe "watchdog handback timed out waiting for the new framework's first observed keepalive"
+}
+
+watchdog_handoff() {
+    if [ "$FRAMEWORK" = 1 ] && [ -f "$CTL/watchdog.target" ]; then
+        framework_watchdog_handoff
+        return
+    fi
+    wd_birth=""
+    if [ -f "$CTL/watchdog.target" ]; then
+        wd_proof=$($SH "$S/oneios_switch.sh" --watchdog-health) ||
+            failsafe "watchdog feeder failed before handoff: ${wd_proof:-no fresh keepalive}"
+        wd_pid=${wd_proof%% *}
+        wd_birth=${wd_proof#* }
+        case "$wd_pid" in ''|0|1|*[!0-9]*) failsafe "watchdog feeder failed to record its PID" ;; esac
+        [ "$wd_pid" = "$(cat "$CTL/feeder.pid" 2>/dev/null)" ] && is_ours "$wd_pid" "oneios_switch.sh --feed" ||
+            failsafe "watchdog feeder failed before handoff"
+    else
+        wd_pid=$(cat "$CTL/feeder.pid" 2>/dev/null)
+    fi
+    true > "$CTL/feeder.off" || failsafe "could not release the watchdog feeder"
+    case "$wd_pid" in ''|0|1|*[!0-9]*) return 0 ;; esac
+    wd_wait=0
+    while is_ours "$wd_pid" "oneios_switch.sh --feed"; do
+        # A reused PID is no longer the feeder. Do not signal its new owner.
+        [ -z "$wd_birth" ] || [ "$(sed 's/^.*) //' "$P/$wd_pid/stat" 2>/dev/null | awk '{print $20}')" = "$wd_birth" ] || break
+        [ $wd_wait -lt 20 ] || failsafe "watchdog feeder still holds its descriptor (pid $wd_pid)"
+        [ $wd_wait -lt 15 ] || kill -9 "$wd_pid" 2>/dev/null
+        sleep 0.2
+        wd_wait=$((wd_wait + 1))
+    done
+    [ ! -e "$CTL/feeder.failed" ] || failsafe "watchdog feeder failed during handoff"
+    say "watchdog feeder released (pid $wd_pid)"
 }
 # The USB gadget and adbd back to One UI's (oneios_switch.sh, "USB AND ADB
 # DURING A SESSION": control/base/usb, recorded at the switch), before One UI's
@@ -290,9 +516,28 @@ wait_found() { # <servicemanager name> <seconds>
 if [ "$WHO" = --guard ]; then
     tok=$2
     [ -n "$tok" ] || exit 3
+    wd_generation=$(cat "$CTL/watchdog.generation" 2>/dev/null)
+    if [ "$FRAMEWORK" = 1 ]; then
+        printf '%s %s %s\n' "$tok" "$$" "$(wd_process_birth $$)" > "$CTL/watchdog.return-guard" || exit 3
+    fi
     t=0 last="" in=0
     while [ $t -lt $GUARD_MAX ]; do
         [ "$(cat "$CTL/return.guard" 2>/dev/null)" = "$tok" ] || exit 0
+        if [ "$FRAMEWORK" = 1 ]; then
+            if wd_handback_expired; then
+                failsafe "independent guard saw watchdog handback timeout"
+            fi
+            if [ -f "$CTL/feeder.failed" ] && [ -f "$CTL/stopped" ]; then
+                failsafe "independent guard saw native watchdog supervisor failure"
+            fi
+        fi
+        # The session watcher yields once a return owns the session. Still
+        # record lost progress before handoff, while the existing step guard
+        # bounds a return that is stuck. The normal close ends supervision.
+        if [ -n "$wd_generation" ] && [ -f "$CTL/feeder.arm" ] &&
+           [ ! -e "$CTL/feeder.off" ] && [ ! -e "$CTL/feeder.failed" ]; then
+            $SH "$S/oneios_switch.sh" --watchdog-supervise "$wd_generation"
+        fi
         # The step the return is in, and how long it has been in it.
         cur=$(cat "$CTL/return.watch" 2>/dev/null)
         if [ "$cur" = "$last" ]; then in=$((in + 2)); else last=$cur; in=0; fi
@@ -318,6 +563,11 @@ if [ "$WHO" = --usb-restore ]; then
     exit 0
 fi
 
+# A delayed watcher from a previous generation must leave this session alone.
+if { [ "$WHO" = watcher ] || [ "$WHO" = framework-deadline ]; } && [ -n "$2" ] &&
+   [ "$(cat "$CTL/watchdog.generation" 2>/dev/null)" != "$2" ]; then
+    exit 0
+fi
 true >> "$LOG"
 say "=== Return to One UI ($WHO), session state '$(cat "$CTL/state" 2>/dev/null)', boot $(cat "$P/sys/kernel/random/boot_id" 2>/dev/null) ==="
 # The reboot return needs no session state and no lock.
@@ -343,7 +593,7 @@ case "$(cat "$CTL/state" 2>/dev/null)" in
         fi ;;
     '')
         case "$WHO" in
-            watcher|keys-direct)
+            watcher|keys-direct|framework-deadline)
                 [ "$(getprop init.svc.zygote)" = running ] || pidof system_server >/dev/null 2>&1 ||
                     failsafe "the session's state cannot be read ($CTL/state) and One UI's framework is not running" ;;
         esac
@@ -370,17 +620,6 @@ if ! mkdir "$CTL/returning.lock" 2>/dev/null; then
 fi
 echo $$ > "$CTL/returning.lock/pid"
 echo returning > "$CTL/state"
-# The switch's stop lock (oneios_switch.sh, step 3): taken and kept. A switch in
-# the middle of its stop finishes it first (15 s at most, then the lock counts as
-# that switch's leftover), so the "stopped" mark below is final, and a switch
-# that has not stopped anything yet never will.
-n=0
-until mkdir "$CTL/stop.lock" 2>/dev/null; do
-    [ -e "$CTL/stop.lock/return" ] && break           # an earlier return's: the switch can stop nothing any more
-    [ $n -lt 75 ] || { say "the switch's stop lock is still held after 15 s: taken over"; break; }
-    sleep 0.2; n=$((n + 1))
-done
-echo $$ > "$CTL/stop.lock/return"
 echo oneios_return 2>/dev/null > "$T/sys/power/wake_lock"
 GTOK="$$.$(date +%s)"
 echo "$GTOK" > "$CTL/return.guard"
@@ -394,6 +633,26 @@ finished() { # the guard's mark and the lock go; the wakelocks are released
 }
 
 step "[1/5] Stopping the session" 90
+# The switch writes the shmem mode and stops the framework under this lock.
+# Wait for that critical section before checking the baseline or stop mark.
+# Keep the lock so a switch that has not reached it can never stop One UI.
+n=0
+until mkdir "$CTL/stop.lock" 2>/dev/null; do
+    [ -e "$CTL/stop.lock/return" ] && break
+    switch_pid=$(cat "$CTL/stop.lock/switch" 2>/dev/null)
+    case "$switch_pid" in
+        ''|0|1|*[!0-9]*) ;;
+        *)
+            if [ ! -e "$CTL/stopped" ] && [ -d "$P/1" ] && [ ! -d "$P/$switch_pid" ]; then
+                say "the switch holding the stop lock is gone before the stop (pid $switch_pid)"
+                break
+            fi ;;
+    esac
+    [ $n -lt 75 ] || failsafe "the switch's stop lock is still held after 15 s"
+    sleep 0.2; n=$((n + 1))
+done
+echo $$ > "$CTL/stop.lock/return" || failsafe "could not mark the return's stop lock"
+
 # The boot screen, while it is still up, says what happens now. The watcher
 # wrote its reason there already.
 bootui oneos_boot_write title 'Returning to One UI'
@@ -516,22 +775,6 @@ if [ -e "$CTL/clocks.set" ]; then
     rm -f "$CTL/clocks.set"
 fi
 
-# The switch ended before it stopped One UI's zygote (it marks the stop):
-# One UI never went away, so there is nothing to check or start. Its helpers
-# end, and that is the whole return.
-if [ ! -e "$CTL/stopped" ] && ! framework_down; then
-    true > "$CTL/stop-loop.off"
-    true > "$CTL/feeder.off"
-    end_helper "$CTL/stop-loop.pid" --stop-loop
-    end_helper "$CTL/feeder.pid" --feed
-    [ -z "$CG" ] || rmdir "$CG" 2>/dev/null
-    echo "inplace $(date +%s) One UI was never stopped" > "$S/return.outcome"
-    finished
-    say "The switch ended before One UI's framework was stopped: nothing to restore."
-    echo returned > "$CTL/state"
-    exit 0
-fi
-
 step "[2/5] Gate A: nothing of the session is left" 45
 # A process killed in the stop above ends only when it leaves the kernel: one
 # that is inside a system call that cannot be interrupted (state D: the exit of
@@ -558,8 +801,14 @@ if [ -n "$left" ]; then
 fi
 [ -z "$left" ] || failsafe "processes still in the session's namespace or cgroup: $left"
 [ -z "$CG" ] || rmdir "$CG" 2>/dev/null || say "the session's cgroup $CG is empty but could not be removed (logged only)"
-[ -f "$BASE/boot_id" ] || failsafe "no baseline of the switch ($BASE)"
-[ "$(cat "$BASE/boot_id")" = "$(cat "$P/sys/kernel/random/boot_id" 2>/dev/null)" ] || failsafe "the baseline is another boot's"
+early=0
+if [ ! -e "$CTL/stopped" ] && ! framework_down; then early=1; fi
+if [ "$early" = 0 ] || [ -e "$BASE/shmem_enabled" ] || [ -e "$BASE/max_map_count" ]; then
+    saved_boot=$(cat "$BASE/boot_id" 2>/dev/null)
+    [ -n "$saved_boot" ] || failsafe "no baseline of the switch ($BASE)"
+    [ "$saved_boot" = "$(cat "$P/sys/kernel/random/boot_id" 2>/dev/null)" ] || failsafe "the baseline is another boot's"
+fi
+[ "$FRAMEWORK" = 0 ] || restore_map_count
 # The stage, in every process's mount table and not only init's (OneOS run 45:
 # another namespace kept its own copy of a stage mount). By mount point or by
 # source. Nothing is unmounted here: a namespace that still has the stage as
@@ -567,6 +816,24 @@ fi
 m=$(grep -H -F "$SRC" "$P"/[0-9]*/mountinfo 2>/dev/null |
     awk -v s="$SM" -v r="$SRC" '$5 == s || index($5, s "/") == 1 || $4 == r || index($4, r "/") == 1 { print $1 " " $5 }' | head -n 3 | tr '\n' ' ')
 [ -z "$m" ] || failsafe "the stage is still mounted (mount table, mount point): $m"
+
+# If the switch never stopped One UI, leave the framework running. It may
+# still have changed shmem before it could write the stop mark.
+if [ "$early" = 1 ]; then
+    true > "$CTL/stop-loop.off"
+    true > "$CTL/feeder.off"
+    end_helper "$CTL/stop-loop.pid" --stop-loop
+    end_helper "$CTL/feeder.pid" --feed
+    restore_shmem
+    echo "inplace $(date +%s) One UI was never stopped" > "$S/return.outcome"
+    finished
+    say "The switch ended before One UI's framework was stopped: left it running."
+    echo returned > "$CTL/state"
+    exit 0
+fi
+
+[ ! -e "$CTL/feeder.failed" ] || failsafe "watchdog feeder failed before handoff"
+
 added=$(awk '{ print $5 }' "$P/1/mountinfo" | sort | comm -13 "$BASE/mounts" - 2>/dev/null | grep -E '^/(data|system|vendor|product|system_ext|odm|apex)(/|$)' | head -n 3 | tr '\n' ' ')
 [ -z "$added" ] || failsafe "mounts added on One UI's partitions during the session: $added"
 # The daemons One UI cannot get back without a boot. surfaceflinger is not one
@@ -576,8 +843,10 @@ while read -r name pids; do
     now=$(pidof "$name" 2>/dev/null | tr ' ' ',')
     if [ "$name" = surfaceflinger ]; then
         SF_BASE=$pids
-        [ "$now" = "$pids" ] || say "surfaceflinger is ${now:-not running} now, was $pids at the switch (it is restarted below)"
-        continue
+        if [ "$FRAMEWORK" = 0 ]; then
+            [ "$now" = "$pids" ] || say "surfaceflinger is ${now:-not running} now, was $pids at the switch (it is restarted below)"
+            continue
+        fi
     fi
     [ "$now" = "$pids" ] || failsafe "One UI's $name is ${now:-not running} now, was $pids at the switch"
 done < "$BASE/pids"
@@ -585,12 +854,13 @@ for svc in vold keystore2 servicemanager hwservicemanager logd lmkd installd; do
     [ "$(base_prop init.svc.$svc)" = running ] || continue
     [ "$(getprop init.svc.$svc)" = running ] || failsafe "$svc is $(getprop init.svc.$svc), was running at the switch"
 done
+restore_shmem
 [ "$(getenforce 2>/dev/null)" = "$(cat "$BASE/selinux")" ] || failsafe "SELinux is $(getenforce 2>/dev/null), was $(cat "$BASE/selinux")"
 # The session scripts set no persist property. What differs from the switch
 # is One UI's own daemons' doing, or xnuhost's against its contract: by name
 # only (values can be personal), and nothing is written back.
 changed=$(getprop | awk -F'\\]: \\[' 'NR == FNR { b[$1] = $2; next } $1 ~ /^\[persist\./ && (!($1 in b) || b[$1] != $2) { sub(/^\[/, "", $1); print $1 }' "$BASE/props" - 2>/dev/null | head -n 20 | tr '\n' ' ')
-say "Gate A: no session process, the stage mounted nowhere, vold, keystore2 and servicemanager as at the switch, SELinux $(getenforce 2>/dev/null); persist properties that differ from the switch: ${changed:-none}"
+say "Gate A: no session process, the stage mounted nowhere, vold, keystore2 and servicemanager as at the switch, SELinux $(getenforce 2>/dev/null), shmem_enabled $(cat "$SHMEM_EN" 2>/dev/null || echo -); persist properties that differ from the switch: ${changed:-none}"
 
 step "[3/5] Gate B: One UI's display and services" 75
 # The stop loop must be gone before anything starts (its last ctl.stop can
@@ -634,6 +904,12 @@ fi
 # the old display state is trusted: the composer is restarted, surfaceflinger
 # with it, and the boot animation covers One UI's start. Each must come back,
 # or the phone reboots.
+if [ "$FRAMEWORK" = 1 ]; then
+    framework_services_intact
+    wait_found android.hardware.graphics.composer3.IComposer/default 5 ||
+        failsafe "the existing composer is no longer registered"
+    say "display and vendor services kept their original PIDs"
+else
 COMPOSER_SVC=""
 for c in vendor.qti.hardware.display.composer vendor.hwcomposer-3; do
     [ -n "$(getprop init.svc.$c)" ] && { COMPOSER_SVC=$c; break; }
@@ -703,6 +979,7 @@ for svc in perfmond media.tuner; do
     [ "$(base_prop init.svc.$svc)" = running ] && setprop ctl.restart $svc
 done
 say "audioserver, cameraserver, media and wificond restarted"
+fi
 
 # Everything One UI's framework waits for, with nothing of the session left.
 left=$(session_left)
@@ -714,11 +991,18 @@ say "Gate B: display, audio and One UI's services up, SELinux $(getenforce 2>/de
 
 step "[4/5] Starting One UI in place" 45
 # The USB gadget and adbd as One UI left them, before its UsbDeviceManager starts.
-usb_restore
+[ "$FRAMEWORK" = 1 ] || usb_restore
 # zygote's onrestart by hand: abort the FUSE connections the old framework left.
 timeout 10 vdc volume abort_fuse >/dev/null 2>&1
+watchdog_handoff
 # One UI's zygote_next ran through the session with the old framework's
 # children: a fresh one, as a boot gives (return_to_oneui.sh).
+if [ "$FRAMEWORK" = 1 ]; then
+    if [ "$(base_prop init.svc.zygote_next)" = running ]; then
+        setprop ctl.start zygote_next
+    fi
+    setprop ctl.start zygote
+else
 if [ -n "$(pidof zygote_next 2>/dev/null)" ] && [ "$(base_prop init.svc.zygote_next)" = running ]; then
     setprop ctl.restart zygote_next
 fi
@@ -728,6 +1012,7 @@ setprop ctl.restart netd
 n=0
 while [ $n -lt 20 ] && [ "$(getprop init.svc.zygote)" != running ]; do sleep 0.5; n=$((n + 1)); done
 [ "$(getprop init.svc.zygote)" = running ] || setprop ctl.start zygote
+fi
 if [ "$(base_prop init.svc.zygote_secondary)" = running ] && [ "$(getprop init.svc.zygote_secondary)" != running ]; then
     setprop ctl.start zygote_secondary
     say "One UI's zygote_secondary started"
@@ -736,6 +1021,9 @@ n=0
 while [ $n -lt 20 ] && [ "$(getprop init.svc.zygote)" != running ]; do sleep 0.5; n=$((n + 1)); done
 [ "$(getprop init.svc.zygote)" = running ] || failsafe "One UI's zygote did not start ($(getprop init.svc.zygote))"
 say "One UI's zygote started"
+if [ "$FRAMEWORK" = 1 ] && [ -f "$CTL/watchdog.target" ]; then
+    framework_watchdog_reacquire
+fi
 
 step "[5/5] Gate C: One UI's system_server" 290
 # By the clock, not by counting rounds: one round's "am" alone takes a second.
@@ -748,8 +1036,6 @@ while [ $t -lt 60 ]; do
 done
 [ -n "$ss" ] || failsafe "One UI's system_server did not start in 60 s"
 say "One UI's system_server $ss"
-# system_server feeds Samsung's software watchdog again from here.
-true > "$CTL/feeder.off"
 t0=$(now); up=0
 while :; do
     sleep 2; t=$(($(now) - t0))
@@ -766,7 +1052,45 @@ while :; do
     [ $up -gt 0 ] && [ $t -ge $((up + 20)) ] && break
     [ $up = 0 ] && [ $t -ge 180 ] && failsafe "user 0 not unlocked within 180 s"
 done
-end_helper "$CTL/feeder.pid" --feed
+if [ -f "$CTL/watchdog.target" ]; then
+    wd_expected=$(cat "$CTL/watchdog.target" 2>/dev/null)
+    wd_current=$($SH "$S/oneios_switch.sh" --watchdog-probe 2>/dev/null)
+    [ -n "$wd_expected" ] && [ "$wd_current" = "$wd_expected" ] ||
+        failsafe "system_server did not reacquire the watchdog"
+    say "watchdog ownership confirmed on the returned framework ($wd_current)"
+fi
+if [ "$FRAMEWORK" = 1 ]; then
+    framework_services_intact
+    [ "$(base_prop init.svc.zygote_next)" != running ] || [ "$(getprop init.svc.zygote_next)" = running ] ||
+        failsafe "zygote_next did not return"
+    for input_service in inputflinger input; do
+        [ "$(timeout 4 dumpsys --pid "$input_service" 2>/dev/null)" = "$ss" ] ||
+            failsafe "the restored system_server does not provide $input_service"
+    done
+    timeout 5 dumpsys input > "$CTL/input-after.txt" 2>&1 &&
+        grep -q 'Input Reader State' "$CTL/input-after.txt" &&
+        grep -q 'Input Dispatcher State' "$CTL/input-after.txt" &&
+        grep -q 'sec_touchscreen' "$CTL/input-after.txt" ||
+        failsafe "the restored input reader or dispatcher did not report the touchscreen"
+    timeout 5 input keyevent KEYCODE_SHIFT_LEFT >/dev/null 2>&1 ||
+        failsafe "the restored input service did not accept a test key"
+    say "restored input and inputflinger owned by system_server $ss, touchscreen reported and test key accepted"
+    if [ -s "$CTL/framework.elapsed" ] && [ "$(cat "$CTL/framework.elapsed")" = "$(cat "$S/session/return.request" 2>/dev/null)" ]; then
+        case "$(cat "$CTL/framework.mode" 2>/dev/null)" in
+            smoke)
+                echo "smoke complete" > "$CTL/framework.result" || failsafe "could not record smoke result"
+                cat "$BASE/boot_id" > "$S/smoke.accepted" || failsafe "could not save smoke admission" ;;
+            run)
+                if grep -Fq 'locked (mlock: the host cannot swap it)' "$S/session/xnuhost.log" &&
+                    grep -q 'first frame posted' "$CTL/display.log" &&
+                    [ -s "$CTL/captures/frame-0.png" ] && [ -e "$S/session/ready" ]; then
+                    echo "run complete" > "$CTL/framework.result"
+                else
+                    echo "run evidence incomplete" > "$CTL/framework.result"
+                fi ;;
+        esac
+    fi
+fi
 echo "inplace $(date +%s) $(cat "$P/sys/kernel/random/boot_id" 2>/dev/null)" > "$S/return.outcome"
 finished
 say "One UI restored in place ($(getenforce 2>/dev/null))."

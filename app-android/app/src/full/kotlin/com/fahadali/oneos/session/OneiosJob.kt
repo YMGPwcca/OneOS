@@ -62,6 +62,8 @@ object OneiosJob : BackgroundJob<OneiosJob.State>(State(), "oneos-oneios") {
         val status: OneiosStatus? = null,
         /** This phone takes the system ([OneiosSystem.offeredOn]); null until read. */
         val offered: Boolean? = null,
+        /** Whether hot-switch is certified for this phone (distinct from hardware checks). */
+        val switchAllowed: Boolean = true,
         /** The step in words while busy; afterwards the result or the reason it failed. */
         val message: String? = null,
         val failed: Boolean = false,
@@ -89,7 +91,7 @@ object OneiosJob : BackgroundJob<OneiosJob.State>(State(), "oneos-oneios") {
 
         /** The steps, the check of each package, what to do now ([OneiosFlow]). */
         val flow: OneiosFlow.View
-            get() = OneiosFlow.of(OneiosFlow.Input(status, offered, job, last, failure, runtimeRecord, imageRecord))
+            get() = OneiosFlow.of(OneiosFlow.Input(status, offered, job, last, failure, runtimeRecord, imageRecord, switchAllowed))
 
         /** "3.2 GB of 17.9 GB (18%) · 412 MB/s · about 2 min left", or null without a byte count. */
         val progressLine: String?
@@ -110,7 +112,7 @@ object OneiosJob : BackgroundJob<OneiosJob.State>(State(), "oneos-oneios") {
     @Volatile private var connection: HttpURLConnection? = null
 
     private fun othersBusy() = StageCheck.state.busy || PrepareJob.state.busy || LaunchJob.state.busy || LogJob.state.busy ||
-        OldStagesJob.state.busy || RemoveJob.state.busy || OneiosChecksJob.state.busy
+        OldStagesJob.state.busy || RemoveJob.state.busy || OneiosChecksJob.state.busy || OneiosToolJob.state.busy
 
     fun canStart(): Boolean = !state.busy && !othersBusy()
 
@@ -177,8 +179,10 @@ object OneiosJob : BackgroundJob<OneiosJob.State>(State(), "oneos-oneios") {
 
     private fun readStatus(app: Context): OneiosStatus = OneiosStatus.parse(must(root(app, OneiosRoot.Verb.STATUS, silenceMs = 180_000)).reply.results)
 
-    private fun offered(app: Context): Boolean =
-        runCatching { OneiosSystem.offeredOn(Profiles.resolve(FactProbe(app).collect(RootProbe(app).signals())).profile) }.getOrDefault(false)
+    private fun capabilities(app: Context): Pair<Boolean, Boolean> = runCatching {
+        val profile = Profiles.resolve(FactProbe(app).collect(RootProbe(app).signals())).profile
+        OneiosSystem.offeredOn(profile) to OneiosSystem.canSwitchOn(profile)
+    }.getOrDefault(false to false)
 
     // --- What the app checked at staging (shown beside root's status) ----------------
 
@@ -207,14 +211,14 @@ object OneiosJob : BackgroundJob<OneiosJob.State>(State(), "oneos-oneios") {
         if (state.copying) OneiosService.start(app)
         executor.execute {
             val result = runCatching { work(app) }
-            val offered = state.offered ?: offered(app)
+            val (offered, switchAllowed) = capabilities(app)
             val read = runCatching { cancelled = false; readStatus(app) }
             val status = read.getOrNull() ?: state.status
             fun words(e: Throwable) = e.message ?: e.javaClass.simpleName
             val why = result.exceptionOrNull()?.let(::words) ?: read.exceptionOrNull()?.takeIf { kind == OneiosFlow.Job.CHECK }?.let(::words)
             update(
                 State(
-                    Phase.IDLE, status, offered, why ?: result.getOrNull(), failed = why != null,
+                    Phase.IDLE, status, offered, switchAllowed, why ?: result.getOrNull(), failed = why != null,
                     last = kind, failure = why,
                     runtimeRecord = record(app, OneiosKind.RUNTIME), imageRecord = record(app, OneiosKind.IMAGE),
                 ),
@@ -272,9 +276,9 @@ object OneiosJob : BackgroundJob<OneiosJob.State>(State(), "oneos-oneios") {
      * preflight both have to pass, and a refusal changes nothing. When it works
      * One UI's framework stops, and this app with it.
      */
-    fun switch(ctx: Context, ticked: Boolean) = job(ctx, Phase.SWITCHING, OneiosFlow.Job.SWITCH, "Checking before the switch…") { app ->
+    fun switch(ctx: Context, ticked: Boolean, notThisPhoneTicked: Boolean = false) = job(ctx, Phase.SWITCHING, OneiosFlow.Job.SWITCH, "Checking before the switch…") { app ->
         val profile = Profiles.resolve(FactProbe(app).collect(RootProbe(app).signals())).profile
-        val gate = OneiosSystem.gate(profile, ticked)
+        val gate = OneiosSystem.gate(profile, ticked, notThisPhoneTicked)
         if (gate.level != Level.OK) throw Failed(if (gate.level == Level.BLOCK) gate.detail else "Tick the box first: ${gate.title}.")
         // This build's session scripts and boot screen, before every switch: an app update reaches the stage
         // without a new import. A refusal here (no stage yet, an open session) is not the answer: root's

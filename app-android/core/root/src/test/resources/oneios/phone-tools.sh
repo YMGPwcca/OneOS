@@ -31,6 +31,13 @@ spawn() { # <name>
     echo "$1" > "$T/proc/$p/comm"
     printf '%s\0' "$1" > "$T/proc/$p/cmdline"
     echo "$p" > "$T/pids/$1"
+    if [ "$1" = system_server ] && [ -f "$T/dev/watchdog" ] && [ ! -e "$T/behave/watchdog_no_reacquire" ]; then
+        # The kernel's exclusive open fails while the feeder still owns it.
+        if [ ! -e "$T/behave/watchdog_exclusive_handoff" ] || [ ! -d "$T/proc/4500" ]; then
+            mkdir "$T/proc/$p/fd"
+            ln -s "$T/dev/watchdog" "$T/proc/$p/fd/5"
+        fi
+    fi
     echo "$p"
 }
 unspawn() {
@@ -78,6 +85,25 @@ hang() { # a call that does not come back (until the test lets it)
 }
 
 case "$me" in
+    watchdog-stat)
+        case "$1" in "$T"/dev/*|"$T"/proc/*/fd/*) cat "$1" 2>/dev/null ;; *) exit 99 ;; esac ;;
+    watchdog-io)
+        echo "$*" >> "$T/log/watchdog"
+        case "$1" in
+            open)
+                [ ! -e "$T/behave/watchdog_busy" ] || { echo "Device or resource busy" >&2; exit 1; } ;;
+            ping)
+                [ "$2" = . ] || exit 99
+                if [ -e "$T/behave/watchdog_ping_fails" ] && [ -e "$T/behave/watchdog_pinged" ]; then
+                    echo "Input/output error" >&2
+                    exit 1
+                fi
+                if [ -e "$T/behave/watchdog_stop_after_ping" ]; then
+                    touch "$T/data/local/tmp/oneios/control/feeder.off"
+                fi
+                touch "$T/behave/watchdog_pinged" ;;
+            *) exit 99 ;;
+        esac ;;
     getprop)
         if [ $# -eq 0 ]; then sed 's/^\([^=]*\)=\(.*\)$/[\1]: [\2]/' "$T/props"; else prop "$1"; fi ;;
     setprop)
@@ -161,7 +187,9 @@ case "$me" in
     getevent)
         dev=${2##*/}
         case "$1" in
-            -pl) cat "$T/keystate/$dev" 2>/dev/null ;;
+            -pl)
+                if [ $# -eq 1 ]; then cat "$T/input-devices"
+                else cat "$T/keystate/$dev" 2>/dev/null; fi ;;
             -lq)
                 # The device's events as the test wrote them: "@ N" waits N
                 # (real) seconds, any other line is an event. Then it blocks,

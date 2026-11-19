@@ -185,7 +185,7 @@ class OneiosScriptTest {
             scripts()
             val sleep = listOf("/usr/bin/sleep", "/bin/sleep").first { File(it).canExecute() }
             val tools = OneiosScriptTest::class.java.getResourceAsStream("/oneios/phone-tools.sh")!!.readBytes().toString(Charsets.UTF_8).replace("@SLEEP@", sleep)
-            val names = listOf("getprop", "setprop", "pidof", "service", "getenforce", "am", "vdc", "sync", "renice", "lshal", "sleep", "now", "kill", "getevent")
+            val names = listOf("getprop", "setprop", "pidof", "service", "getenforce", "am", "vdc", "sync", "renice", "lshal", "sleep", "now", "kill", "getevent", "watchdog-stat", "watchdog-io")
             for (f in names.map { file("bin/$it") } + listOf(busybox, File(busybox.parentFile, "resetprop"))) {
                 f.parentFile.mkdirs()
                 f.writeText(tools)
@@ -227,7 +227,10 @@ class OneiosScriptTest {
             }
             if (stopped) File(control, "stopped").writeText("1\n")
             // A switch that never stopped One UI: its framework still runs.
-            if (!stopped) file("props").appendText("init.svc.zygote=running\n")
+            if (!stopped) {
+                daemon("zygote64", 320, initName = "zygote")
+                daemon("system_server", 321)
+            }
             val base = File(control, "base")
             File(base, "boot_id").writeText("boot-1\n")
             File(base, "selinux").writeText("Enforcing\n")
@@ -248,7 +251,14 @@ class OneiosScriptTest {
         }
 
         private fun builder(script: String, args: List<String>, env: Map<String, String>): ProcessBuilder {
-            val pb = ProcessBuilder(listOf(sh, File(stage, script).path) + args).redirectErrorStream(true)
+            val launch = if (args.firstOrNull() == "--watchdog-test") {
+                val register = "proc=\"\$ONEIOS_TEST_ROOT/proc/\$\$\"\n" +
+                    "mkdir -p \"\$proc\"\n" +
+                    "printf '%s (fixture) S 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 800\\n' \"\$\$\" > \"\$proc/stat\"\n" +
+                    "exec \"\$@\""
+                listOf(sh, "-c", register, "feeder-fixture", sh)
+            } else listOf(sh)
+            val pb = ProcessBuilder(launch + File(stage, script).path + args).redirectErrorStream(true)
             pb.environment()["ONEIOS_TEST_ROOT"] = root.path
             HostTools.into(pb.environment())
             pb.environment()["ONEIOS_TEST_SH"] = sh
@@ -274,6 +284,20 @@ class OneiosScriptTest {
         }
 
         fun returns(who: String = "manual", env: Map<String, String> = emptyMap()) = run("oneios_return.sh", who, env = env)
+
+        fun assertEarlyReturn(r: Ran) {
+            assertEquals(r.text, 0, r.exit)
+            assertEquals(r.text, "returned", state)
+            assertTrue(outcome, outcome.startsWith("inplace ") && outcome.endsWith("One UI was never stopped"))
+            assertEquals(listOf("320"), lines("pids/zygote64"))
+            assertEquals(listOf("321"), lines("pids/system_server"))
+            assertTrue(file("proc/320").isDirectory && file("proc/321").isDirectory)
+            assertEquals(emptyList<String>(), setprops)
+            assertEquals(emptyList<String>(), kills)
+            assertEquals(null, rebooted)
+            assertTrue(File(control, "stop.lock/return").isFile)
+            assertFalse(File(control, "return.guard").exists() || File(control, "returning.lock").exists())
+        }
 
         /** One UI came back in place: its display, its services and its framework, in that order, and no reboot. */
         fun assertInPlace(why: String = "") {
@@ -609,6 +633,21 @@ class OneiosScriptTest {
         assertTrue(sw.contains("SM-S928*") && sw.contains("e3q") && sw.contains("SM8650"))
     }
 
+    /** The S26 Ultra may run hardware diagnostics, but the root switch must fail closed until recovery is proven. */
+    @Test
+    fun theSwitchRefusesUnverifiedPhonesBeforeAnySessionChange() {
+        val lines = code(switchScript)
+        val sw = lines.joinToString("\n")
+        assertTrue(sw.contains("SM-S928*:e3q:SM8650"))
+        assertTrue(sw.contains("SM8850 hardware diagnostics do not certify recovery"))
+        val permission = lines.indexOfFirst { it.contains("SM-S928*:e3q:SM8650") }
+        val session = lines.indexOfFirst { it.contains("=== [1/5]") }
+        assertTrue(permission > 0 && permission < session)
+        val preflight = lines.subList(permission, session).joinToString("\n")
+        assertTrue(preflight.contains("refuse \"OneiOS switch is currently limited"))
+        assertFalse(sw.contains("Going on because you asked it to."))
+    }
+
     /** Every refusal of the switch comes before its first change: nothing above "THE SESSION" stops or starts anything. */
     @Test
     fun theSwitchRefusesBeforeItChangesAnything() {
@@ -623,19 +662,24 @@ class OneiosScriptTest {
         val after = lines.subList(session, lines.size).joinToString("\n")
         assertFalse("a refusal after the first change", Regex("""(^|\s)refuse "(?!\${'$'}SESSION is a symlink|\${'$'}CTL is a symlink|could not make)""").containsMatchIn(after))
         // The way back is armed before One UI's zygote stops.
-        assertTrue(after.indexOf("--watch") in 0 until after.indexOf("setprop ctl.stop zygote"))
-        assertTrue(after.indexOf("--keys") in 0 until after.indexOf("setprop ctl.stop zygote"))
+        assertTrue(after.indexOf("--watch") in 0 until after.indexOf("if ! stop_android_framework; then"))
+        assertTrue(after.indexOf("--keys") in 0 until after.indexOf("if ! stop_android_framework; then"))
         // The return starts One UI's zygote only after its checks, and reboots when one fails.
         val ret = code(returnScript).joinToString("\n")
         assertTrue(ret.indexOf("Gate A") in 0 until ret.indexOf("setprop ctl.start zygote"))
         assertTrue(ret.contains("failsafe \"processes still in the session's namespace"))
         assertTrue(ret.contains("setprop sys.powerctl \"reboot,\$1\""))
-        // A switch that ended before the stop is not a reason to restart One UI's framework or the phone:
-        // the stop is marked, and without the mark the return only ends the helpers.
-        assertTrue(after.indexOf("\"\$CTL/stopped\"") in 0 until after.indexOf("setprop ctl.stop zygote"))
-        val unmarked = ret.indexOf("if [ ! -e \"\$CTL/stopped\" ]")
-        assertTrue(unmarked in 0 until ret.indexOf("Gate A"))
-        assertTrue(ret.indexOf("exit 0", unmarked) in unmarked until ret.indexOf("Gate A"))
+        // The helper guards the experimental stop and records the stop before making any init request.
+        val stop = lines.joinToString("\n").substringAfter("stop_android_framework() {").substringBefore("framework_probe() {")
+        val mark = stop.indexOf("> \"\$CTL/stopped\"")
+        assertTrue(stop.indexOf("framework_recovery_ready || return 1") in 0 until mark)
+        assertTrue(mark in 0 until stop.indexOf("setprop ctl.stop zygote"))
+        // An unmarked session can return after cleanup and shmem restoration, before service restarts.
+        val unmarked = ret.indexOf("if [ ! -e \"\$CTL/stopped\" ] && ! framework_down; then")
+        val early = ret.indexOf("if [ \"\$early\" = 1 ]; then", unmarked)
+        val restore = ret.indexOf("restore_shmem", early)
+        assertTrue(unmarked in 0 until early && restore in early until ret.indexOf("exit 0", early))
+        assertTrue(ret.indexOf("exit 0", early) in restore until ret.indexOf("step \"[3/5] Gate B"))
         // A return with no open session does nothing.
         assertTrue(ret.indexOf("nothing to return from") in 0 until ret.indexOf("kill -TERM"))
     }
@@ -645,7 +689,105 @@ class OneiosScriptTest {
 
     private fun keyEvents(f: Fake, device: String, vararg lines: String) = f.file("events/$device").writeText(lines.joinToString("") { "$it\n" })
 
-    private fun reader(f: Fake, device: String, token: String = TOKEN) = f.start("oneios_switch.sh", "--keys", "/dev/input/$device", token, log = "log/keys-$device")
+    private fun reader(f: Fake, device: String, token: String = TOKEN) =
+        f.start("oneios_switch.sh", "--keys", "/dev/input/$device", token, if (device == "event0") "up" else "down", log = "log/keys-$device")
+
+    private fun inputDevice(event: String, name: String, keys: String) =
+        "add device 1: /dev/input/$event\n  name:     \"$name\"\n  events:\n    KEY (0001): $keys\n"
+
+    @Test
+    fun thePhysicalRescueKeysAreSelectedByNameAndCapability() = each { f ->
+        f.phone()
+        for ((device, up, down) in listOf(Triple("e3q", "event0", "event4"), Triple("m3q", "event0", "event5"), Triple("m3q", "event12", "event3"))) {
+            f.file("props").appendText("ro.product.device=$device\n")
+            // The wearable advertises both keys; the physical key normally appears on an indented continuation line.
+            f.file("input-devices").writeText(
+                inputDevice("event13", "HUAWEI Band 11-F88 Consumer Control", "KEY_VOLUMEDOWN KEY_VOLUMEUP") +
+                    inputDevice(down, "pmic_resin", "KEY_VOLUMEDOWN*") +
+                    inputDevice(up, "gpio-keys", "KEY_POWER\n                KEY_VOLUMEUP"),
+            )
+            val r = f.run("oneios_switch.sh", "--key-devices")
+            assertEquals(r.text, 0, r.exit)
+            assertEquals(listOf("/dev/input/$up", "/dev/input/$down"), r.text.trim().lines())
+            assertEquals(emptyList<String>(), f.setprops)
+        }
+    }
+
+    @Test
+    fun missingMismatchedOrAmbiguousPhysicalKeysAreRefusedEvenWithAWearable() = each { f ->
+        f.phone()
+        f.file("props").appendText("ro.product.device=m3q\n")
+        val up = inputDevice("event7", "gpio-keys", "KEY_VOLUMEUP")
+        val down = inputDevice("event2", "pmic_resin", "KEY_VOLUMEDOWN")
+        val hid = inputDevice("event13", "HUAWEI Band 11-F88 Consumer Control", "KEY_VOLUMEUP KEY_VOLUMEDOWN")
+        for (devices in listOf(
+            up, down,
+            up.replace("KEY_VOLUMEUP", "KEY_VOLUMEDOWN") + down.replace("KEY_VOLUMEDOWN", "KEY_VOLUMEUP"),
+            up.replace("KEY_VOLUMEUP", "KEY_VOLUMEUP_EXTRA") + down,
+            up + down + inputDevice("event8", "gpio-keys", "KEY_VOLUMEUP"),
+        )) {
+            f.file("input-devices").writeText(devices + hid)
+            val r = f.run("oneios_switch.sh", "--key-devices")
+            assertEquals(r.text, 2, r.exit)
+            assertTrue(r.text, r.text.contains("could not validate physical volume keys"))
+            assertEquals(emptyList<String>(), f.setprops)
+        }
+    }
+
+    @Test
+    fun m3qEventReadersRequireBothPhysicalKeysForTheChord() = each { f ->
+        f.phone(scale = 4, state = "returning")
+        f.file("props").appendText("ro.product.device=m3q\n")
+        File(f.control, "keys/session").writeText("$TOKEN\n")
+        f.file("input-devices").writeText(
+            inputDevice("event9", "gpio-keys", "KEY_VOLUMEUP") +
+                inputDevice("event6", "pmic_resin", "KEY_VOLUMEDOWN") +
+                inputDevice("event13", "HUAWEI Band 11-F88 Consumer Control", "KEY_VOLUMEUP KEY_VOLUMEDOWN"),
+        )
+        // Only the mapped role counts from each selected node. The wearable can go away at any time.
+        keyEvents(f, "event9", "EV_KEY KEY_VOLUMEUP DOWN", "EV_KEY KEY_VOLUMEDOWN DOWN")
+        keyEvents(f, "event6", "@ 1.8", "EV_KEY KEY_VOLUMEDOWN DOWN")
+        keyEvents(f, "event13", "EV_KEY KEY_VOLUMEUP DOWN", "EV_KEY KEY_VOLUMEDOWN DOWN")
+        val selected = f.run("oneios_switch.sh", "--key-devices")
+        assertEquals(selected.text, 0, selected.exit)
+        for ((node, role) in selected.text.trim().lines().zip(listOf("up", "down"))) {
+            f.start("oneios_switch.sh", "--keys", node, TOKEN, role, log = "log/keys-$role")
+        }
+        val request = File(f.session, "return.request")
+        await("physical Volume Up down") { File(f.control, "keys/up").takeIf { it.isFile }?.readText()?.trim() == "DOWN" }
+        assertFalse(File(f.control, "keys/down").exists())
+        f.file("events/event13").delete()
+        await("physical Volume Down down") { File(f.control, "keys/down").takeIf { it.isFile }?.readText()?.trim() == "DOWN" }
+        assertFalse(request.exists())
+        await("the physical event chord") { request.length() > 0 }
+        assertTrue(request.readText().startsWith("keys: Volume Up + Volume Down held 3 s at "))
+    }
+
+    @Test
+    fun m3qPollingRequiresTheMappedKeysAndIgnoresWearableState() = each { f ->
+        f.phone(scale = 4, state = "returning")
+        f.file("props").appendText("ro.product.device=m3q\n")
+        File(f.control, "keys/session").writeText("$TOKEN\n")
+        val up = inputDevice("event12", "gpio-keys", "KEY_VOLUMEUP* KEY_VOLUMEDOWN*")
+        val down = inputDevice("event3", "pmic_resin", "KEY_VOLUMEDOWN")
+        val hid = inputDevice("event13", "HUAWEI Band 11-F88 Consumer Control", "KEY_VOLUMEUP* KEY_VOLUMEDOWN*")
+        f.file("input-devices").writeText(hid + down + up)
+        val selected = f.run("oneios_switch.sh", "--key-devices")
+        assertEquals(selected.text, 0, selected.exit)
+        f.file("keystate/event12").writeText(up)
+        f.file("keystate/event3").writeText(down)
+        f.file("keystate/event13").writeText(hid)
+        f.start("oneios_switch.sh", "--keys-poll", TOKEN, *selected.text.trim().lines().toTypedArray())
+        val request = File(f.session, "return.request")
+        Thread.sleep(1600)
+        assertFalse(request.exists())
+        f.file("keystate/event13").delete()
+        f.file("keystate/event3").writeText(down.replace("KEY_VOLUMEDOWN", "KEY_VOLUMEDOWN*"))
+        Thread.sleep(400)
+        assertFalse(request.exists())
+        await("the physical polled chord") { request.length() > 0 }
+        assertTrue(request.readText().startsWith("keys: Volume Up + Volume Down down for 3 s (polled) at "))
+    }
 
     /** Volume Up and Volume Down are two devices on the S24 Ultra (gpio-keys and the PMIC's resin key): one reader each. */
     @Test
@@ -725,9 +867,12 @@ class OneiosScriptTest {
     fun aHeldKeysAutoRepeatDoesNotBreakTheHold() = each { f ->
         f.phone(scale = 10, state = "returning")
         File(f.control, "keys/session").writeText("$TOKEN\n")
-        val repeats = (1..12).flatMap { listOf("@ 0.05", "EV_KEY KEY_VOLUMEUP REPEAT", "EV_KEY KEY_VOLUMEDOWN 00000002") }
-        keyEvents(f, "event0", *(listOf("EV_KEY KEY_VOLUMEUP DOWN", "EV_KEY KEY_VOLUMEDOWN 00000001") + repeats).toTypedArray())
+        val upRepeats = List(12) { listOf("@ 0.05", "EV_KEY KEY_VOLUMEUP REPEAT") }.flatten()
+        val downRepeats = List(12) { listOf("@ 0.05", "EV_KEY KEY_VOLUMEDOWN 00000002") }.flatten()
+        keyEvents(f, "event0", "EV_KEY KEY_VOLUMEUP DOWN", *upRepeats.toTypedArray())
+        keyEvents(f, "event4", "EV_KEY KEY_VOLUMEDOWN 00000001", *downRepeats.toTypedArray())
         reader(f, "event0")
+        reader(f, "event4")
         await("the request despite the repeats") { File(f.session, "return.request").isFile }
     }
 
@@ -782,16 +927,160 @@ class OneiosScriptTest {
     /** No watcher (killed, or stuck): five seconds after their request the key readers start the return themselves. */
     @Test
     fun withoutAWatcherTheKeysStartTheReturnThemselves() = each { f ->
-        f.phone(scale = 20)
+        f.phone(scale = 10)
         File(f.control, "keys/session").writeText("$TOKEN\n")
-        keyEvents(f, "event0", "EV_KEY KEY_VOLUMEUP DOWN", "EV_KEY KEY_VOLUMEDOWN DOWN")
+        keyEvents(f, "event0", "EV_KEY KEY_VOLUMEUP DOWN")
+        // Separate the presses so only the second reader starts the timer. The fake /proc
+        // does not track concurrent return shells automatically.
+        keyEvents(f, "event4", "@ 0.3", "EV_KEY KEY_VOLUMEDOWN DOWN")
         reader(f, "event0")
-        await("One UI back from the key reader alone", 60_000) { f.state == "returned" }
+        await("Volume Up before Volume Down") { File(f.control, "keys/up").takeIf { it.isFile }?.readText()?.trim() == "DOWN" }
+        reader(f, "event4")
+        await("the key reader's direct return", 60_000) { f.state == "returned" || f.outcome.startsWith("failsafe ") }
         assertTrue(f.returnLog, f.returnLog.contains("keys: the watcher did not start the return within 5 s"))
         assertTrue(f.returnLog, f.returnLog.contains("=== Return to One UI (keys-direct)"))
         // In a session of its own: the return ends the readers' process groups, and it came from one.
         assertTrue(f.lines("log/busybox").any { it.startsWith("setsid ") && it.endsWith("oneios_return.sh keys-direct") })
         f.assertInPlace()
+    }
+
+    /** The shmem THP mode the switch wrote (advise, for the 2 MiB host pages) comes back at the return. The node
+     *  carries every mode with the active one in brackets ("always within_size [advise] deny force"): the base keeps
+     *  the bare mode, and the return compares and restores the bare mode (2026-11-16: the whole line written back was
+     *  EINVAL and that rebooted the phone out of Gate A). */
+    @Test
+    fun shmemEnabledComesBackAtTheReturn() = each { f ->
+        f.phone()
+        File(f.root, "sys/kernel/mm/transparent_hugepage").mkdirs()
+        File(f.root, "sys/kernel/mm/transparent_hugepage/shmem_enabled").writeText("always within_size [advise] deny force\n")
+        File(f.control, "base/shmem_enabled").writeText("never\n")
+        f.returns()
+        f.assertInPlace()
+        assertEquals("never\n", f.file("sys/kernel/mm/transparent_hugepage/shmem_enabled").readText())
+        assertFalse(File(f.control, "base/shmem_enabled").exists())
+    }
+
+    /** The node is already at the mode the switch found (bracketed, in the annotated line): nothing is written. */
+    @Test
+    fun shmemAlreadyBackIsNotWrittenAgain() = each { f ->
+        f.phone()
+        File(f.root, "sys/kernel/mm/transparent_hugepage").mkdirs()
+        val line = "always within_size advise [never] deny force\n"
+        File(f.root, "sys/kernel/mm/transparent_hugepage/shmem_enabled").writeText(line)
+        File(f.control, "base/shmem_enabled").writeText("never\n")
+        f.returns()
+        f.assertInPlace()
+        assertEquals(line, f.file("sys/kernel/mm/transparent_hugepage/shmem_enabled").readText())
+        assertFalse(File(f.control, "base/shmem_enabled").exists())
+    }
+
+    /** The switch never wrote (no value in the base): the return touches nothing. */
+    @Test
+    fun shmemLeftAloneWhenTheSwitchNeverWrote() = each { f ->
+        f.phone()
+        File(f.root, "sys/kernel/mm/transparent_hugepage").mkdirs()
+        File(f.root, "sys/kernel/mm/transparent_hugepage/shmem_enabled").writeText("always within_size advise [never] deny force\n")
+        f.returns()
+        f.assertInPlace()
+        assertEquals("always within_size advise [never] deny force\n", f.file("sys/kernel/mm/transparent_hugepage/shmem_enabled").readText())
+    }
+
+    private fun shmemNode(f: Fake, modes: String) =
+        f.file("sys/kernel/mm/transparent_hugepage/shmem_enabled").apply { parentFile?.mkdirs(); writeText("$modes\n") }
+
+    @Test
+    fun earlyReturnRestoresShmemWithoutRestartingTheRunningFramework() = each { f ->
+        f.phone(stopped = false, state = "starting")
+        val node = shmemNode(f, "always within_size [advise] never deny force")
+        val baseline = File(f.control, "base/shmem_enabled").apply { writeText("never\n") }
+        assertFalse(File(f.control, "stopped").exists())
+        val r = f.returns()
+        assertEquals(r.text, "never\n", node.readText())
+        assertFalse(baseline.exists())
+        assertTrue(r.text, r.text.contains("shmem_enabled back: never"))
+        f.assertEarlyReturn(r)
+    }
+
+    @Test
+    fun earlyReturnDoesNotRewriteUnchangedShmem() = each { f ->
+        f.phone(stopped = false, state = "starting")
+        val modes = "always within_size advise [never] deny force"
+        val node = shmemNode(f, modes)
+        val baseline = File(f.control, "base/shmem_enabled").apply { writeText("never\n") }
+        val r = f.returns()
+        assertEquals("$modes\n", node.readText())
+        assertFalse(baseline.exists())
+        f.assertEarlyReturn(r)
+    }
+
+    @Test
+    fun earlyReturnWithoutAShmemBaselineLeavesTheModeAlone() = each { f ->
+        f.phone(stopped = false, state = "starting")
+        val modes = "always within_size [advise] never deny force"
+        val node = shmemNode(f, modes)
+        f.assertEarlyReturn(f.returns())
+        assertEquals("$modes\n", node.readText())
+    }
+
+    @Test
+    fun earlyReturnFailsSafeWhenShmemCannotBeWritten() = each { f ->
+        f.phone(stopped = false, state = "starting")
+        val modes = "always within_size [advise] never deny force"
+        val node = shmemNode(f, modes)
+        assertTrue(node.setReadOnly())
+        val baseline = File(f.control, "base/shmem_enabled").apply { writeText("never\n") }
+        val r = f.returns()
+        assertEquals(r.text, 1, r.exit)
+        f.assertFailsafe("shmem_enabled")
+        assertEquals("$modes\n", node.readText())
+        assertEquals("never\n", baseline.readText())
+        assertFalse(r.text, r.text.contains("shmem_enabled back:"))
+    }
+
+    @Test
+    fun earlyReturnFailsSafeWhenTheSavedShmemNodeIsMissing() = each { f ->
+        f.phone(stopped = false, state = "starting")
+        val baseline = File(f.control, "base/shmem_enabled").apply { writeText("never\n") }
+        val r = f.returns()
+        assertEquals(r.text, 1, r.exit)
+        f.assertFailsafe("shmem_enabled")
+        assertEquals("never\n", baseline.readText())
+    }
+
+    @Test
+    fun normalReturnFailsSafeWhenShmemReadbackDoesNotMatch() = failsafe("shmem_enabled") { f ->
+        val node = shmemNode(f, "advise")
+        File(f.control, "base/shmem_enabled").writeText("never\n")
+        // The fake node accepts the write, but the driver still reports its old value.
+        f.file("bin/cat").apply {
+            writeText("#!/bin/sh\nif [ \"\$1\" = '${node.path}' ]; then echo 'always within_size [advise] never deny force'; else exec /bin/cat \"\$@\"; fi\n")
+            assertTrue(setExecutable(true))
+        }
+    }
+
+    @Test
+    fun earlyReturnRejectsAStaleShmemBaseline() = each { f ->
+        f.phone(stopped = false, state = "starting")
+        val node = shmemNode(f, "advise")
+        val baseline = File(f.control, "base/shmem_enabled").apply { writeText("never\n") }
+        File(f.control, "base/boot_id").writeText("boot-0\n")
+        val r = f.returns()
+        assertEquals(r.text, 1, r.exit)
+        f.assertFailsafe("baseline is another boot's")
+        assertEquals("advise\n", node.readText())
+        assertEquals("never\n", baseline.readText())
+    }
+
+    @Test
+    fun normalReturnRejectsAMalformedShmemBaseline() = each { f ->
+        f.phone()
+        val node = shmemNode(f, "advise")
+        val baseline = File(f.control, "base/shmem_enabled").apply { writeText("always within_size advise [never] deny force\n") }
+        val r = f.returns()
+        assertEquals(r.text, 1, r.exit)
+        f.assertFailsafe("shmem_enabled")
+        assertEquals("advise\n", node.readText())
+        assertTrue(baseline.isFile)
     }
 
     private fun watcher(f: Fake, max: Int = 600): Process {
@@ -892,7 +1181,7 @@ class OneiosScriptTest {
         val w = watcher(f)
         assertTrue(w.waitFor(60, TimeUnit.SECONDS))
         assertTrue(f.returnLog, f.returnLog.contains("watcher: the switch did not start xnuhost within 60 s; returning to One UI"))
-        assertTrue(f.returnLog, f.returnLog.contains("The switch ended before One UI's framework was stopped: nothing to restore."))
+        assertTrue(f.returnLog, f.returnLog.contains("The switch ended before One UI's framework was stopped: left it running."))
         assertEquals("returned", f.state)
         assertEquals(emptyList<String>(), f.setprops)
     }
@@ -906,7 +1195,7 @@ class OneiosScriptTest {
         f.phone(stopped = false, state = "starting")
         val r = f.returns()
         assertEquals(r.text, 0, r.exit)
-        assertTrue(r.text, r.text.contains("The switch ended before One UI's framework was stopped: nothing to restore."))
+        assertTrue(r.text, r.text.contains("The switch ended before One UI's framework was stopped: left it running."))
         assertTrue(File(f.control, "stop.lock/return").isFile)
         assertEquals(emptyList<String>(), f.setprops)
     }
@@ -923,10 +1212,39 @@ class OneiosScriptTest {
         // The switch finishes: the mark, the framework down, the lock given back.
         File(f.control, "stopped").writeText("1\n")
         f.file("props").appendText("init.svc.zygote=stopped\n")
+        for ((name, pid) in listOf("zygote64" to 320, "system_server" to 321)) {
+            assertTrue(f.file("pids/$name").delete())
+            assertTrue(f.file("proc/$pid").deleteRecursively())
+        }
         assertTrue(File(f.control, "stop.lock").delete())
         assertTrue(r.waitFor(120, TimeUnit.SECONDS))
-        assertFalse(f.returnLog, f.returnLog.contains("nothing to restore"))
+        assertFalse(f.returnLog, f.returnLog.contains("left it running"))
         f.assertInPlace()
+    }
+
+    @Test
+    fun aReturnCannotReportSuccessWhileTheSwitchStillHoldsTheStopLock() = each { f ->
+        f.phone(stopped = false, state = "starting")
+        assertTrue(File(f.control, "stop.lock").mkdir())
+        File(f.control, "stop.lock/switch").writeText("4242\n")
+        f.proc(4242, "sh", cmdline = "/system/bin/sh /data/local/tmp/oneios/oneios_switch.sh")
+        val r = f.returns()
+        assertEquals(r.text, 1, r.exit)
+        f.assertFailsafe("the switch's stop lock is still held")
+        assertFalse(File(f.control, "stop.lock/return").exists())
+    }
+
+    @Test
+    fun aSwitchThatDiedHoldingTheStopLockCanStillRestoreShmem() = each { f ->
+        f.phone(stopped = false, state = "starting")
+        assertTrue(File(f.control, "stop.lock").mkdir())
+        File(f.control, "stop.lock/switch").writeText("4242\n")
+        val node = shmemNode(f, "always within_size [advise] never deny force")
+        val baseline = File(f.control, "base/shmem_enabled").apply { writeText("never\n") }
+        val r = f.returns()
+        f.assertEarlyReturn(r)
+        assertEquals("never\n", node.readText())
+        assertFalse(baseline.exists())
     }
 
     /** A session left "returned" with One UI's framework down (what the switch before the lock could do) is returned again. */
@@ -946,15 +1264,19 @@ class OneiosScriptTest {
         val arm = sw.indexOf("=== [2/5]")
         val before = sw.indexOf("return_asked && end_for_return \"One UI's framework was stopped\"", arm)
         val lock = sw.indexOf("until mkdir \"\$CTL/stop.lock\"", before)
-        val inside = sw.indexOf("return_asked && end_for_return \"One UI's framework was stopped\"", lock)
-        val mark = sw.indexOf("echo \"\$(date +%s)\" > \"\$CTL/stopped\"", inside)
-        val stop = sw.indexOf("setprop ctl.stop zygote", mark)
-        val unlock = sw.indexOf("rmdir \"\$CTL/stop.lock\"", stop)
+        val owner = sw.indexOf("echo \$\$ 2>/dev/null > \"\$CTL/stop.lock/switch\"", lock)
+        val cancel = "return_asked && { release_stop_lock; end_for_return \"One UI's framework was stopped\"; }"
+        val inside = sw.indexOf(cancel, owner)
+        val saveShmem = sw.indexOf("mv -f \"\$B/shmem_enabled.tmp\" \"\$B/shmem_enabled\"", inside)
+        val setShmem = sw.indexOf("echo advise 2>/dev/null > \"\$SHMEM_EN\"", saveShmem)
+        val afterShmem = sw.indexOf(cancel, setShmem)
+        val stop = sw.indexOf("if ! stop_android_framework; then", afterShmem)
+        val unlock = sw.indexOf("\n    release_stop_lock\n    clocks_tops", stop)
         val step4 = sw.indexOf("return_asked && end_for_return \"xnuhost was started\"", unlock)
         val start = sw.indexOf("=== [4/5]", step4)
         val failed = sw.indexOf("xnuhost did not start after", start)
         val back = sw.indexOf("\$SH \"\$STAGE/oneios_return.sh\" switch-failed", failed)
-        val order = listOf(arm, before, lock, inside, mark, stop, unlock, step4, start, failed, back)
+        val order = listOf(arm, before, lock, owner, inside, saveShmem, setShmem, afterShmem, stop, unlock, step4, start, failed, back)
         assertTrue(order.toString(), order.all { it >= 0 } && order == order.sorted())
         // The return keeps the lock and decides only after it has it.
         val rt = code(returnScript).joinToString("\n")
@@ -1174,6 +1496,24 @@ class OneiosScriptTest {
         assertTrue(r2.text, r2.text.contains("usb: no record of the switch"))
     }
 
+    @Test
+    fun usbBaselineIsSavedButRepairsStayOffByDefault() = each { f ->
+        f.phone()
+        usbOfOneUi(f)
+        assertTrue(File(f.stage, "usb-repair").delete())
+        val save = f.run("oneios_switch.sh", "--usb-save", env = mapOf("ONEIOS_USB_REPAIR" to "0"))
+        assertEquals(save.text, 0, save.exit)
+        val baseline = File(f.control, "base/usb").readLines()
+        assertTrue(baseline.toString(), baseline.containsAll(listOf("config=mtp,adb", "udc=$UDC", "adbd=running", "repair=0")))
+        f.file("props").appendText("sys.usb.config=mtp\ninit.svc.adbd=stopped\n")
+        val udc = f.file("config/usb_gadget/g1/UDC").apply { writeText("") }
+        val r = f.returns()
+        f.assertInPlace(r.text)
+        assertTrue(r.text, r.text.contains("usb: repairs are off"))
+        assertFalse(f.setprops.toString(), f.setprops.any { it.startsWith("sys.usb.") || it == "ctl.start adbd" })
+        assertEquals("", udc.readText())
+    }
+
     /**
      * The session's USB watcher puts One UI's UDC back on a gadget that was unbound and adb back on one that lost it,
      * and ends when the return begins.
@@ -1243,7 +1583,38 @@ class OneiosScriptTest {
 
     @Test
     fun aProcessThatCannotBeKilledIsAReboot() = failsafe("processes still in the session's namespace or cgroup: 5001") { f ->
+        assertTrue(f.file("sys/fs/cgroup/oneios_session/cgroup.kill").delete())
         File(f.guest(5001, "xnuhost-tasks"), "unkillable").createNewFile()
+    }
+
+    @Test
+    fun withoutCgroupKillTheReturnFindsPidsInTheCgroupNamespaceAndStageMounts() = each { f ->
+        f.phone()
+        val groupKill = f.file("sys/fs/cgroup/oneios_session/cgroup.kill")
+        assertTrue(groupKill.delete())
+        f.guest(5001, "cgroup-only", ns = "mnt:[90]").resolve("mountinfo").delete()
+        f.proc(5002, "namespace-only", ns = GUEST_NS)
+        f.guest(5003, "stage-holder-only", ns = "mnt:[91]", cgroup = false)
+        f.proc(5004, "unrelated", ns = "mnt:[92]")
+        val r = f.returns()
+        f.assertInPlace(r.text)
+        assertTrue(f.kills.toString(), f.kills.containsAll(listOf("-TERM $XNUHOST", "-9 5001", "-9 5002", "-9 5003")))
+        for (pid in 5001..5003) assertFalse(f.file("proc/$pid").exists())
+        assertFalse(groupKill.exists())
+        assertTrue(f.file("proc/5004").isDirectory)
+        assertFalse(f.kills.toString(), f.kills.any { it.endsWith(" 5004") || it.endsWith(" 1") })
+    }
+
+    @Test
+    fun aSurvivingStageHolderPreventsEarlyReturnSuccessWithoutCgroupKill() = each { f ->
+        f.phone(stopped = false, state = "starting")
+        assertTrue(f.file("sys/fs/cgroup/oneios_session/cgroup.kill").delete())
+        File(f.guest(6000, "stage-holder", ns = "mnt:[90]", cgroup = false), "unkillable").createNewFile()
+        val r = f.returns()
+        assertEquals(r.text, 1, r.exit)
+        f.assertFailsafe("processes still in the session's namespace or cgroup: 6000")
+        assertTrue(f.file("proc/6000").isDirectory)
+        assertTrue(f.kills.toString(), "-9 6000" in f.kills)
     }
 
     @Test
@@ -1310,6 +1681,207 @@ class OneiosScriptTest {
         assertTrue(f.outcome, f.outcome.startsWith("failsafe ") && f.outcome.contains("the return did not finish within 300s (last step: [3/5] Gate B: One UI's display and services)"))
         assertTrue(f.returnLog, f.returnLog.contains("GUARD: the return did not finish within 300s"))
         assertFalse(f.setprops.any { it == "ctl.restart netd" || it == "ctl.start zygote" })
+    }
+
+    @Test
+    fun aDisarmedOrSupersededReturnGuardNeverReboots() = each { f ->
+        f.phone(state = "returning")
+        val token = File(f.control, "return.guard")
+        File(f.control, "return.watch").writeText("1 expired step\n")
+        for (active in listOf(null, "newer")) {
+            if (active == null) token.delete() else token.writeText("$active\n")
+            val guard = f.run("oneios_return.sh", "--guard", "older", env = mapOf("ONEIOS_TEST_GUARD_MAX" to "4"))
+            assertEquals(guard.text, 0, guard.exit)
+            assertTrue(f.outcome.isEmpty())
+            assertEquals(emptyList<String>(), f.setprops)
+        }
+        val feed = f.run("oneios_switch.sh", "--feed")
+        assertEquals(feed.text, 3, feed.exit)
+        assertFalse(File(f.control, "watchdog_feeder.log").exists())
+    }
+
+    private fun watchdogFixture(f: Fake, m3q: Boolean = false) {
+        val (model, device, soc) = if (m3q) Triple("SM-S948B", "m3q", "SM8850") else Triple("SM-S928B", "e3q", "SM8650")
+        f.file("props").appendText("ro.product.model=$model\nro.product.device=$device\nro.soc.model=$soc\n")
+        watchdogArm(f)
+        val nodes = mapOf("watchdog" to "a:82", "watchdog0" to "f2:0", "watchdog1" to "f2:1")
+        f.file("dev").mkdir()
+        for ((node, id) in nodes) f.file("dev/$node").writeText("$id\n")
+        Files.createSymbolicLink(f.file("dev/softdog").toPath(), f.file("dev/watchdog0").toPath())
+        f.file("sys/class/misc/watchdog").mkdirs()
+        f.file("sys/class/misc/watchdog/dev").writeText("10:130\n")
+        for ((number, name) in listOf(0 to "Software Watchdog", 1 to "Qualcomm watchdog")) {
+            val meta = f.file("sys/class/watchdog/watchdog$number").apply { mkdirs() }
+            meta.resolve("identity").writeText("$name\n")
+            meta.resolve("dev").writeText("242:$number\n")
+            meta.resolve("state").writeText("active\n")
+            meta.resolve("timeout").writeText("100\n")
+        }
+        f.file("proc/321/fd").mkdirs()
+        for ((fd, node) in listOf(5 to "watchdog", 6 to "softdog", 7 to "watchdog0")) {
+            Files.createSymbolicLink(f.file("proc/321/fd/$fd").toPath(), f.file("dev/$node").toPath())
+        }
+    }
+
+    private fun watchdogArm(f: Fake) {
+        f.file("proc/uptime").writeText("100.00 0.00\n")
+        File(f.control, "watchdog.generation").writeText("fixture-watchdog\n")
+        File(f.control, "feeder.arm").writeText("fixture-watchdog 100\n")
+    }
+
+    private fun watchdogReady(f: Fake) {
+        watchdogArm(f)
+        f.file("proc/4500/stat").writeText("4500 (fixture) S " + "0 ".repeat(18) + "800\n")
+        File(f.control, "feeder.heartbeat").writeText("fixture-watchdog 4500 800 100\n")
+    }
+
+    @Test
+    fun watchdogPlanDeduplicatesAliasesForTheOwnedS24Softdog() = each { f ->
+        f.phone(stopped = false, state = "starting")
+        watchdogFixture(f)
+        val plan = f.run("oneios_switch.sh", "--watchdog-probe")
+        assertEquals(plan.text, 0, plan.exit)
+        assertEquals("watchdog0 f2:0", plan.text.trim())
+        assertTrue(f.lines("log/watchdog").isEmpty())
+        assertTrue(f.setprops.isEmpty())
+    }
+
+    @Test
+    fun watchdogPlanRefusesUnverifiedDevicesAndMissingMetadata() = each { f ->
+        f.phone(stopped = false, state = "starting")
+        watchdogFixture(f, m3q = true)
+        val m3q = f.run("oneios_switch.sh", "--watchdog-probe")
+        assertEquals(m3q.text, 2, m3q.exit)
+        assertTrue(m3q.text, m3q.text.contains("watchdog recovery"))
+        f.file("props").appendText("ro.product.model=SM-S928B\nro.product.device=e3q\nro.soc.model=SM8650\n")
+        val meta = f.file("sys/class/watchdog/watchdog0")
+        for ((name, value) in listOf("identity" to "Software Watchdog", "timeout" to "100", "state" to "active", "dev" to "242:0")) {
+            assertTrue(meta.resolve(name).delete())
+            val missing = f.run("oneios_switch.sh", "--watchdog-probe")
+            assertEquals(missing.text, 2, missing.exit)
+            meta.resolve(name).writeText("$value\n")
+        }
+        meta.resolve("identity").writeText("Qualcomm SoC watchdog\n")
+        val unsupported = f.run("oneios_switch.sh", "--watchdog-probe")
+        assertEquals(unsupported.text, 2, unsupported.exit)
+        meta.resolve("identity").writeText("Software Watchdog\n")
+        Files.createSymbolicLink(f.file("proc/321/fd/8").toPath(), f.file("dev/watchdog1").toPath())
+        val extra = f.run("oneios_switch.sh", "--watchdog-probe")
+        assertEquals(extra.text, 2, extra.exit)
+        assertTrue(f.lines("log/watchdog").isEmpty())
+        assertTrue(f.setprops.isEmpty())
+    }
+
+    @Test
+    fun watchdogFeedOpensOnlyOnceAndNeverSendsMagicClose() = each { f ->
+        f.phone()
+        watchdogFixture(f)
+        File(f.control, "watchdog.target").writeText("watchdog0 f2:0\n")
+        f.behave("watchdog_stop_after_ping")
+        val feed = f.run("oneios_switch.sh", "--watchdog-test", "feed")
+        assertEquals(feed.text, 0, feed.exit)
+        assertEquals(listOf("open watchdog0", "ping ."), f.lines("log/watchdog"))
+        assertTrue(File(f.control, "feeder.ready").isFile)
+        assertTrue(File(f.control, "feeder.heartbeat").readText().trim().endsWith(" 800 100"))
+        assertFalse(File(f.control, "feeder.failed").exists())
+    }
+
+    @Test
+    fun watchdogBusyRequestsRecoveryWithoutRetryingAnotherAlias() = each { f ->
+        f.phone()
+        watchdogFixture(f)
+        File(f.control, "watchdog.target").writeText("watchdog0 f2:0\n")
+        f.behave("watchdog_busy")
+        val feed = f.run("oneios_switch.sh", "--watchdog-test", "feed")
+        assertEquals(feed.text, 4, feed.exit)
+        assertEquals(listOf("open watchdog0"), f.lines("log/watchdog"))
+        assertFalse(File(f.control, "feeder.ready").exists())
+        assertTrue(File(f.control, "feeder.failed").isFile)
+        assertTrue(File(f.session, "return.request").readText().contains("watchdog"))
+        assertEquals(1, f.returns().exit)
+        f.assertFailsafe("watchdog feeder failed")
+    }
+
+    @Test
+    fun watchdogFeedRejectsARenumberedCharacterDeviceBeforeOpeningIt() = each { f ->
+        f.phone()
+        watchdogFixture(f)
+        File(f.control, "watchdog.target").writeText("watchdog0 f2:0\n")
+        f.file("dev/watchdog0").writeText("f3:0\n")
+        val feed = f.run("oneios_switch.sh", "--watchdog-test", "feed")
+        assertEquals(feed.text, 4, feed.exit)
+        assertTrue(f.lines("log/watchdog").isEmpty())
+        assertFalse(File(f.control, "feeder.ready").exists())
+        assertTrue(File(f.control, "feeder.failed").isFile)
+    }
+
+    @Test
+    fun watchdogWriteFailureAfterReadinessInvalidatesTheFeeder() = each { f ->
+        f.phone()
+        watchdogFixture(f)
+        File(f.control, "watchdog.target").writeText("watchdog0 f2:0\n")
+        f.behave("watchdog_ping_fails")
+        val feed = f.run("oneios_switch.sh", "--watchdog-test", "feed")
+        assertEquals(feed.text, 4, feed.exit)
+        assertEquals(listOf("open watchdog0", "ping .", "ping ."), f.lines("log/watchdog"))
+        assertFalse(File(f.control, "feeder.ready").exists())
+        assertTrue(File(f.control, "feeder.failed").isFile)
+        assertTrue(File(f.session, "return.request").isFile)
+        assertEquals(1, f.returns().exit)
+        f.assertFailsafe("watchdog feeder failed")
+    }
+
+    @Test
+    fun watchdogEarlyReturnLeavesTheRunningFrameworkInControl() = each { f ->
+        f.phone(stopped = false, state = "starting")
+        watchdogFixture(f)
+        File(f.control, "watchdog.target").writeText("watchdog0 f2:0\n")
+        val feed = f.run("oneios_switch.sh", "--watchdog-test", "feed")
+        assertEquals(feed.text, 3, feed.exit)
+        f.assertEarlyReturn(f.returns())
+        assertTrue(f.lines("log/watchdog").isEmpty())
+        assertFalse(File(f.control, "feeder.failed").exists())
+    }
+
+    @Test
+    fun watchdogReturnReleasesTheFeederBeforeRestartingNetd() = each { f ->
+        f.phone()
+        watchdogFixture(f)
+        File(f.control, "watchdog.target").writeText("watchdog0 f2:0\n")
+        File(f.control, "feeder.pid").writeText("4500\n")
+        File(f.control, "feeder.ready").writeText("4500\n")
+        f.proc(4500, "sh", cmdline = "sh /data/local/tmp/oneios/oneios_switch.sh --feed")
+        watchdogReady(f)
+        f.behave("watchdog_exclusive_handoff")
+        val r = f.returns()
+        assertEquals(r.text, 0, r.exit)
+        f.assertInPlace(r.text)
+        assertTrue(r.text, r.text.indexOf("watchdog feeder released") in 0 until r.text.indexOf("One UI's zygote started"))
+        assertFalse(f.file("proc/4500").exists())
+        assertTrue(File(f.control, "feeder.off").isFile)
+        assertTrue(f.lines("log/watchdog").isEmpty())
+    }
+
+    @Test
+    fun watchdogReturnFailsSafeIfTheFeederCannotReleaseItsDescriptor() = failsafe("watchdog feeder still holds") { f ->
+        File(f.control, "watchdog.target").writeText("watchdog0 f2:0\n")
+        File(f.control, "feeder.pid").writeText("4500\n")
+        File(f.control, "feeder.ready").writeText("4500\n")
+        f.proc(4500, "sh", cmdline = "sh /data/local/tmp/oneios/oneios_switch.sh --feed").resolve("unkillable").createNewFile()
+        watchdogReady(f)
+    }
+
+    @Test
+    fun watchdogReturnFailsSafeIfSystemServerNeverReacquiresTheWatchdog() = failsafe(
+        "system_server did not reacquire the watchdog", frameworkStarted = true,
+    ) { f ->
+        watchdogFixture(f)
+        File(f.control, "watchdog.target").writeText("watchdog0 f2:0\n")
+        File(f.control, "feeder.pid").writeText("4500\n")
+        File(f.control, "feeder.ready").writeText("4500\n")
+        f.proc(4500, "sh", cmdline = "sh /data/local/tmp/oneios/oneios_switch.sh --feed")
+        watchdogReady(f)
+        f.behave("watchdog_no_reacquire")
     }
 
     /** One return at a time; a lock whose holder is gone does not keep the next return out. */
@@ -1381,10 +1953,10 @@ class OneiosScriptTest {
         val sw = lines.joinToString("\n")
         // Reading the keys never takes them from anyone (no grab; the word is only in comments), by events and by state.
         assertFalse(sw.contains("EVIOCGRAB"))
-        assertTrue(sw.contains("getevent -lq \"\$kd\"") && sw.contains("getevent -pl \"\$kd\""))
+        assertTrue(sw.contains("getevent -lq \"\$kd\"") && sw.contains("getevent -pl \"\$updev\"") && sw.contains("getevent -pl \"\$downdev\""))
         assertTrue(sw.contains("*\"KEY_VOLUMEUP*\"*") && sw.contains("*\"KEY_VOLUMEDOWN*\"*"))
         val session = sw.substring(sw.indexOf("echo \"=== [1/5]"))
-        val stop = session.indexOf("setprop ctl.stop zygote")
+        val stop = session.indexOf("if ! stop_android_framework; then")
         val xnuhost = session.indexOf("unshare -m")
         // The watcher, the readers and the poll start in sessions of their own before xnuhost's namespace exists.
         for (mode in listOf("--watch", "--keys \"\$kd\"", "--keys-poll")) {
@@ -1706,7 +2278,7 @@ class OneiosScriptTest {
         val d = bootScreen(f, processes = true)
         val r = f.returns()
         assertEquals(r.text, 0, r.exit)
-        assertTrue(r.text, r.text.contains("The switch ended before One UI's framework was stopped: nothing to restore."))
+        assertTrue(r.text, r.text.contains("The switch ended before One UI's framework was stopped: left it running."))
         assertBootScreenEnded(f, d, r.text)
         assertEquals(emptyList<String>(), f.setprops)
     }
@@ -1760,7 +2332,7 @@ class OneiosScriptTest {
         val session = sw.substring(sw.indexOf("echo \"=== [1/5]"))
         // It starts only after the way back is armed and checked, and before One UI's zygote stops.
         val begin = session.indexOf("\nbootui_begin\n")
-        assertTrue(begin in session.indexOf("if [ -n \"\$armed\" ]; then") until session.indexOf("setprop ctl.stop zygote"))
+        assertTrue(begin in session.indexOf("if [ -n \"\$armed\" ]; then") until session.indexOf("if ! stop_android_framework; then"))
         // Everything of it: no key device, no property, no service, no signal, no wakelock, no return request, no reboot.
         val helpers = sw.substring(sw.indexOf("BOOTUI=\"\$CTL/bootui\""), sw.indexOf("hard_reboot() {"))
         val mode = sw.substring(sw.indexOf("    --bootui)"), sw.indexOf("    --keys)"))
@@ -1780,7 +2352,7 @@ class OneiosScriptTest {
         val ret = code(returnScript).joinToString("\n")
         val ended = ret.indexOf("\nbootui_end\n")
         assertTrue(ended in ret.indexOf("step \"[1/5]") until ret.indexOf("step \"[2/5] Gate A"))
-        assertTrue(ended < ret.indexOf("if [ ! -e \"\$CTL/stopped\" ]"))
+        assertTrue(ended < ret.indexOf("if [ \"\$early\" = 1 ]; then"))
         val reboot = ret.substring(ret.indexOf("do_reboot() {"), ret.indexOf("failsafe() {"))
         assertTrue(reboot.indexOf("bootui_end") in 0 until reboot.indexOf("sys.powerctl"))
         val end = ret.substring(ret.indexOf("BOOTUI=\$CTL/bootui"), ret.indexOf("wait_found() {"))
@@ -1856,7 +2428,9 @@ class OneiosScriptTest {
         // The switch: until the pid is written, for as long as the inner shell runs, 30 s at most.
         val session = sw.substring(sw.indexOf("echo \"=== [4/5]"))
         val wait = session.substring(session.indexOf("unshare -m"), session.indexOf("XP=\$(cat \"\$SESSION/xnuhost.pid\""))
-        assertTrue(wait.contains("while [ \$n -lt 150 ] && [ ! -s \"\$SESSION/xnuhost.pid\" ]; do"))
+        assertTrue(wait.contains("inner_wait=150"))
+        assertTrue(wait.contains("[ \"\$FRAMEWORK\" = 0 ] || inner_wait=40"))
+        assertTrue(wait.contains("while [ \$n -lt \"\$inner_wait\" ] && [ ! -s \"\$SESSION/xnuhost.pid\" ]; do"))
         assertTrue(wait.contains("[ -n \"\$ip\" ] && kill -0 \"\$ip\" 2>/dev/null || break"))
         assertTrue(session.contains("the last lines of \$SESSION/xnuhost.log"))
     }

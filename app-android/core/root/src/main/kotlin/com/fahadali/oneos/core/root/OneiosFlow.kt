@@ -69,6 +69,8 @@ object OneiosFlow {
         val failure: String? = null,
         val runtimeRecord: OneiosStaged? = null,
         val imageRecord: OneiosStaged? = null,
+        /** False for phones allowed to diagnose hardware but not certified for hot-switch. */
+        val switchAllowed: Boolean = true,
     )
 
     data class Row(val step: Step, val mark: Mark, val line: String?)
@@ -111,6 +113,7 @@ object OneiosFlow {
 
         val phone = when {
             i.offered == false -> Row(Step.PHONE, Mark.FAILED, OneiosPlain.refused("iOS runs on the Galaxy S24 Ultra (SM-S928) only").line)
+            !i.switchAllowed -> Row(Step.PHONE, Mark.FAILED, "Hardware checks only: iOS hot-switch and One UI recovery are not validated on this device")
             st == null && i.running == Job.CHECK -> Row(Step.PHONE, Mark.RUNNING, "Asking root what is on this phone…")
             // A check whose own `status` failed: what is shown of the stage is the last answer, not this one.
             failedBy(Job.CHECK) != null || (st == null && failure != null) -> Row(Step.PHONE, Mark.FAILED, failure!!.line)
@@ -154,7 +157,7 @@ object OneiosFlow {
         // unless it only says what the next step is and that step is already on the screen.
         val problem = failure?.takeIf { i.running == null } ?: refusal
         val next = when {
-            i.offered == false -> Next.NOT_THIS_PHONE
+            i.offered == false || !i.switchAllowed -> Next.NOT_THIS_PHONE
             i.running != null -> Next.WAIT
             st?.sessionOpen == true -> Next.BACK_TO_ONE_UI
             st == null -> Next.CHECK_AGAIN

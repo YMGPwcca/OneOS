@@ -10,8 +10,8 @@
 #   oneios_switch.sh --check    the preflight only; changes nothing
 #   oneios_switch.sh --inner    (internal) inside the session's mount namespace
 #   oneios_switch.sh --watch    (internal) the watcher that returns to One UI
-#   oneios_switch.sh --keys D TOK        (internal) Volume Up + Volume Down, from device D's events
-#   oneios_switch.sh --keys-poll TOK D.. (internal) the same chord from the keys' state (works under a grab)
+#   oneios_switch.sh --keys D TOK ROLE   (internal) events from one physical volume key
+#   oneios_switch.sh --keys-poll TOK UP DOWN (internal) the same chord from the keys' state (works under a grab)
 #   oneios_switch.sh --feed     (internal) Samsung's software watchdog feeder
 #   oneios_switch.sh --stop-loop (internal) keeps One UI's zygote stopped
 #   oneios_switch.sh --bootui   (internal) the boot screen's stage line, from xnuhost's log
@@ -22,7 +22,7 @@
 # weaver, the lock-screen files, SELinux's mode, persist.* properties.
 # What it changes, all undone by oneios_return.sh or a reboot: One UI's zygote
 # (and zygote_secondary) stopped, the kernel wakelock oneios_session, Samsung's
-# software watchdog closed and fed, the cgroup oneios_session (xnuhost's own),
+# software watchdog fed while One UI is down, the cgroup oneios_session (xnuhost's own),
 # OneOS's boot screen on a surfaceflinger layer until the guest's first frame,
 # and, with USB debugging on, the USB watcher's repairs (sys.usb.config, adbd
 # and the gadget's UDC, each only back to One UI's own value).
@@ -56,6 +56,14 @@ SH=/system/bin/sh
 [ -z "$T" ] || SH="${ONEIOS_TEST_SH:-/bin/sh}"
 P="$T/proc"
 STAGE="$T/data/local/tmp/oneios"
+FRAMEWORK_STAGE=/data/adb/oneios-m3q-framework
+FRAMEWORK=0
+case "$0:$1" in
+    "$FRAMEWORK_STAGE/oneios_switch.sh":*|*":--framework-audit")
+        FRAMEWORK=1
+        STAGE="$FRAMEWORK_STAGE" ;;
+esac
+if [ -n "$T" ] && [ "${ONEIOS_TEST_FRAMEWORK:-}" = 1 ]; then FRAMEWORK=1; fi
 ANDROID_STAGE="$T/data/local/tmp/oneos"
 # session/ is what xnuhost and the switch share (its log, its pid, ready,
 # return.request, display.sock). control/ is the way back's own: the state,
@@ -65,6 +73,7 @@ ANDROID_STAGE="$T/data/local/tmp/oneos"
 SESSION="$STAGE/session"
 CTL="$STAGE/control"
 SELF="$STAGE/oneios_switch.sh"
+SELF_RETURN="$STAGE/oneios_return.sh"
 ABI=1
 APP="${ONEIOS_APP:-0}"
 [ "$APP" = 1 ] || APP=0
@@ -94,6 +103,281 @@ boot_id() { cat "$T/proc/sys/kernel/random/boot_id" 2>/dev/null; }
 # "dev:inode:size:mtime" of a file: what root recorded when it staged it.
 file_id() { stat -c '%d:%i:%s:%Y' "$1" 2>/dev/null; }
 
+# Only the S24 Ultra's identified Linux softdog is supported. The legacy
+# misc device (10:130) and the numbered watchdog0 can represent one device.
+# Resolve the holder's device number against sysfs without opening any node.
+watchdog_profile() {
+    if [ "$FRAMEWORK" = 1 ]; then
+        framework_identity
+        return
+    fi
+    case "$(getprop ro.product.model)" in SM-S928*) ;; *) return 1 ;; esac
+    [ "$(getprop ro.product.device)" = e3q ] && [ "$(getprop ro.soc.model)" = SM8650 ]
+}
+watchdog_id() {
+    if [ -n "$T" ]; then "$T/bin/watchdog-stat" "$1"
+    elif [ -c "$1" ]; then stat -Lc '%t:%T' "$1" 2>/dev/null; else return 1; fi
+}
+watchdog_softdog() { # <numbered node name>; print its device number
+    wd_class="$T/sys/class/watchdog/$1"
+    [ "$(cat "$wd_class/identity" 2>/dev/null)" = "Software Watchdog" ] || return 1
+    [ "$(cat "$wd_class/state" 2>/dev/null)" = active ] || return 1
+    # The supported S24 path has at least 100 s for the return handoff.
+    wd_timeout=$(cat "$wd_class/timeout" 2>/dev/null)
+    case "$wd_timeout" in ''|*[!0-9]*) return 1 ;; esac
+    [ "$wd_timeout" -ge 100 ] 2>/dev/null || return 1
+    if [ "$FRAMEWORK" = 1 ]; then
+        case "$(cat "$wd_class/nowayout" 2>/dev/null)" in 0|N|1|Y) ;; *) return 1 ;; esac
+        [ "$(cat "$wd_class/pretimeout" 2>/dev/null)" = 0 ] || return 1
+    fi
+    wd_dev=$(cat "$wd_class/dev" 2>/dev/null)
+    case "$wd_dev" in ''|:*|*:|*:*:*|*[!0-9:]*) return 1 ;; *:*) ;; *) return 1 ;; esac
+    wd_expected=$(printf '%x:%x' "${wd_dev%:*}" "${wd_dev#*:}") || return 1
+    [ "$(watchdog_id "$T/dev/$1")" = "$wd_expected" ] || return 1
+    printf '%s\n' "$wd_expected"
+}
+
+# A separate, root-owned review record binds the handset's kernel, endpoint,
+# return budget and exact native artifact. The host CLI never creates one.
+framework_watchdog_plan() {
+    q="$STAGE/watchdog.qualification"
+    [ -f "$q" ] && root_only "$q" || return 1
+    read -r q_kernel q_module q_binary q_node q_id q_mode q_timeout q_return q_extra < "$q" || return 1
+    [ -z "$q_extra" ] && [ "$q_node $q_id" = "$1" ] || return 1
+    [ "$(sha256sum "$T/sys/kernel/notes" 2>/dev/null | cut -d' ' -f1)" = "$q_kernel" ] &&
+        [ "$(sha256sum "$T/sys/module/softdog/notes/.note.gnu.build-id" 2>/dev/null | cut -d' ' -f1)" = "$q_module" ] &&
+        [ "${#q_kernel}" = 64 ] && [ "${#q_module}" = 64 ] && [ "${#q_binary}" = 64 ] || return 1
+    wd_sys="$T/sys/class/watchdog/$q_node"
+    case "$(cat "$wd_sys/nowayout" 2>/dev/null):$q_mode" in 0:0|N:0|1:1|Y:1) ;; *) return 1 ;; esac
+    q_left=$(cat "$wd_sys/timeleft" 2>/dev/null)
+    watchdog_uint "$q_timeout" && watchdog_uint "$q_return" && watchdog_uint "$q_left" &&
+        [ "$q_timeout" -ge 100 ] && [ "$q_timeout" -le 65535 ] &&
+        [ "$q_return" -ge 5 ] && [ "$q_return" -le 30 ] &&
+        [ "$q_left" -ge 45 ] && [ "$q_left" -le "$q_timeout" ] &&
+        [ "$(cat "$wd_sys/timeout" 2>/dev/null)" = "$q_timeout" ] || return 1
+    printf '%s %s %s %s\n' "$q_mode" "$q_timeout" "$q_return" "$q_binary"
+}
+watchdog_target() {
+    watchdog_profile || return 1
+    wd_holder=$(pidof system_server 2>/dev/null)
+    case "$wd_holder" in ''|*[!0-9]*) return 1 ;; esac
+    wd_links=$(ls -l "$P/$wd_holder/fd" 2>/dev/null) || return 1
+    wd_fds=$(printf '%s\n' "$wd_links" | awk -v prefix="$T/dev/" '
+        NF >= 3 && $(NF-1) == "->" && index($NF, prefix) == 1 && $(NF-2) ~ /^[0-9]+$/ {
+            node = substr($NF, length(prefix) + 1)
+            if (node ~ /^(watchdog|softdog)[0-9]*$/) print $(NF-2)
+        }')
+    wd_held=""
+    for wd_fd in $wd_fds; do
+        wd_id=$(watchdog_id "$P/$wd_holder/fd/$wd_fd") || return 1
+        wd_held="$wd_held $wd_id "
+    done
+    wd_target=""
+    for wd_class in "$T"/sys/class/watchdog/watchdog*; do
+        wd_name=${wd_class##*/}
+        case "${wd_name#watchdog}" in ''|*[!0-9]*) continue ;; esac
+        wd_id=$(watchdog_softdog "$wd_name") || continue
+        if [ "$FRAMEWORK" = 0 ] && [ "$wd_name" = watchdog0 ] && [ "$(cat "$T/sys/class/misc/watchdog/dev" 2>/dev/null)" = 10:130 ]; then
+            wd_alias=a:82
+        else
+            wd_alias=$wd_id
+        fi
+        case "$wd_held" in *" $wd_id "*|*" $wd_alias "*) ;; *) continue ;; esac
+        [ -z "$wd_target" ] || return 1
+        wd_target="$wd_name $wd_id"
+    done
+    [ -n "$wd_target" ] || return 1
+    # An additional watchdog held by system_server would lose its owner too.
+    for wd_id in $wd_held; do
+        [ "$wd_id" = "${wd_target#* }" ] || {
+            [ "$FRAMEWORK" = 0 ] && [ "${wd_target%% *}" = watchdog0 ] && [ "$wd_id" = a:82 ] &&
+                [ "$(cat "$T/sys/class/misc/watchdog/dev" 2>/dev/null)" = 10:130 ]
+        } || return 1
+    done
+    printf '%s\n' "$wd_target"
+}
+# Software supervision for the existing S24 path. These are not hardware
+# expiry bounds. Whole seconds of Linux boot uptime, independent of wall time.
+WD_FIRST=3
+WD_MAX_AGE=5
+watchdog_uint() {
+    case "$1" in ''|0[0-9]*|*[!0-9]*|??????????*) return 1 ;; esac
+}
+watchdog_now() {
+    read -r wd_uptime _ < "$P/uptime" || return 1
+    case "$wd_uptime" in *.[0-9][0-9]) ;; *) return 1 ;; esac
+    wd_seconds=${wd_uptime%.*}
+    watchdog_uint "$wd_seconds" || return 1
+    printf '%s\n' "$wd_seconds"
+}
+watchdog_birth() {
+    sed 's/^.*) //' "$P/$1/stat" 2>/dev/null | awk '$1 != "Z" && $1 != "X" && $20 ~ /^[0-9]+$/ { print $20; exit }'
+}
+watchdog_generation() {
+    cat "$CTL/watchdog.generation" 2>/dev/null
+}
+publish_return_request() {
+    # Link a complete record into the shared directory without replacing an
+    # existing request or following a link supplied by the guest.
+    [ ! -e "$SESSION/return.request" ] || return 0
+    req=$(mktemp "$CTL/return.request.XXXXXX") || return 1
+    printf '%s\n' "$1" > "$req" && ln -T "$req" "$SESSION/return.request" 2>/dev/null
+    rm -f "$req"
+}
+watchdog_failed() {
+    # A late feeder from an old session, or a normal close, cannot request
+    # recovery. Keep the first diagnosis and never replace another request.
+    [ ! -e "$CTL/feeder.off" ] && [ "$(watchdog_generation)" = "$WD_GEN" ] || return 4
+    if (set -C; printf '%s\n' "$*" > "$CTL/feeder.failed") 2>/dev/null; then
+        echo "$(date +%T) watchdog feeder failed: $*" >> "$CTL/watchdog_feeder.log"
+        rm -f "$CTL/feeder.ready"
+        publish_return_request "watchdog feeder failed: $*"
+    fi
+    return 4
+}
+watchdog_pings() {
+    # Confirm the opened descriptor before sending any byte. One open for
+    # the whole session, with plain keepalives and a normal close.
+    [ -n "$T" ] || [ "$(watchdog_id "$P/$$/fd/3")" = "$wd_saved" ] || return 1
+    wd_keepalive=.
+    wd_first=1
+    wd_last=$wd_armed
+    while [ ! -e "$CTL/feeder.off" ] && [ "$(watchdog_generation)" = "$WD_GEN" ]; do
+        if [ -n "$T" ]; then "$T/bin/watchdog-io" ping "$wd_keepalive" || return 1
+        else printf '%s' "$wd_keepalive" >&3 || return 1; fi
+        # Only a completed keepalive earns a new timestamp. Never publish
+        # into a new session or turn a late first ping into readiness.
+        [ "$(watchdog_generation)" = "$WD_GEN" ] || return 0
+        wd_tick=$(watchdog_now) || return 1
+        [ "$wd_tick" -ge "$wd_last" ] || return 1
+        if [ "$wd_first" = 1 ]; then
+            if [ "$((wd_tick - wd_armed))" -ge "$WD_FIRST" ]; then
+                watchdog_failed "first keepalive missed its deadline"
+                return 1
+            fi
+        elif [ "$((wd_tick - wd_last))" -ge "$WD_MAX_AGE" ]; then
+            watchdog_failed "feeder keepalive progress stalled before write completed"
+            return 1
+        fi
+        printf '%s %s %s %s\n' "$WD_GEN" "$$" "$wd_birth" "$wd_tick" > "$CTL/feeder.heartbeat.$WD_GEN" &&
+            mv -f "$CTL/feeder.heartbeat.$WD_GEN" "$CTL/feeder.heartbeat" || return 1
+        if [ "$wd_first" = 1 ]; then
+            echo $$ > "$CTL/feeder.ready" || return 1
+            echo "Watchdog feeder ready ($wd_name, pid $$)" >> "$L"
+            wd_first=0
+        fi
+        wd_last=$wd_tick
+        sleep 2 3>&-
+    done
+}
+watchdog_feed() {
+    watchdog_profile || return 3
+    [ -e "$CTL/stopped" ] && [ ! -e "$CTL/feeder.off" ] || return 3
+    wd_boot=$(boot_id)
+    [ -n "$wd_boot" ] && [ "$(cat "$CTL/boot" 2>/dev/null)" = "$wd_boot" ] || return 3
+    case "$(cat "$CTL/state" 2>/dev/null)" in starting|running|returning) ;; *) return 3 ;; esac
+    WD_GEN=$(watchdog_generation)
+    [ -n "$WD_GEN" ] && read -r wd_gen wd_armed wd_extra < "$CTL/feeder.arm" &&
+        [ "$wd_gen" = "$WD_GEN" ] && [ -z "$wd_extra" ] && watchdog_uint "$wd_armed" || return 3
+    wd_birth=$(watchdog_birth $$)
+    [ -n "$wd_birth" ] || return 3
+    mkdir "$CTL/feeder.lock" 2>/dev/null || return 3
+    L="$CTL/watchdog_feeder.log"
+    echo $$ > "$CTL/feeder.pid" || { watchdog_failed "could not record the feeder PID"; return; }
+    read -r wd_name wd_saved wd_extra < "$CTL/watchdog.target" || { watchdog_failed "missing watchdog target"; return; }
+    case "${wd_name#watchdog}" in
+        ''|*[!0-9]*) watchdog_failed "invalid watchdog target"; return ;;
+    esac
+    case "$wd_name" in watchdog*) ;; *) watchdog_failed "invalid watchdog target"; return ;; esac
+    [ -z "$wd_extra" ] && [ -n "$wd_saved" ] || { watchdog_failed "invalid watchdog identity"; return; }
+    if pidof system_server >/dev/null 2>&1 || [ "$(getprop init.svc.zygote)" = running ]; then
+        watchdog_failed "One UI still owns the watchdog"
+        return
+    fi
+    if [ "$FRAMEWORK" = 1 ]; then
+        wd_native="$STAGE/oneios-watchdog"
+        wd_current_mode=$(cat "$T/sys/class/watchdog/$wd_name/nowayout" 2>/dev/null)
+        case "$wd_current_mode" in N) wd_current_mode=0 ;; Y) wd_current_mode=1 ;; esac
+        if read -r wd_mode wd_timeout wd_return wd_hash < "$CTL/watchdog.plan" &&
+           [ "$wd_current_mode" = "$wd_mode" ] &&
+           [ -x "$wd_native" ] && root_only "$wd_native" &&
+           [ "$(sha256sum "$wd_native" | cut -d' ' -f1)" = "$wd_hash" ]; then
+            exec "$wd_native" "$CTL" "/dev/$wd_name" "$wd_saved" "$WD_GEN" "$wd_birth" "$wd_armed" \
+                "$wd_mode" "$wd_timeout" "$wd_return" >>"$L" 2>&1
+        fi
+        watchdog_failed "native supervisor or qualified plan unavailable"
+        return
+    fi
+    [ "$(watchdog_softdog "$wd_name")" = "$wd_saved" ] ||
+        { watchdog_failed "watchdog identity or timing changed"; return; }
+    if [ -n "$T" ]; then
+        "$T/bin/watchdog-io" open "$wd_name" 2>>"$L" && watchdog_pings 2>>"$L"
+    else
+        watchdog_pings 2>>"$L" 3>"$T/dev/$wd_name"
+    fi && return 0
+    watchdog_failed "cannot open or keep alive $wd_name"
+}
+# 0: a current successful ping (print the identity); 1: not armed, closing
+# or still within the first-ping window; 2: lost progress (print the reason).
+watchdog_health() {
+    [ ! -e "$CTL/feeder.off" ] && [ "$(watchdog_generation)" = "$WD_GEN" ] || return 1
+    if [ -e "$CTL/feeder.failed" ]; then
+        echo "feeder already failed"
+        return 2
+    fi
+    if [ ! -e "$CTL/feeder.arm" ]; then
+        if [ -e "$CTL/feeder.ready" ] || [ -e "$CTL/feeder.heartbeat" ] ||
+           { [ -e "$CTL/watchdog.target" ] && [ "$(cat "$CTL/state" 2>/dev/null)" = running ]; }; then
+            echo "feeder has no current arm record"
+            return 2
+        fi
+        return 1
+    fi
+    if ! read -r wd_gen wd_arm wd_extra < "$CTL/feeder.arm" ||
+       [ -z "$WD_GEN" ] || [ "$wd_gen" != "$WD_GEN" ] || [ -n "$wd_extra" ] ||
+       ! watchdog_uint "$wd_arm" || ! wd_now=$(watchdog_now) || [ "$wd_arm" -gt "$wd_now" ]; then
+        echo "invalid feeder arm record or monotonic clock"
+        return 2
+    fi
+    if [ ! -e "$CTL/feeder.ready" ]; then
+        [ "$((wd_now - wd_arm))" -lt "$WD_FIRST" ] && return 1
+        echo "first keepalive did not become ready"
+        return 2
+    fi
+    if ! read -r wd_gen wd_live wd_start wd_tick wd_extra < "$CTL/feeder.heartbeat" ||
+       [ "$wd_gen" != "$WD_GEN" ] || [ -n "$wd_extra" ] ||
+       ! watchdog_uint "$wd_live" || [ "$wd_live" -le 1 ] ||
+       ! watchdog_uint "$wd_tick" || [ "$wd_tick" -lt "$wd_arm" ]; then
+        echo "missing or invalid feeder heartbeat"
+        return 2
+    fi
+    # The keeper can publish a new heartbeat between the first clock read
+    # and opening its record. Check its timestamp against a fresh reading.
+    if ! wd_now=$(watchdog_now) || [ "$wd_tick" -gt "$wd_now" ]; then
+        echo "feeder heartbeat is in the future or monotonic clock is invalid"
+        return 2
+    fi
+    case "$wd_start" in ''|*[!0-9]*) echo "invalid feeder process identity"; return 2 ;; esac
+    if [ "$(cat "$CTL/feeder.pid" 2>/dev/null)" != "$wd_live" ] ||
+       [ "$(cat "$CTL/feeder.ready" 2>/dev/null)" != "$wd_live" ] ||
+       [ "$(watchdog_birth "$wd_live")" != "$wd_start" ]; then
+        echo "feeder exited or its process identity changed"
+        return 2
+    fi
+    if [ "$((wd_now - wd_tick))" -ge "$WD_MAX_AGE" ]; then
+        echo "feeder keepalive progress stalled"
+        return 2
+    fi
+    printf '%s %s\n' "$wd_live" "$wd_start"
+}
+watchdog_lost() {
+    wd_problem=$(watchdog_health)
+    [ $? = 2 ] || return 1
+    [ ! -e "$CTL/feeder.off" ] && [ "$(watchdog_generation)" = "$WD_GEN" ] || return 1
+    watchdog_failed "$wd_problem"
+    return 0
+}
+
 # --- THE WAY BACK'S OWN HELPERS ---------------------------------------------
 # The watcher and the key readers must run whatever the guest does. They are
 # One UI-side processes in init's mount namespace; this puts the calling shell
@@ -110,13 +394,230 @@ out_of_the_way() {
     renice -n -10 -p $$ >/dev/null 2>&1
     return 0
 }
+
+framework_block() { refuse "$*"; }
+
+framework_setup_failed() {
+    printf "Framework setup failed: %s\n" "$*" >&2
+    printf "failed\n" > "$CTL/state"
+    exit 4
+}
+
+framework_identity() {
+    [ "$(getprop ro.product.model):$(getprop ro.product.device):$(getprop ro.soc.model)" = SM-S948B:m3q:SM8850 ] &&
+        [ "$(getprop ro.build.fingerprint)" = samsung/m3qxxx/m3q:17/CP2A.260605.016/S948BXXS4BZIG_OXM4BZIG:user/release-keys ] &&
+        [ "$(uname -r)" = 6.12.69-android16-6-pb4d3caf-abogkiS948BXXS4BZIG-4k ] &&
+        [ "$(getenforce)" = Enforcing ]
+}
+
+FRAMEWORK_SERVICES="surfaceflinger vendor.qti.hardware.display.composer adbd vold keystore2 servicemanager logd lmkd installd audioserver cameraserver netd"
+framework_service_pids() {
+    services=$FRAMEWORK_SERVICES
+    [ "$(getprop init.svc.hwservicemanager)" != running ] || services="$services hwservicemanager"
+    for svc in $services; do
+        [ "$(getprop "init.svc.$svc")" = running ] || return 1
+        svc_pid=$(getprop "init.svc_debug_pid.$svc")
+        watchdog_uint "$svc_pid" && [ "$svc_pid" -gt 1 ] && [ -d "$P/$svc_pid" ] || return 1
+        grep -q '^0::/apps/' "$P/$svc_pid/cgroup" && return 1
+        printf '%s %s\n' "$svc" "$svc_pid"
+    done
+}
+
+framework_down() {
+    [ "$(getprop init.svc.zygote)" = stopped ] &&
+        [ "$(getprop init.svc.zygote_next)" = stopped ] &&
+        case "$(getprop init.svc.zygote_secondary)" in ''|stopped) true ;; *) false ;; esac &&
+        ! pidof system_server >/dev/null 2>&1
+}
+
+framework_apps_empty() {
+    # Android places app process groups under /apps. No system cgroup is
+    # eligible. cgroup.events includes all descendant (PID) groups.
+    for group in "$T"/sys/fs/cgroup/apps/uid_*; do
+        [ -d "$group" ] || continue
+        grep -qx 'populated 0' "$group/cgroup.events" || return 1
+    done
+}
+
+framework_deadline() {
+    [ "$FRAMEWORK" = 1 ] && [ -n "$1" ] && [ "$(watchdog_generation)" = "$1" ] || return 0
+    WD_GEN=$1
+    out_of_the_way
+    printf '%s %s\n' "$$" "$(watchdog_birth $$)" > "$CTL/framework.guard" || return 1
+    while [ "$(watchdog_generation)" = "$WD_GEN" ]; do
+        case "$(cat "$CTL/state" 2>/dev/null)" in returning|returned) return 0 ;; esac
+        limit=$(cat "$CTL/framework.deadline" 2>/dev/null) || limit=$(cat "$CTL/framework.cutoff" 2>/dev/null)
+        tick=$(watchdog_now)
+        expired=0
+        if ! watchdog_uint "$limit" || ! watchdog_uint "$tick"; then
+            why="invalid framework deadline"
+        elif ! framework_pid_alive "$CTL/framework.watcher"; then
+            why="framework watcher lost"
+        elif [ "$tick" -ge "$limit" ]; then
+            expired=1
+            why="framework deadline reached at $tick (deadline $limit)"
+        else
+            sleep 1
+            continue
+        fi
+        echo "$(date '+%F %T') framework guard: $why"
+        if [ "$expired" = 1 ] && [ "$(cat "$CTL/framework.deadline" 2>/dev/null)" = "$limit" ] &&
+            [ "$(cat "$CTL/state" 2>/dev/null)" = running ] &&
+            [ ! -e "$SESSION/return.request" ]; then
+            mode=$(cat "$CTL/framework.mode" 2>/dev/null)
+            if [ "$mode" = run ]; then
+                guest_pid=$(cat "$CTL/xnuhost.pid" 2>/dev/null)
+                guest_ns=$(cat "$CTL/mntns" 2>/dev/null)
+                [ -n "$guest_ns" ] && [ "$(readlink "$P/$guest_pid/ns/mnt" 2>/dev/null)" = "$guest_ns" ] || mode=
+            fi
+            [ -z "$mode" ] || printf '%s\n' "$why" > "$CTL/framework.elapsed"
+        fi
+        publish_return_request "$why"
+        $SH "$SELF_RETURN" framework-deadline "$WD_GEN" && return 0
+        [ "$(watchdog_generation)" != "$WD_GEN" ] ||
+            hard_reboot oneios-watcher-failsafe "framework deadline could not return One UI"
+        return 0
+    done
+}
+
+framework_pid_alive() {
+    [ -r "$1" ] || return 1
+    read -r checked_pid checked_birth 2>/dev/null < "$1" && watchdog_uint "$checked_pid" &&
+        [ -n "$checked_birth" ] && [ "$(watchdog_birth "$checked_pid")" = "$checked_birth" ] || return 1
+    [ -n "$T" ] || { grep -qx '0::/' "$P/$checked_pid/cgroup" &&
+        [ "$(cat "$P/$checked_pid/oom_score_adj")" = -1000 ] &&
+        [ "$(readlink "$P/$checked_pid/ns/mnt")" = "$(readlink "$P/1/ns/mnt")" ]; }
+}
+
+framework_recovery_ready() {
+    framework_pid_alive "$CTL/framework.guard" && framework_pid_alive "$CTL/framework.watcher" || return 1
+    [ "$(grep -c . "$CTL/keys/pids" 2>/dev/null)" = 3 ] || return 1
+    for reader in $(cat "$CTL/keys/pids"); do
+        framework_pid_alive "$CTL/keys/reader.$reader" || return 1
+    done
+    case " $(cat "$T/sys/power/wake_lock" 2>/dev/null) " in *" oneios_session "*) ;; *) return 1 ;; esac
+}
+
+stop_android_framework() {
+    [ "$FRAMEWORK" = 0 ] || framework_recovery_ready || return 1
+    printf '%s\n' "$(date +%s)" > "$CTL/stopped" || return 1
+    setprop ctl.stop zygote
+    [ -n "$(getprop init.svc.zygote_secondary)" ] && setprop ctl.stop zygote_secondary
+    [ "$FRAMEWORK" = 0 ] || setprop ctl.stop zygote_next
+    n=0
+    while [ "$n" -lt 50 ] && pidof system_server >/dev/null 2>&1; do
+        sleep 0.2; n=$((n + 1))
+    done
+    kill -9 $(pidof system_server) 2>/dev/null
+    kill -9 $(pidof zygote64) $(pidof zygote) 2>/dev/null
+    [ "$FRAMEWORK" = 1 ] || return 0
+    n=0
+    until framework_down; do
+        [ "$n" -lt 5 ] || return 1
+        sleep 0.2; n=$((n + 1))
+    done
+}
+
+framework_probe() {
+    fw_bad=0
+    framework_identity && echo "framework target: SM-S948B/m3q/SM8850 S948BXXS4BZIG enforcing" ||
+        { echo "BLOCKED: experimental firmware or SELinux mismatch"; fw_bad=1; }
+    KDEVS=$(volume_key_devices) && printf 'physical recovery inputs: %s\n' "$(echo $KDEVS)" ||
+        { echo "BLOCKED: physical recovery keys are ambiguous or missing"; fw_bad=1; }
+    WD_TARGET=$(watchdog_target) && echo "watchdog: $WD_TARGET" ||
+        { echo "BLOCKED: watchdog needs a directly held numbered softdog, active metadata, known nowayout, no pretimeout and >=100s timeout"; fw_bad=1; }
+    if [ -z "$WD_TARGET" ] || ! framework_watchdog_plan "$WD_TARGET" >/dev/null; then
+        echo "BLOCKED: no independently qualified watchdog plan with readable time remaining"
+        fw_bad=1
+    fi
+    printf 'watchdog sysfs: '
+    printf '%s\n' "$T"/sys/class/watchdog/watchdog*/{identity,state,timeout,nowayout,pretimeout} |
+        while read -r node; do [ ! -r "$node" ] || printf '%s=%s ' "${node##*/}" "$(cat "$node")"; done
+    echo
+    SS=$(pidof system_server)
+    if [ -n "$SS" ] && [ "$(timeout 4 dumpsys --pid inputflinger)" = "$SS" ] &&
+        [ "$(timeout 4 dumpsys --pid input)" = "$SS" ]; then
+        echo "inputflinger and input owned by system_server $SS"
+    else
+        echo "BLOCKED: could not attribute both Android input services to system_server"
+        fw_bad=1
+    fi
+    if fw_services=$(framework_service_pids); then
+        printf 'protected services:\n%s\n' "$fw_services"
+    else
+        echo "BLOCKED: required Android service PID missing or in the app cgroup"
+        fw_bad=1
+    fi
+    [ -d "$T/sys/fs/cgroup/apps" ] || { echo "BLOCKED: Android app cgroup missing"; fw_bad=1; }
+    for group in "$T"/sys/fs/cgroup/apps/uid_*; do
+        [ -d "$group" ] || continue
+        [ -w "$group/cgroup.kill" ] && [ -r "$group/cgroup.events" ] ||
+            { echo "BLOCKED: the app cgroup cannot be checked and drained"; fw_bad=1; break; }
+    done
+    printf 'vm.max_map_count=%s\n' "$(cat "$P/sys/vm/max_map_count" 2>/dev/null)"
+    printf 'data fs=%s free KiB=%s\n' "$(stat -f -c %T /data/adb)" "$(df -Pk /data/adb | awk 'NR==2 {print $4}')"
+    for dir in /data/local/tmp/oneios/image "$FRAMEWORK_STAGE/image" /data/local/tmp/oneios-m3q-ios27-bench/image; do
+        if [ -d "$dir" ]; then printf 'image present: %s\n' "$dir"; else printf 'image absent: %s\n' "$dir"; fi
+    done
+    return "$fw_bad"
+}
+
+framework_configure() {
+    fw_old=$(cat "$P/sys/vm/max_map_count") && watchdog_uint "$fw_old" || return 1
+    fw_map=$fw_old
+    [ "$fw_map" -ge 1048576 ] || fw_map=1048576
+    printf '%s %s\n' "$fw_old" "$fw_map" > "$B/max_map_count.tmp" &&
+        mv -f "$B/max_map_count.tmp" "$B/max_map_count" || return 1
+    [ "$fw_map" = "$fw_old" ] ||
+        echo "$fw_map" > "$P/sys/vm/max_map_count" || return 1
+    [ "$(cat "$P/sys/vm/max_map_count")" = "$fw_map" ] || return 1
+    echo "vm.max_map_count: $fw_old -> $fw_map"
+}
+
+framework_capture() {
+    [ -e "$SESSION/ready" ] && grep -q 'first frame posted' "$CTL/display.log" 2>/dev/null || return 0
+    elapsed=$((t - ready_at))
+    case "$elapsed" in 0|30|60|120|180)
+        timeout 3 screencap -p "$CTL/captures/frame-$elapsed.png" >> "$CTL/display.log" 2>&1 ;;
+    esac
+}
+# The measured S24 Ultra and S26 Ultra input layouts have the same two
+# physical key drivers. Match the name and the reported key on each node;
+# a Bluetooth consumer-control device can advertise both volume keys.
+volume_key_devices() {
+    key_report=$(getevent -pl 2>/dev/null) || return 1
+    printf '%s\n' "$key_report" | awk '
+        function record() {
+            if (dev !~ /^\/dev\/input\/event[0-9]+$/) return
+            if (name == "gpio-keys" && up) { up_dev = dev; up_count++ }
+            if (name == "pmic_resin" && down) { down_dev = dev; down_count++ }
+        }
+        /^add device / { record(); dev = $NF; name = ""; up = down = keys = 0; next }
+        /^[[:space:]]+name:[[:space:]]+"gpio-keys"[[:space:]]*$/ { name = "gpio-keys"; next }
+        /^[[:space:]]+name:[[:space:]]+"pmic_resin"[[:space:]]*$/ { name = "pmic_resin"; next }
+        $2 ~ /^\([[:xdigit:]]+\):$/ { keys = ($1 == "KEY" && $2 == "(0001):") }
+        keys {
+            for (i = ($1 == "KEY" ? 3 : 1); i <= NF; i++) {
+                if ($i == "KEY_VOLUMEUP" || $i == "KEY_VOLUMEUP*") up = 1
+                if ($i == "KEY_VOLUMEDOWN" || $i == "KEY_VOLUMEDOWN*") down = 1
+            }
+        }
+        END {
+            record()
+            if (up_count != 1 || down_count != 1 || up_dev == down_dev) exit 1
+            print up_dev
+            print down_dev
+        }
+    '
+}
 # The keys ask the watcher, which acts within a second. A session that is
 # still not returning 5 s later has no working watcher (killed, or stuck): the
 # return then starts from the key reader itself. oneios_return.sh takes one
 # caller at a time, so the two can meet.
 ask_return() { # <why>
-    [ -e "$SESSION/return.request" ] || echo "$1 at $(date '+%F %T')" > "$SESSION/return.request"
+    publish_return_request "$1 at $(date '+%F %T')"
     sleep 5
+    [ "$(cat "$CTL/keys/session" 2>/dev/null)" = "$tok" ] || return 0
     case "$(cat "$CTL/state" 2>/dev/null)" in
         starting|running)
             echo "$(date '+%F %T') keys: the watcher did not start the return within 5 s of '$1'; starting it from the key reader" >> "$STAGE/return.log"
@@ -136,6 +637,9 @@ reader_start() {
     OWN_GROUP=0
     [ "$(ps -o pgid= -p $$ 2>/dev/null | tr -d ' ')" = "$$" ] && OWN_GROUP=1
     out_of_the_way
+    if [ "$FRAMEWORK" = 1 ]; then
+        printf '%s %s\n' "$$" "$(watchdog_birth $$)" > "$CTL/keys/reader.$$"
+    fi
 }
 reader_end() {
     [ "$OWN_GROUP" = 1 ] && kill -9 -- "-$$" 2>/dev/null
@@ -179,6 +683,7 @@ screen() { # <title|status> <text>
 # Starts the screen (the session only). The renderer gets 3 s for its first
 # frame; with or without one the switch goes on.
 bootui_begin() {
+    [ "$FRAMEWORK" = 0 ] || return 0
     [ "${ONEIOS_BOOTUI:-1}" != 0 ] || { echo "Boot screen: off (ONEIOS_BOOTUI=0)"; return 0; }
     for f in boot_status.sh OneOSBootStatus.dex oneos_boot_icon.png; do
         [ -f "$BOOTBIN/$f" ] && root_only "$BOOTBIN/$f" ||
@@ -303,7 +808,9 @@ sync_bounded() {
 hard_reboot() { # <reason word> <why>
     echo "$(date '+%F %T') watcher: $2 - rebooting into One UI"
     bootui oneos_boot_stop
-    echo "failsafe $(date +%s) $2" > "$STAGE/return.outcome"
+    if [ "$FRAMEWORK" = 0 ] || ! grep -q '^failsafe ' "$STAGE/return.outcome" 2>/dev/null; then
+        echo "failsafe $(date +%s) $2" > "$STAGE/return.outcome"
+    fi
     sync_bounded
     setprop sys.powerctl "reboot,$1"
     sleep 20
@@ -529,6 +1036,26 @@ usb_save() {
 
 # --- INTERNAL MODES --------------------------------------------------------
 case "$MODE" in
+    --watchdog-probe)
+        watchdog_target || refuse "watchdog recovery could not identify One UI's active software watchdog"
+        exit 0 ;;
+    --watchdog-health)
+        WD_GEN=$(watchdog_generation)
+        watchdog_health
+        exit $? ;;
+    --watchdog-supervise)
+        WD_GEN=$2
+        [ -n "$WD_GEN" ] || exit 1
+        watchdog_lost
+        exit $? ;;
+    --watchdog-test)
+        [ -n "$T" ] && [ "$2" = feed ] || exit 3
+        watchdog_feed
+        exit $? ;;
+    --key-devices)
+        [ -n "$T" ] || { echo "$MODE: for the tests only"; exit 2; }
+        volume_key_devices || refuse "could not validate physical volume keys in getevent (gpio-keys Volume Up, pmic_resin Volume Down)"
+        exit 0 ;;
     --clocks-save|--clocks-tops)
         # The tests' way in (OneiosScriptTest, against a fake sysfs): the same two steps the session takes.
         [ -n "$T" ] || { echo "$MODE: for the tests only"; exit 2; }
@@ -614,6 +1141,26 @@ case "$MODE" in
         done
         usay "ended (control/usb-watch.off)"
         exit 0 ;;
+    --framework-audit)
+        [ -z "$T" ] && [ "$FRAMEWORK" = 1 ] && [ "$(id -u)" = 0 ] || exit 3
+        framework_probe
+        exit $? ;;
+    --framework-test-stop)
+        [ -n "$T" ] && [ "$FRAMEWORK" = 1 ] || exit 3
+        stop_android_framework
+        exit $? ;;
+    --framework-deadline)
+        framework_deadline "$2"
+        exit $? ;;
+    --framework-return)
+        [ "$FRAMEWORK" = 1 ] && [ -z "$T" ] && [ "$(id -u)" = 0 ] || exit 3
+        [ "$(cat "$CTL/boot" 2>/dev/null)" = "$(boot_id)" ] || exit 0
+        case "$(cat "$CTL/state" 2>/dev/null)" in
+            starting|running) publish_return_request "operator requested return"
+                exec $SH "$SELF_RETURN" framework-deadline "$(watchdog_generation)" ;;
+            returning|returned) exit 0 ;;
+            *) exit 3 ;;
+        esac ;;
     --inner)
         # Inside the new mount namespace (unshare -m), still root. The stage
         # becomes /data: nothing else of One UI's /data exists in here.
@@ -713,6 +1260,18 @@ case "$MODE" in
         esac
         AT="exec of /data/runtime/$R_XNUHOST"
         echo "oneios inner: $(date '+%F %T') starting /data/runtime/$R_XNUHOST (pid $$)"
+        if [ "$FRAMEWORK" = 1 ]; then
+            [ "$(cat /data/control/framework.mode)" = run ] || die_inner "no full-session admission"
+            ulimit -c 0
+            exec "/data/runtime/$R_XNUHOST" --session-abi 1 --mode bench \
+                --runtime /data/runtime --image /data/image --data /data/data --session /data/session \
+                --cpus 4 --ram 2G --set ram-giveback=0 --set ram-prefault=1 --set ram-lock=1 \
+                --set ram-huge=0 --set host-mem-log=5 --set bridges=0 --set wifi=off \
+                --set bluetooth=virtual --set haptics=off --set encoder=off --set return-graceful-ms=0 \
+                --gpu 2d --display shm --set input=1 --width 1080 --height 2340 --hz 60 \
+                --boot-args 'debug=0x14e serial=3 -v kt_fixed_zones=120 -no_slto_panic ml-timeout-lock-panic-scale=40 tlto_us=0 armcpu-self-ipi=1 armcpu-spi-ipi=1 use_contiguous_hint=0 interrupt-masked-debug-mode=0 sched_preemption_disable_debug_mode=0 wdt=-1 sheng-smp=1 oneios-data-wait=3000'
+            die_inner "could not exec the benchmark runtime"
+        fi
         exec "/data/runtime/$R_XNUHOST" --session-abi $ABI --mode takeover \
             --runtime /data/runtime --image /data/image --data /data/data --session /data/session
         echo "oneios inner: could not exec xnuhost"
@@ -724,39 +1283,27 @@ case "$MODE" in
         # next to the guest. oneios_return.sh ends this loop before it starts
         # One UI ($CTL/stop-loop.off, then the pid).
         [ -z "$T" ] || exit 3
+        if [ "$FRAMEWORK" = 1 ]; then
+            [ "$(id -u)" = 0 ] && [ "$(boot_id)" = "$(cat "$CTL/boot" 2>/dev/null)" ] &&
+                [ -s "$CTL/stopped" ] && framework_recovery_ready || exit 3
+            printf '%s %s\n' "$$" "$(watchdog_birth $$)" > "$CTL/framework.stoploop" || exit 3
+        fi
         while [ ! -e "$CTL/stop-loop.off" ]; do
             [ "$(getprop init.svc.zygote)" = running ] && setprop ctl.stop zygote
             [ "$(getprop init.svc.zygote_secondary)" = running ] && setprop ctl.stop zygote_secondary
-            [ "$(getprop init.svc.bootanim)" = running ] && setprop ctl.stop bootanim
+            if [ "$FRAMEWORK" = 1 ]; then
+                [ "$(getprop init.svc.zygote_next)" = running ] && setprop ctl.stop zygote_next
+            else
+                [ "$(getprop init.svc.bootanim)" = running ] && setprop ctl.stop bootanim
+            fi
             sleep 0.2
         done
         exit 0
         ;;
     --feed)
-        # One UI's system_server opened Samsung's software watchdog (100 s) and
-        # kicked it; stopped, it leaves the timer running and the phone panics
-        # ("Software Watchdog Timer expired 100s", oneos_switch.sh [4b/6]). "V"
-        # is the magic close where the driver allows it, and a kick otherwise.
-        [ -z "$T" ] || exit 3
-        L="$CTL/watchdog_feeder.log"
-        was=""
-        while [ ! -e "$CTL/feeder.off" ]; do
-            now=""
-            for wd in /dev/watchdog /dev/softdog $(cat "$CTL/softdog_nodes" 2>/dev/null); do
-                [ -c "$wd" ] || continue
-                if e=$(printf V 2>&1 > "$wd"); then now="$now $wd:written"; else now="$now $wd:refused($e)"; fi
-            done
-            for w in /sys/class/watchdog/watchdog*; do
-                [ "$(cat "$w/state" 2>/dev/null)" = active ] || continue
-                case "$(cat "$w/identity" 2>/dev/null)" in *[Ss]oft*) ;; *) continue ;; esac
-                d=/dev/${w##*/}
-                [ -c "$d" ] || continue
-                if e=$(printf V 2>&1 > "$d"); then now="$now $d:kicked"; else now="$now $d:refused($e)"; fi
-            done
-            [ "$now" = "$was" ] || { echo "$(date +%T)$now" >> "$L"; was=$now; }
-            sleep 2
-        done
-        exit 0
+        [ -z "$T" ] && [ "$(id -u 2>/dev/null)" = 0 ] || exit 3
+        watchdog_feed
+        exit $?
         ;;
     --bootui)
         # The boot screen's status line (bootui_begin starts this beside the
@@ -841,11 +1388,16 @@ case "$MODE" in
         # (another token) ends this reader, with its getevent, on its next event.
         [ -n "$2" ] && [ -n "$3" ] || exit 3
         kd=$2 tok=$3
+        case "$4" in
+            up) k=up; key=KEY_VOLUMEUP ;;
+            down) k=down; key=KEY_VOLUMEDOWN ;;
+            *) exit 3 ;;
+        esac
         KS="$CTL/keys"
         reader_start
         getevent -lq "$kd" 2>/dev/null | while read -r typ code val rest; do
             [ "$(cat "$KS/session" 2>/dev/null)" = "$tok" ] || reader_end
-            case "$code" in KEY_VOLUMEUP) k=up ;; KEY_VOLUMEDOWN) k=down ;; *) continue ;; esac
+            [ "$typ" = EV_KEY ] && [ "$code" = "$key" ] || continue
             # DOWN and UP only (getevent -l's names, or the bare values). The
             # auto-repeat of a held key (REPEAT, on a device with EV_REP) is
             # not a release: taken as one, a hold would never reach 3 s.
@@ -881,23 +1433,24 @@ case "$MODE" in
         # samples with both keys down are 3 s. One sample without them in
         # between does not end the hold (the rocker's chatter, see --keys); two
         # in a row do.
-        [ -n "$2" ] && [ -n "$3" ] || exit 3
-        tok=$2
-        shift 2
+        [ -n "$2" ] && [ -n "$3" ] && [ -n "$4" ] || exit 3
+        tok=$2 updev=$3 downdev=$4
         KS="$CTL/keys"
         reader_start
         TMO=""
         command -v timeout >/dev/null 2>&1 && TMO="timeout 2"
         n=0 miss=0
         while [ "$(cat "$KS/session" 2>/dev/null)" = "$tok" ]; do
-            st=$(for kd in "$@"; do $TMO getevent -pl "$kd" 2>/dev/null; done)
+            up=$($TMO getevent -pl "$updev" 2>/dev/null) || up=""
+            down=$($TMO getevent -pl "$downdev" 2>/dev/null) || down=""
             held=0
-            case "$st" in *"KEY_VOLUMEUP*"*) case "$st" in *"KEY_VOLUMEDOWN*"*) held=1 ;; esac ;; esac
+            case "$up" in *"KEY_VOLUMEUP*"*) case "$down" in *"KEY_VOLUMEDOWN*"*) held=1 ;; esac ;; esac
             if [ $held = 1 ]; then n=$((n + 1)); miss=0
             elif [ $n -gt 0 ]; then miss=$((miss + 1)); [ $miss -lt 2 ] || { n=0; miss=0; }
             fi
             if [ $n -ge 7 ]; then
                 n=0 miss=0
+                [ "$(cat "$KS/session" 2>/dev/null)" = "$tok" ] || break
                 ask_return "keys: Volume Up + Volume Down down for 3 s (polled)"
             fi
             sleep 0.5
@@ -913,13 +1466,18 @@ case "$MODE" in
         # ($SESSION/return.request: the volume keys, the guest, adb), or the
         # guest never said it is up ($SESSION/ready) within ONEIOS_RETURN_MAX
         # seconds of its start (600; 0 = no limit).
+        WD_GEN=$(watchdog_generation)
         echo $$ > "$CTL/watcher.pid"
         out_of_the_way
+        if [ "$FRAMEWORK" = 1 ]; then
+            printf '%s %s\n' "$$" "$(watchdog_birth $$)" > "$CTL/framework.watcher" || exit 1
+        fi
         MAX="${ONEIOS_RETURN_MAX:-600}"
         case "$MAX" in ''|*[!0-9]*) MAX=600 ;; esac
         awake() { echo oneios_session 2>/dev/null > "$T/sys/power/wake_lock"; }
         SCREEN=""
         go() {
+            [ "$(watchdog_generation)" = "$WD_GEN" ] || exit 0
             echo "$(date '+%F %T') watcher: $*; returning to One UI"
             # The boot screen, while it is still up, says so (and why, in
             # $SCREEN) until the return ends it.
@@ -930,13 +1488,16 @@ case "$MODE" in
             # Not exec: a return script that cannot be run (gone, damaged) or
             # that ends with an error must still end in One UI, by the reboot.
             # A return that hangs is its own guard's to end (oneios_return.sh).
-            $SH "$STAGE/oneios_return.sh" watcher
+            $SH "$STAGE/oneios_return.sh" watcher "$WD_GEN"
             rc=$?
             [ $rc = 0 ] && exit 0
+            [ "$(watchdog_generation)" = "$WD_GEN" ] || exit 0
             hard_reboot oneios-watcher-failsafe "oneios_return.sh ended with $rc in state '$(cat "$CTL/state" 2>/dev/null)'"
         }
         t=0
         while [ "$(cat "$CTL/state" 2>/dev/null)" = starting ]; do
+            [ "$(watchdog_generation)" = "$WD_GEN" ] || exit 0
+            watchdog_lost && SCREEN="The watchdog feeder failed" && go "watchdog feeder failed"
             [ -e "$SESSION/return.request" ] && SCREEN="A return to One UI was asked for" && go "return asked before xnuhost started ($(head -c 200 "$SESSION/return.request" 2>/dev/null))"
             [ $t -lt 60 ] || { SCREEN="iOS did not start within 60 s"; go "the switch did not start xnuhost within 60 s"; }
             sleep 1; t=$((t + 1))
@@ -950,7 +1511,9 @@ case "$MODE" in
         esac
         pid=$(cat "$CTL/xnuhost.pid" 2>/dev/null)
         ns=$(cat "$CTL/mntns" 2>/dev/null)
+        fw_mode=$(cat "$CTL/framework.mode" 2>/dev/null)
         t=0
+        ready_at=-1
         while :; do
             # A return someone else started (the app, adb, the key readers) is
             # theirs, with its own guard. Any other state, an unreadable one
@@ -958,7 +1521,35 @@ case "$MODE" in
             case "$(cat "$CTL/state" 2>/dev/null)" in
                 returning|returned) echo "$(date '+%F %T') watcher: a return is under way or done; nothing to do"; exit 0 ;;
             esac
+            [ "$(watchdog_generation)" = "$WD_GEN" ] || exit 0
+            watchdog_lost && SCREEN="The watchdog feeder failed" && go "watchdog feeder failed"
             [ -e "$SESSION/return.request" ] && SCREEN="A return to One UI was asked for" && go "return asked ($(head -c 200 "$SESSION/return.request" 2>/dev/null))"
+            if [ "$FRAMEWORK" = 1 ]; then
+                framework_recovery_ready && framework_pid_alive "$CTL/framework.stoploop" ||
+                    go "a framework recovery helper exited"
+                framework_down || go "Android Framework restarted unexpectedly"
+                [ "$fw_mode" != smoke ] || { sleep 1; continue; }
+                if [ $((t % 5)) = 0 ]; then
+                    mem=$(awk '/^MemAvailable:/ {print $2}' "$P/meminfo")
+                    swap=$(awk '/^SwapFree:/ {print $2}' "$P/meminfo")
+                    disk=$(df -Pk "$STAGE" | awk 'NR==2 {print $4}')
+                    [ "${mem:-0}" -ge 2097152 ] && [ "${swap:-0}" -ge 524288 ] &&
+                        [ "${disk:-0}" -ge 26214400 ] || go "bench resource guard (RAM=$mem swap=$swap disk=$disk KiB)"
+                    if grep -Eq "memory: the guest.s RAM is held: .*not (locked|prefaulted further)" "$SESSION/xnuhost.log"; then
+                        go "benchmark guest RAM locking or prefaulting failed"
+                    fi
+                    if [ "$t" -ge 20 ]; then
+                        grep -Fq 'locked (mlock: the host cannot swap it)' "$SESSION/xnuhost.log" ||
+                            go "locked guest RAM was not confirmed"
+                    fi
+                    if [ "$t" -ge 35 ]; then
+                        kill -0 "$(cat "$CTL/display.pid" 2>/dev/null)" 2>/dev/null || go "display helper exited"
+                    fi
+                fi
+                if [ "$ready_at" = -1 ] && [ -e "$SESSION/ready" ] &&
+                    grep -q 'first frame posted' "$CTL/display.log" 2>/dev/null; then ready_at=$t; fi
+                [ "$ready_at" = -1 ] || framework_capture
+            fi
             if ! { [ -n "$pid" ] && [ "$(readlink "$P/$pid/ns/mnt" 2>/dev/null)" = "$ns" ]; }; then
                 SCREEN=$(why_ended)
                 go "xnuhost $pid ended (last log lines: $(tail -n 3 "$SESSION/xnuhost.log" 2>/dev/null | tr '\n' '|' | cut -c1-300))"
@@ -973,6 +1564,7 @@ case "$MODE" in
             sleep 1; t=$((t + 1))
         done
         ;;
+    --framework-check|--framework-session) ;;
     session|--check) ;;
     *) echo "usage: oneios_switch.sh [--check]"; exit 3 ;;
 esac
@@ -988,16 +1580,38 @@ fi
 [ "$(id -u 2>/dev/null)" = 0 ] || refuse "not running as root"
 command -v sha256sum >/dev/null 2>&1 || refuse "no sha256sum"
 
-# This phone only: the Galaxy S24 Ultra (docs/oneios.md, "Scope").
+# SM8850's One UI 9 recovery gates have not been validated. This is a
+# fail-closed root permission boundary, separate from app-side diagnostics:
+# even an experimental or not-this-phone acknowledgement cannot override it.
 P_MODEL=$(getprop ro.product.model)
 P_DEVICE=$(getprop ro.product.device)
 P_SOC=$(getprop ro.soc.model)
-case "$P_MODEL" in SM-S928*) ;; *) refuse "iOS runs on the Galaxy S24 Ultra (SM-S928) only; this phone is ${P_MODEL:-unknown}" ;; esac
-[ "$P_DEVICE" = e3q ] && [ "$P_SOC" = SM8650 ] ||
-    refuse "iOS runs on the Galaxy S24 Ultra (e3q, SM8650) only; this phone is ${P_DEVICE:-?}, ${P_SOC:-?}"
+if [ "$FRAMEWORK" = 1 ]; then
+    case "$MODE:$2" in --framework-check:smoke|--framework-check:run|--framework-session:smoke|--framework-session:run) ;;
+        *) framework_block "use the explicit SM8850 experimental Framework profile" ;; esac
+    FW_MODE=$2
+    [ "$APP" = 0 ] && framework_identity || framework_block "experimental profile requires SM-S948B/m3q/SM8850 firmware S948BXXS4BZIG with SELinux enforcing"
+    if [ "$MODE" = --framework-session ]; then
+        [ "$3" = I_ACCEPT_SM8850_FRAMEWORK_TAKEOVER ] || framework_block "explicit SM8850 framework takeover acknowledgement required"
+        FW_LAUNCH=$4
+        case "$FW_LAUNCH" in ''|*[!a-f0-9]*) framework_block "invalid experiment log identifier" ;; esac
+        [ "${#FW_LAUNCH}" -eq 32 ] || framework_block "invalid experiment log identifier"
+    fi
+else
+    case "$MODE" in session|--check) ;; *) framework_block "experimental profile requires its separate root stage" ;; esac
+    case "$P_MODEL:$P_DEVICE:$P_SOC" in
+        SM-S928*:e3q:SM8650) ;;
+        *) refuse "OneiOS switch is currently limited to the S24 Ultra (SM-S928/e3q/SM8650); this phone is ${P_MODEL:-unknown}/${P_DEVICE:-unknown}/${P_SOC:-unknown}; SM8850 hardware diagnostics do not certify recovery" ;;
+    esac
+fi
 
 # The stage first: without a runtime that has xnuhost, that one line is the answer.
-stage_checks
+if [ "$FRAMEWORK" = 0 ] || [ "$FW_MODE" = run ]; then
+    stage_checks
+else
+    root_only "$STAGE" && root_only "$SELF" && root_only "$SELF_RETURN" ||
+        framework_block "no trusted experimental recovery scripts staged"
+fi
 
 # Root tools: the root manager's own busybox and resetprop, as oneos_switch.sh.
 BB=""
@@ -1037,6 +1651,21 @@ fi
 [ "$(getprop init.svc.zygote)" = running ] && pidof system_server >/dev/null 2>&1 ||
     refuse "One UI's framework is not running (another session, or a return in progress): restart the phone first"
 pidof surfaceflinger >/dev/null 2>&1 || refuse "One UI's surfaceflinger is not running"
+if [ "$FRAMEWORK" = 1 ]; then
+    command -v flock >/dev/null && command -v timeout >/dev/null || framework_block "flock or timeout missing"
+    [ -d /data/adb ] && root_only /data/adb || framework_block "untrusted root stage parent"
+    case "$(cat /data/local/tmp/oneios/control/state 2>/dev/null):$(cat /data/local/tmp/oneos/control/state 2>/dev/null)" in
+        *starting*|*running*|*returning*) framework_block "another OneOS stage is active" ;;
+    esac
+    if pidof xnuhost xnuhost-gui-bench xnuhost-tasks OneiOSDisplay oneios-display >/dev/null 2>&1; then
+        framework_block "another xnuhost or display helper is running"
+    fi
+    if [ "$MODE" = --framework-session ]; then
+        [ ! -L "$STAGE/start.lock" ] || framework_block "invalid start lock"
+        exec 8>"$STAGE/start.lock"
+        flock -n 8 || framework_block "another experimental switch is starting"
+    fi
+fi
 left=$(awk -v s="$STAGE" -v o="$ANDROID_STAGE" '$5 == s || index($5, s "/") == 1 || index($5, o "/") == 1 { print $5 }' /proc/self/mountinfo | head -n 3 | tr '\n' ' ')
 [ -z "$left" ] || refuse "mounted under a stage ($left): a session is running or never returned; restart the phone first"
 if [ "$(cat "$CTL/boot" 2>/dev/null)" = "$(boot_id)" ]; then
@@ -1055,10 +1684,36 @@ for p in $(head -n 3 /sys/fs/cgroup/oneios_session/cgroup.procs 2>/dev/null); do
 # The ways back: the volume keys, and enough battery to get there.
 command -v getevent >/dev/null 2>&1 || refuse "no getevent: Volume Up + Volume Down could not return to One UI"
 command -v ps >/dev/null 2>&1 || refuse "no ps: the key readers could not be told apart"
-KEYS=$(getevent -pl 2>/dev/null)
-case "$KEYS" in *KEY_VOLUMEUP*) ;; *) refuse "no Volume Up key found (getevent)" ;; esac
-case "$KEYS" in *KEY_VOLUMEDOWN*) ;; *) refuse "no Volume Down key found (getevent)" ;; esac
-KDEVS=$(printf '%s\n' "$KEYS" | awk '/^add device/ { dev = $NF } /KEY_VOLUME(UP|DOWN)/ { print dev }' | sort -u)
+KDEVS=$(volume_key_devices) || refuse "could not validate physical volume keys in getevent (gpio-keys Volume Up, pmic_resin Volume Down)"
+if [ "$FRAMEWORK" = 1 ]; then
+    framework_probe || framework_block "SM8850 recovery cannot be armed"
+    qualified=$(framework_watchdog_plan "$WD_TARGET") || framework_block "watchdog qualification changed"
+    [ -x "$STAGE/oneios-watchdog" ] && root_only "$STAGE/oneios-watchdog" &&
+        [ "$(sha256sum "$STAGE/oneios-watchdog" | cut -d' ' -f1)" = "${qualified##* }" ] ||
+        framework_block "the qualified native watchdog supervisor is not staged"
+    [ "$(getprop init.svc.zygote_next)" = running ] || framework_block "the expected zygote_next service is not running"
+    if [ "$FW_MODE" = run ]; then
+        [ "$(cat "$STAGE/image.ready" 2>/dev/null)" = sm8850-ios27-bench ] ||
+            framework_block "the isolated benchmark stage was not finalized"
+        [ "$(cat "$STAGE/smoke.accepted" 2>/dev/null)" = "$(boot_id)" ] ||
+            framework_block "a verified recovery smoke on this boot is required before launching a guest"
+        root_only "$STAGE/data" && root_only "$STAGE/data/data.img" && root_only "$STAGE/data/unique-chip-id" &&
+            [ "$(stat -c '%s:%h' "$STAGE/data/data.img")" = 8589934592:1 ] &&
+            [ "$(stat -c '%s:%h' "$STAGE/data/unique-chip-id")" = 8:1 ] ||
+            framework_block "the independent APFS Data snapshot is missing or unsafe"
+        [ -w "$P/sys/vm/max_map_count" ] || framework_block "vm.max_map_count cannot be restored"
+        [ -x "$STAGE/runtime/bin/oneios-display" ] || framework_block "the benchmark display helper is missing"
+        cap=$(awk '/^CapEff:/ {print $2}' "$P/$$/status")
+        [ "$((0x${cap:-0} & 16384))" -ne 0 ] || framework_block "CAP_IPC_LOCK is absent"
+        [ "$(df -Pk "$STAGE" | awk 'NR==2 {print $4}')" -ge 31457280 ] ||
+            framework_block "the staged bench requires at least 30 GiB of free storage"
+    fi
+fi
+WD_TARGET=$(watchdog_target) || refuse "watchdog recovery could not identify One UI's active software watchdog"
+watchdog_now >/dev/null || refuse "watchdog recovery could not read monotonic boot uptime"
+WD_BOOT=$(boot_id)
+WD_BIRTH=$(watchdog_birth $$)
+[ -n "$WD_BOOT" ] && [ -n "$WD_BIRTH" ] || refuse "watchdog recovery could not identify the switch process and boot"
 BAT=/sys/class/power_supply/battery
 CAP=$(cat $BAT/capacity 2>/dev/null)
 BST=$(cat $BAT/status 2>/dev/null)
@@ -1076,7 +1731,7 @@ set -- $(stat -f -c '%a %S' /data 2>/dev/null)
 [ "$APP" != 1 ] || [ "${ONEIOS_ACK_EXPERIMENTAL:-0}" = 1 ] || refuse "the experimental tick was not given"
 
 echo "Preflight passed (runtime $R_VERSION, xnuhost $R_XNUHOST, image iOS $I_VERSION $I_BUILD format $I_FORMAT, busybox $BB, SELinux $(getenforce 2>/dev/null))"
-if [ "$MODE" = --check ]; then
+if [ "$MODE" = --check ] || [ "$MODE" = --framework-check ]; then
     echo "PREFLIGHT OK"
     exit 0
 fi
@@ -1092,11 +1747,19 @@ export BB
 
 echo "=== [1/5] $(date +%T) Session folder and baseline ==="
 # The last session's log is kept (five of them); its folder is this session's.
-mkdir -p "$STAGE/logs" && chmod 0700 "$STAGE/logs"
-[ -s "$SESSION/xnuhost.log" ] && mv -f "$SESSION/xnuhost.log" "$STAGE/logs/xnuhost-$(date +%s).log"
-ls -1t "$STAGE/logs"/xnuhost-*.log 2>/dev/null | tail -n +6 | while read -r old; do rm -f "$old"; done
 [ ! -L "$SESSION" ] || refuse "$SESSION is a symlink"
 [ ! -L "$CTL" ] || refuse "$CTL is a symlink"
+mkdir -p "$STAGE/logs" && chmod 0700 "$STAGE/logs"
+if [ "$FRAMEWORK" = 1 ]; then
+    archive=$(mktemp -d "$STAGE/logs/session.XXXXXX") || framework_setup_failed "could not archive the previous session"
+    for name in session control return.log return.outcome; do
+        [ ! -e "$STAGE/$name" ] || mv "$STAGE/$name" "$archive/$name" || framework_setup_failed "could not retain $name"
+    done
+    [ "$FW_MODE" != smoke ] || rm -f "$STAGE/smoke.accepted" || framework_setup_failed "could not clear stale smoke evidence"
+else
+    [ -s "$SESSION/xnuhost.log" ] && mv -f "$SESSION/xnuhost.log" "$STAGE/logs/xnuhost-$(date +%s).log"
+    ls -1t "$STAGE/logs"/xnuhost-*.log 2>/dev/null | tail -n +6 | while read -r old; do rm -f "$old"; done
+fi
 rm -rf "$SESSION" "$CTL"
 mkdir -p "$CTL/base" "$CTL/keys" "$SESSION/tmp" "$STAGE/data" && chown -R 0:0 "$SESSION" "$CTL" && chmod -R go-rwx "$SESSION" "$CTL" &&
     chmod 0700 "$STAGE/data" || refuse "could not make $SESSION"
@@ -1119,7 +1782,14 @@ awk '{ print $5 }' /proc/1/mountinfo | sort > "$B/mounts"
 for bl in "$T"/sys/class/backlight/*/brightness; do
     [ -f "$bl" ] && echo "${bl#"$T"} $(cat "$bl" 2>/dev/null)"
 done > "$B/backlight" 2>/dev/null
-clocks_save
+if [ "$FRAMEWORK" = 1 ]; then
+    framework_service_pids > "$B/framework_services" || framework_setup_failed "essential service baseline changed"
+    mkdir "$CTL/captures" || framework_setup_failed "could not prepare screenshot directory"
+    printf '%s\n' "$FW_MODE" > "$CTL/framework.mode" || framework_setup_failed "could not record framework mode"
+    printf '%s\n' "$FW_LAUNCH" > "$CTL/framework.launch" || framework_setup_failed "could not record framework log identifier"
+else
+    clocks_save
+fi
 # The USB gadget and adbd as One UI has them (control/base/usb), for the
 # session's USB watcher and the return.
 usb_save
@@ -1131,15 +1801,23 @@ echo "=== [2/5] $(date +%T) Arming the way back ==="
 # the poll are started here, in init's mount namespace, before xnuhost's
 # namespace and cgroup exist: they are never part of either.
 # Each of them writes its own pid (watcher.pid, keys/pids) once it runs.
-"$BB" setsid $SH "$SELF" --watch </dev/null >>"$STAGE/return.log" 2>&1 &
+WD_GEN="$WD_BOOT.$$.$WD_BIRTH"
+if ! printf '%s\n' "$WD_GEN" > "$CTL/watchdog.generation"; then
+    echo "Could not record the watchdog generation. One UI was left running."
+    echo failed > "$CTL/state"
+    exit 4
+fi
+"$BB" setsid $SH "$SELF" --watch 8>&- </dev/null >>"$STAGE/return.log" 2>&1 &
 KTOK="$$.$(date +%s)"
 echo "$KTOK" > "$CTL/keys/session"
 readers=1
+role=up
 for kd in $KDEVS; do
-    "$BB" setsid $SH "$SELF" --keys "$kd" "$KTOK" </dev/null >/dev/null 2>&1 &
+    "$BB" setsid $SH "$SELF" --keys "$kd" "$KTOK" "$role" 8>&- </dev/null >/dev/null 2>&1 &
+    role=down
     readers=$((readers + 1))
 done
-"$BB" setsid $SH "$SELF" --keys-poll "$KTOK" $KDEVS </dev/null >/dev/null 2>&1 &
+"$BB" setsid $SH "$SELF" --keys-poll "$KTOK" $KDEVS 8>&- </dev/null >/dev/null 2>&1 &
 # With One UI's power manager gone nothing would keep the phone awake.
 echo oneios_session > /sys/power/wake_lock 2>/dev/null
 # One UI is stopped only with the way back in place: the watcher, a reader
@@ -1148,7 +1826,8 @@ echo oneios_session > /sys/power/wake_lock 2>/dev/null
 # helpers: there is no stop mark yet).
 n=0
 while [ $n -lt 25 ]; do
-    [ -s "$CTL/watcher.pid" ] && [ "$(grep -c . "$CTL/keys/pids" 2>/dev/null)" = "$readers" ] && break
+    [ -s "$CTL/watcher.pid" ] && [ "$(grep -c . "$CTL/keys/pids" 2>/dev/null)" = "$readers" ] &&
+        { [ "$FRAMEWORK" = 0 ] || [ "$(find "$CTL/keys" -name 'reader.*' | wc -l | tr -d ' ')" = "$readers" ]; } && break
     sleep 0.2; n=$((n + 1))
 done
 armed=""
@@ -1156,7 +1835,24 @@ kill -0 "$(cat "$CTL/watcher.pid" 2>/dev/null)" 2>/dev/null || armed="the watche
 [ "$(grep -c . "$CTL/keys/pids" 2>/dev/null)" = "$readers" ] || armed="${armed:+$armed, }$(grep -c . "$CTL/keys/pids" 2>/dev/null) of $readers key readers started"
 for p in $(cat "$CTL/keys/pids" 2>/dev/null); do
     kill -0 "$p" 2>/dev/null || armed="${armed:+$armed, }key reader $p is not running"
+    if [ "$FRAMEWORK" = 1 ]; then
+        framework_pid_alive "$CTL/keys/reader.$p" || armed="key reader $p is not in the protected recovery context"
+    fi
 done
+if [ "$FRAMEWORK" = 1 ] && [ -z "$armed" ]; then
+    if fw_start=$(watchdog_now) && framework_pid_alive "$CTL/framework.watcher" &&
+        printf '%s\n' "$((fw_start + 45))" > "$CTL/framework.cutoff"; then
+        "$BB" setsid $SH "$SELF" --framework-deadline "$WD_GEN" 8>&- </dev/null >>"$STAGE/return.log" 2>&1 &
+        n=0
+        until framework_pid_alive "$CTL/framework.guard" 2>/dev/null; do
+            [ "$n" -lt 20 ] || break
+            sleep 0.2; n=$((n + 1))
+        done
+        framework_pid_alive "$CTL/framework.guard" 2>/dev/null || armed="independent deadline guard did not start"
+    else
+        armed="watcher identity or monotonic uptime could not be confirmed"
+    fi
+fi
 case " $(cat /sys/power/wake_lock 2>/dev/null) " in
     *" oneios_session "*) ;;
     *) armed="${armed:+$armed, }the wakelock oneios_session is not held" ;;
@@ -1172,7 +1868,7 @@ echo "If that does nothing: hold Power + Volume Down until the phone restarts (a
 
 # A return asked while the switch runs (the watcher, the key readers, the app,
 # adb) wins. The switch and the return meet at one lock, $CTL/stop.lock: the
-# switch holds it from its last look at the state to the end of the stop, the
+# switch holds it while saving and changing shmem and stopping One UI, the
 # return takes it and never gives it back. So a return either sees the stop
 # done (the "stopped" mark) and restores One UI in place, or the switch never
 # stops anything (2026-11-12 11:04: a return during step 3 found no mark yet,
@@ -1184,58 +1880,162 @@ return_asked() { # true when a return was asked or has begun
     return 1
 }
 end_for_return() { # <step>: the switch ends; the return (already under way, or the watcher's) restores
+    if [ "$FRAMEWORK" = 1 ] && [ "$(cat "$CTL/stop.lock/switch" 2>/dev/null)" = "$$" ]; then
+        release_stop_lock
+    fi
     echo "A return to One UI was asked before $1 ($(head -c 200 "$SESSION/return.request" 2>/dev/null)): the switch ends here; the return restores One UI"
     exit 4
+}
+release_stop_lock() {
+    rm -f "$CTL/stop.lock/switch"
+    rmdir "$CTL/stop.lock" 2>/dev/null
 }
 return_asked && end_for_return "One UI's framework was stopped"
 
 echo "=== [3/5] $(date +%T) Stopping the One UI framework ==="
 # The boot screen first, so that it is up when One UI's windows go.
 bootui_begin
-# The watchdog device(s) One UI's system_server keeps open, before it stops
-# (oneos_switch.sh [4b/6]: recorded for the feeder).
-for p in $(pidof system_server); do
-    for fd in /proc/$p/fd/*; do
-        t=$(readlink "$fd" 2>/dev/null)
-        case "$t" in /dev/watchdog*|/dev/softdog*) echo "$t" ;; esac
-    done
-done 2>/dev/null | sort -u > "$CTL/softdog_nodes"
 # The stop lock (above): 15 s at most; a return holds it for good.
 n=0
 until mkdir "$CTL/stop.lock" 2>/dev/null; do
+    [ ! -e "$CTL/stop.lock/return" ] || end_for_return "One UI's framework was stopped (a return holds the stop lock)"
     [ $n -lt 75 ] || end_for_return "One UI's framework was stopped (a return holds the stop lock)"
     sleep 0.2; n=$((n + 1))
 done
-return_asked && end_for_return "One UI's framework was stopped"
+if ! echo $$ 2>/dev/null > "$CTL/stop.lock/switch"; then
+    release_stop_lock
+    echo "Could not record the stop lock's owner. One UI's framework was left running."
+    exit 4
+fi
+return_asked && { release_stop_lock; end_for_return "One UI's framework was stopped"; }
+if [ "$(watchdog_target)" != "$WD_TARGET" ] || ! printf '%s\n' "$WD_TARGET" > "$CTL/watchdog.target" ||
+    { [ "$FRAMEWORK" = 1 ] && ! { framework_recovery_ready && [ "$(volume_key_devices)" = "$KDEVS" ] &&
+        [ "$(framework_service_pids)" = "$(cat "$B/framework_services")" ] &&
+        [ "$(framework_watchdog_plan "$WD_TARGET")" = "$qualified" ] &&
+        watchdog_uint "$(pidof system_server)" &&
+        pidof system_server > "$CTL/watchdog.owner" &&
+        printf '%s\n' "$qualified" > "$CTL/watchdog.plan" &&
+        printf '%s FRAMEWORK_OWNS\n' "$WD_GEN" > "$CTL/watchdog.phase"; }; }; then
+    release_stop_lock
+    echo "The watchdog recovery target could not be recorded. One UI's framework was left running."
+    $SH "$STAGE/oneios_return.sh" switch-watchdog-not-ready
+    exit 4
+fi
+# xnuhost uses advise for MADV_HUGEPAGE on the guest's RAM. Save the bare
+# active mode before writing and hold the stop lock through both operations
+# so an early return can restore it even if the framework was never stopped.
+SHMEM_EN="$T/sys/kernel/mm/transparent_hugepage/shmem_enabled"
+shmem_mode=$(sed -n 's/.*\[\([a-z_]*\)\].*/\1/p' "$SHMEM_EN" 2>/dev/null)
+case "$FRAMEWORK:$shmem_mode" in
+    0:always|0:within_size|0:advise|0:never|0:deny|0:force)
+        if printf '%s\n' "$shmem_mode" 2>/dev/null > "$B/shmem_enabled.tmp" &&
+            mv -f "$B/shmem_enabled.tmp" "$B/shmem_enabled" &&
+            [ "$shmem_mode" != advise ] && echo advise 2>/dev/null > "$SHMEM_EN"; then
+            echo "shmem_enabled: $shmem_mode -> advise"
+        fi ;;
+esac
+return_asked && { release_stop_lock; end_for_return "One UI's framework was stopped"; }
 # From here One UI's framework is down: the return starts it again. Without
 # this mark the return only tidies up (a switch that ended before the stop).
-echo "$(date +%s)" > "$CTL/stopped"
-setprop ctl.stop zygote
-[ -n "$(getprop init.svc.zygote_secondary)" ] && setprop ctl.stop zygote_secondary
-n=0
-while [ $n -lt 50 ] && pidof system_server >/dev/null 2>&1; do sleep 0.2; n=$((n + 1)); done
-kill -9 $(pidof system_server) 2>/dev/null
-kill -9 $(pidof zygote64) $(pidof zygote) 2>/dev/null
-rmdir "$CTL/stop.lock" 2>/dev/null
-# system_server is gone, so nothing of One UI writes the clock caps any more.
-clocks_tops
-"$BB" setsid /system/bin/sh "$SELF" --stop-loop </dev/null >/dev/null 2>&1 &
-echo $! > "$CTL/stop-loop.pid"
+if [ "$FRAMEWORK" = 1 ] &&
+   ! printf '%s TRANSFER_PENDING\n' "$WD_GEN" > "$CTL/watchdog.phase"; then
+    release_stop_lock
+    $SH "$SELF_RETURN" switch-watchdog-not-ready
+    exit 4
+fi
+[ "$FRAMEWORK" = 0 ] || echo "Watchdog: FRAMEWORK_OWNS -> TRANSFER_PENDING ($WD_TARGET)"
+if ! stop_android_framework; then
+    release_stop_lock
+    echo "Framework stop failed. Starting guarded return."
+    publish_return_request "Framework stop failed"
+    $SH "$SELF_RETURN" switch-stop-failed
+    exit 4
+fi
+watchdog_started() {
+    wd_begin=$(watchdog_now) || return 1
+    printf '%s %s\n' "$WD_GEN" "$wd_begin" > "$CTL/feeder.arm.tmp" &&
+        mv -f "$CTL/feeder.arm.tmp" "$CTL/feeder.arm" || return 1
+    "$BB" setsid $SH "$SELF" --feed 8>&- </dev/null >/dev/null 2>&1 &
+    wd_pid=$!
+    while kill -0 "$wd_pid" 2>/dev/null; do
+        watchdog_health >/dev/null
+        case $? in 0) return 0 ;; 1) ;; *) return 1 ;; esac
+        [ ! -e "$CTL/feeder.off" ] || return 1
+        [ "$(watchdog_generation)" = "$WD_GEN" ] || return 1
+        sleep 0.2
+    done
+    return 1
+}
+if ! watchdog_started; then
+    watchdog_failed "the feeder did not become ready after stopping One UI"
+    release_stop_lock
+    $SH "$STAGE/oneios_return.sh" switch-watchdog-failed
+    exit 4
+fi
+if [ "$FRAMEWORK" = 1 ]; then
+    "$BB" setsid /system/bin/sh "$SELF" --stop-loop 8>&- </dev/null >/dev/null 2>&1 &
+    echo $! > "$CTL/stop-loop.pid"
+    fw_recover() {
+        echo "Framework preparation failed: $*"
+        publish_return_request "$*"
+        release_stop_lock
+        $SH "$SELF_RETURN" framework-deadline "$WD_GEN"
+        exit 4
+    }
+    n=0
+    until framework_pid_alive "$CTL/framework.stoploop"; do
+        [ "$n" -lt 10 ] || fw_recover "the framework stop loop did not arm"
+        sleep 0.2; n=$((n + 1))
+    done
+    framework_down || fw_recover "zygote services or system_server did not stop"
+    for group in /sys/fs/cgroup/apps/uid_*; do
+        [ -d "$group" ] || continue
+        echo 1 > "$group/cgroup.kill" || fw_recover "could not drain $group"
+    done
+    n=0
+    until framework_apps_empty; do
+        [ "$n" -lt 15 ] || fw_recover "Android app process groups did not drain"
+        sleep 0.2; n=$((n + 1))
+    done
+    [ "$(framework_service_pids)" = "$(cat "$B/framework_services")" ] ||
+        fw_recover "an essential Android service changed"
+    [ "$(timeout 3 service check inputflinger)" = 'Service inputflinger: not found' ] &&
+        [ "$(timeout 3 service check input)" = 'Service input: not found' ] ||
+        fw_recover "Android input services did not stop with system_server"
+    grep -E '^(MemAvailable|SwapFree):' "$P/meminfo"
+    fw_seconds=10
+    if [ "$FW_MODE" = run ]; then
+        fw_seconds=240
+        [ "$(awk '/^MemAvailable:/ {print $2}' "$P/meminfo")" -ge 5500000 ] ||
+            fw_recover "available memory is below the benchmark minimum"
+        framework_configure || fw_recover "could not set and verify vm.max_map_count"
+    fi
+    fw_tick=$(watchdog_now) && printf '%s\n' "$((fw_tick + fw_seconds))" > "$CTL/framework.deadline.tmp" &&
+        mv -f "$CTL/framework.deadline.tmp" "$CTL/framework.deadline" ||
+        fw_recover "could not arm the phase deadline"
+    echo "Framework stopped, app groups drained and Android input absent at uptime $fw_tick. Deadline: $((fw_tick + fw_seconds))"
+    if [ "$FW_MODE" = smoke ]; then
+        echo running > "$CTL/state" || fw_recover "could not record smoke state"
+        release_stop_lock
+        exit 0
+    fi
+else
+    release_stop_lock
+    # system_server is gone, so nothing of One UI writes the clock caps any more.
+    clocks_tops
+    "$BB" setsid /system/bin/sh "$SELF" --stop-loop </dev/null >/dev/null 2>&1 &
+    echo $! > "$CTL/stop-loop.pid"
+fi
 # UsbDeviceManager went with system_server: from here the USB watcher keeps
 # adb on the gadget, across unplug and replug (control/usb.log).
-if [ "$(conf "$CTL/base/usb" adb)" = 1 ]; then
+if [ "$FRAMEWORK" = 1 ]; then
+    echo "USB watcher: existing adbd and USB state retained"
+elif [ "$(conf "$CTL/base/usb" adb)" = 1 ]; then
     "$BB" setsid /system/bin/sh "$SELF" --usb-watch </dev/null >>"$CTL/usb.log" 2>&1 &
     echo "USB watcher: started (log $CTL/usb.log)"
 else
     echo "USB watcher: not started (USB debugging was off in One UI)"
 fi
-# Samsung's software watchdog: its magic close now, then the feeder.
-for wd in /dev/watchdog /dev/softdog $(cat "$CTL/softdog_nodes"); do
-    [ -c "$wd" ] || continue
-    if e=$(printf V 2>&1 > "$wd"); then echo "Softdog: $wd closed with V"; else echo "Softdog: $wd not written ($e)"; fi
-done
-"$BB" setsid /system/bin/sh "$SELF" --feed </dev/null >/dev/null 2>&1 &
-echo $! > "$CTL/feeder.pid"
 echo "One UI's zygote: $(getprop init.svc.zygote); system_server: $(pidof system_server 2>/dev/null || echo gone); surfaceflinger $(pidof surfaceflinger) kept"
 
 # From here a return finds the mark and restores One UI in place.
@@ -1245,12 +2045,15 @@ echo "=== [4/5] $(date +%T) Starting xnuhost ==="
 screen status "Starting xnuhost"
 # A new mount namespace made from init's; --inner binds the stage over /data
 # there and execs xnuhost, so the pid it writes is xnuhost's own.
-"$BB" setsid "$BB" unshare -m /system/bin/sh "$SELF" --inner </dev/null >>"$SESSION/xnuhost.log" 2>&1 &
+"$BB" setsid "$BB" unshare -m /system/bin/sh "$SELF" --inner 8>&- </dev/null >>"$SESSION/xnuhost.log" 2>&1 &
 # Waited for by its progress, not for a fixed time: until it wrote the pid, for
 # as long as that shell runs (control/inner.pid), 30 s at most. A shell that
 # ended is not waited for; its trace in the log says where it stopped.
 n=0
-while [ $n -lt 150 ] && [ ! -s "$SESSION/xnuhost.pid" ]; do
+inner_wait=150
+[ "$FRAMEWORK" = 0 ] || inner_wait=40
+while [ $n -lt "$inner_wait" ] && [ ! -s "$SESSION/xnuhost.pid" ]; do
+    [ "$FRAMEWORK" = 0 ] || ! return_asked || end_for_return "xnuhost was ready"
     if [ $n -ge 10 ]; then
         ip=$(cat "$CTL/inner.pid" 2>/dev/null)
         [ -n "$ip" ] && kill -0 "$ip" 2>/dev/null || break
@@ -1263,6 +2066,7 @@ if [ -z "$XP" ] || [ -z "$XNS" ] || [ "$XNS" = "$INIT_NS" ]; then
     echo "!!! xnuhost did not start after $((n / 5)) s (pid '${XP}', namespace '${XNS}'); the last lines of $SESSION/xnuhost.log: $(tail -n 6 "$SESSION/xnuhost.log" | tr '\n' '|')"
     screen status "xnuhost did not start: $(grep . "$SESSION/xnuhost.log" 2>/dev/null | tail -n 1)"
     echo failed > "$CTL/state"
+    [ "$FRAMEWORK" = 0 ] || release_stop_lock
     # One UI's framework is down: never left so. The return, from here (the
     # watcher returns too on this state, or may have ended already; the return
     # takes one caller at a time).
@@ -1273,7 +2077,7 @@ fi
 # watcher and the return go by.
 echo "$XP" > "$CTL/xnuhost.pid"
 echo "$XNS" > "$CTL/mntns"
-echo running > "$CTL/state"
+[ "$FRAMEWORK" = 1 ] || echo running > "$CTL/state"
 echo "xnuhost: pid $XP in mount namespace $XNS, log $SESSION/xnuhost.log"
 
 # The guest's screen: the runtime's display helper, when it carries one. It
@@ -1289,7 +2093,11 @@ if [ -f "$DH" ] && [ ! -L "$DH" ] && [ -x "$DH" ] && root_only "$DH"; then
     # This session's log only: the boot screen's hand-off (display_up) reads its markers, and a
     # "first frame posted" of an earlier session must not end this session's boot screen early.
     [ -f "$CTL/display.log" ] && mv -f "$CTL/display.log" "$CTL/display.log.1" 2>/dev/null
-    "$BB" setsid "$DH" --session "$SESSION" --takeover --wait 60 </dev/null >>"$CTL/display.log" 2>&1 &
+    if [ "$FRAMEWORK" = 1 ]; then
+        "$BB" setsid "$DH" --socket "$SESSION/display.sock" --wait 30 8>&- </dev/null >>"$CTL/display.log" 2>&1 &
+    else
+        "$BB" setsid "$DH" --session "$SESSION" --takeover --wait 60 </dev/null >>"$CTL/display.log" 2>&1 &
+    fi
     DP=$!
     echo "$DP" > "$CTL/display.pid"
     echo 0 2>/dev/null > "/proc/$DP/oom_score_adj"
@@ -1299,6 +2107,11 @@ else
     echo "Display helper: the runtime has none (bin/oneios-display); the guest's screen is not shown"
 fi
 
+if [ "$FRAMEWORK" = 1 ]; then
+    return_asked && end_for_return "the experimental display was ready"
+    echo running > "$CTL/state" || fw_recover "could not record running guest"
+    release_stop_lock
+fi
 echo "=== [5/5] $(date +%T) Session running ==="
 echo "Auto-return to One UI: when xnuhost ends, on $SESSION/return.request, or without $SESSION/ready after ${ONEIOS_RETURN_MAX:-600}s"
 echo "=== ONEIOS SESSION LAUNCHED ==="

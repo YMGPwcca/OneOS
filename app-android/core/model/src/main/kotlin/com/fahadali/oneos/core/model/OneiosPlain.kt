@@ -138,6 +138,13 @@ object OneiosPlain {
             )
 
             // The phone and root (the preflight's first checks).
+            // The SM8850 fork's root-level fail-closed switch gate uses "S24 Ultra",
+            // without "Galaxy": this must remain a PHONE refusal, never a generic error.
+            p.startsWith("oneios switch is currently limited to the s24 ultra") -> m(
+                "iOS switching isn't enabled",
+                "Only the Galaxy S24 Ultra can switch currently. Device-specific One UI recovery has not been verified for this phone.",
+                OneiosFix.NONE, OneiosPart.PHONE,
+            )
             "galaxy s24 ultra" in p -> m(
                 "iOS 27 isn't for this phone", "It runs on the Galaxy S24 Ultra (SM-S928) only.", OneiosFix.NONE, OneiosPart.PHONE,
             )
@@ -220,6 +227,10 @@ object OneiosPlain {
             )
 
             // The way back and the phone's state (the preflight's last checks).
+            "watchdog recovery" in p -> m(
+                "OneOS can't verify the watchdog", "OneOS needs a verified software watchdog to return safely to One UI.",
+                OneiosFix.NONE, OneiosPart.SWITCH,
+            )
             "getevent" in p || "volume up key" in p || "volume down key" in p || "no ps:" in p -> m(
                 "OneOS can't read the volume keys", "You need them to come back to One UI. Restart your phone, then check again.",
                 OneiosFix.NONE, OneiosPart.SWITCH,

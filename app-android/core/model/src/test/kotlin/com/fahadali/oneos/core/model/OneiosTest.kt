@@ -49,14 +49,19 @@ class OneiosTest {
     // --- Where it is offered ---------------------------------------------------
 
     @Test
-    fun onlyTheGalaxyS24UltraIsOffered() {
+    fun onlyTheGalaxyS24UltraAndS26UltraAreOfferedForDiagnostics() {
         for (p in Profiles.BUILT_IN) {
-            assertEquals(p.id, p.id == Profiles.ID_S_ULTRA_8650, OneiosSystem.offeredOn(p))
+            assertEquals(p.id, p.id in setOf(Profiles.ID_S_ULTRA_8650, Profiles.ID_S_ULTRA_8850), OneiosSystem.offeredOn(p))
         }
         assertFalse(OneiosSystem.offeredOn(null))
         assertEquals("SM-S928", Profiles.S_ULTRA_8650.modelPrefix)
         assertTrue(OneiosSystem.offeredOn("SM-S928B", "e3q", "SM8650"))
         assertTrue(OneiosSystem.offeredOn("SM-S928U1", "e3q", "SM8650"))
+        assertTrue(OneiosSystem.offeredOn("SM-S948B", "m3q", "SM8850"))
+        assertFalse(OneiosSystem.offeredOn("SM-S948B", "m3q", "SM8650"))
+        assertFalse(OneiosSystem.offeredOn("SM-S948B", "pa3q", "SM8850"))
+        assertTrue(OneiosSystem.canSwitchOn(Profiles.S_ULTRA_8650))
+        assertFalse(OneiosSystem.canSwitchOn(Profiles.S_ULTRA_8850))
         // The same model number on another chip or codename is not that phone.
         assertFalse(OneiosSystem.offeredOn("SM-S928B", "e3s", "s5e9945"))
         assertFalse(OneiosSystem.offeredOn("SM-S938B", "pa3q", "SM8750"))
@@ -80,6 +85,13 @@ class OneiosTest {
         assertEquals(OneiosSystem.R_EXPERIMENTAL, ask.reason)
         assertTrue(ask.detail.contains("experimental"))
         assertEquals(Level.OK, OneiosSystem.gate(Profiles.S_ULTRA_8650, ticked = true).level)
+        // The experimental acknowledgement must never enable an unvalidated recovery path.
+        for (ticked in listOf(false, true)) {
+            val s26 = OneiosSystem.gate(Profiles.S_ULTRA_8850, ticked)
+            assertEquals(Level.BLOCK, s26.level)
+            assertEquals(OneiosSystem.R_NOT_THIS_PHONE, s26.reason)
+            assertTrue(s26.detail.contains("hardware checks"))
+        }
     }
 
     /** It is its own kind of system: no Android image or file set stands for it. */
