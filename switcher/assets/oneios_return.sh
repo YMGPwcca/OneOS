@@ -273,8 +273,26 @@ framework_watchdog_loaded() {
         { [ "$wd_mode" = 0 ] || [ "$wd_mode" = 1 ]; }
 }
 
+framework_return_guard_alive() {
+    [ -r "$CTL/watchdog.return-guard" ] &&
+        read -r guard_token guard_pid guard_birth < "$CTL/watchdog.return-guard" &&
+        [ "$guard_token" = "$GTOK" ] && [ -n "$guard_birth" ] &&
+        [ "$(wd_process_birth "$guard_pid")" = "$guard_birth" ] || return 1
+    [ -n "$T" ] || {
+        [ "$(readlink "$P/$guard_pid/ns/mnt")" = "$(readlink "$P/1/ns/mnt")" ] &&
+        [ "$(cat "$P/$guard_pid/oom_score_adj")" = -1000 ] &&
+        grep -qx '0::/' "$P/$guard_pid/cgroup"
+    }
+}
+
 framework_watchdog_handoff() {
     framework_watchdog_loaded || failsafe "missing qualified watchdog plan at handback"
+    guard_wait=0
+    until framework_return_guard_alive; do
+        [ "$guard_wait" -lt 10 ] || failsafe "independent handback guard was not armed"
+        sleep 0.2
+        guard_wait=$((guard_wait + 1))
+    done
     wd_proof=$($SH "$S/oneios_switch.sh" --watchdog-health) ||
         failsafe "native supervisor has no fresh heartbeat before handback"
     wd_pid=${wd_proof%% *}
@@ -499,6 +517,9 @@ if [ "$WHO" = --guard ]; then
     tok=$2
     [ -n "$tok" ] || exit 3
     wd_generation=$(cat "$CTL/watchdog.generation" 2>/dev/null)
+    if [ "$FRAMEWORK" = 1 ]; then
+        printf '%s %s %s\n' "$tok" "$$" "$(wd_process_birth $$)" > "$CTL/watchdog.return-guard" || exit 3
+    fi
     t=0 last="" in=0
     while [ $t -lt $GUARD_MAX ]; do
         [ "$(cat "$CTL/return.guard" 2>/dev/null)" = "$tok" ] || exit 0
