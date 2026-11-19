@@ -529,11 +529,7 @@ runtime with xnuhost is staged, this is where every switch ends.**
 **Then:**
 
 1. Session folder, control folder and baseline: boot id, SELinux mode, properties, the pids of vold, keystore2,
-   surfaceflinger and servicemanager, init's mount points, the panel's brightness, the shmem THP mode
-   (`control/base/shmem_enabled`: the switch writes `advise` for xnuhost's 2 MiB host pages, OneiOS 8a9caf3, and the
-   return writes the old value back before gate A). The file saves only the bare mode (`never`, `advise`, ...), parsed
-   from the bracketed token of the node's annotated line; both sides compare bare modes, because writing the whole
-   `always within_size advise [never] deny force` line back is `EINVAL` (the 2026-11-16 Gate A failure and reboot), and **One UI's clock caps**
+   surfaceflinger and servicemanager, init's mount points, the panel's brightness and **One UI's clock caps**
    (`control/base/clocks`: each node, One UI's value, the session's): Samsung's `cpufreq_limit`
    (`/sys/devices/system/cpu/cpufreq_limit/cpufreq_max_limit` and `cpufreq_min_limit`, `drivers/cpufreq/cpufreq_limit.c`
    of the SM8650 kernel: SSRM's one value for every cluster, a freq QoS request of its own, so `scaling_max_freq`
@@ -545,11 +541,15 @@ runtime with xnuhost is staged, this is where every switch ends.**
    system_server stopped, its last values stayed for the whole session (1.7-2.0 GHz CPUs and a 500 MHz GPU after a
    warm One UI, the S24 Ultra, 2026-11-12). `switch.log`: `Clocks of One UI: ...`. Also **One UI's USB gadget** (`control/base/usb`, "USB and adb during a session" below): `USB of One UI: ...`.
 2. The way back is armed first, each part in a session of its own (`setsid`) in init's mount namespace: the
-   watcher, a `getevent` reader per volume-key device, and a poll of the keys' state. A kernel wakelock
+   watcher, a `getevent` reader per volume-key device, and a poll of the keys' state. Preflight requires
+   `gpio-keys` with Volume Up and `pmic_resin` with Volume Down. A kernel wakelock
    (`oneios_session`) keeps the phone awake without One UI's power manager. **One UI is not stopped unless all
    of them run and the wakelock is held**; if not, the switch ends there.
-3. The boot screen starts (below), then One UI's zygote and zygote_secondary are stopped, so system_server and
-   every app end; a loop keeps them stopped. surfaceflinger, the vendor composer, audioserver, netd, vold, keystore2 and the radio keep running.
+3. The boot screen starts (below). Under the stop lock, the switch saves the active shmem THP mode as a bare
+   token in `control/base/shmem_enabled` before setting `advise` for xnuhost's 2 MiB host pages. Both early and
+   normal returns verify the restored mode before clearing the saved value. The switch then stops One UI's
+   zygote and zygote_secondary, which ends system_server and every app. A loop keeps them stopped.
+   surfaceflinger, the vendor composer, audioserver, netd, vold, keystore2 and the radio keep running.
    Once system_server is gone the switch marks `control/clocks.set`, releases `cpufreq_limit` (`-1`, first), and
    writes the hardware's range into the other nodes (`cpuinfo_min_freq`, `cpuinfo_max_freq`, the top of `gpu_freq_table` and `gpu_available_frequencies`),
    one line each in `switch.log`: `clocks: NODE OLD -> NEW (reads N)`. The kernel's thermal zones, trips and

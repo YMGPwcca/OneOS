@@ -10,8 +10,8 @@
 #   oneios_switch.sh --check    the preflight only; changes nothing
 #   oneios_switch.sh --inner    (internal) inside the session's mount namespace
 #   oneios_switch.sh --watch    (internal) the watcher that returns to One UI
-#   oneios_switch.sh --keys D TOK        (internal) Volume Up + Volume Down, from device D's events
-#   oneios_switch.sh --keys-poll TOK D.. (internal) the same chord from the keys' state (works under a grab)
+#   oneios_switch.sh --keys D TOK ROLE   (internal) events from one physical volume key
+#   oneios_switch.sh --keys-poll TOK UP DOWN (internal) the same chord from the keys' state (works under a grab)
 #   oneios_switch.sh --feed     (internal) Samsung's software watchdog feeder
 #   oneios_switch.sh --stop-loop (internal) keeps One UI's zygote stopped
 #   oneios_switch.sh --bootui   (internal) the boot screen's stage line, from xnuhost's log
@@ -109,6 +109,35 @@ out_of_the_way() {
     done
     renice -n -10 -p $$ >/dev/null 2>&1
     return 0
+}
+# The measured S24 Ultra and S26 Ultra input layouts have the same two
+# physical key drivers. Match the name and the reported key on each node;
+# a Bluetooth consumer-control device can advertise both volume keys.
+volume_key_devices() {
+    key_report=$(getevent -pl 2>/dev/null) || return 1
+    printf '%s\n' "$key_report" | awk '
+        function record() {
+            if (dev !~ /^\/dev\/input\/event[0-9]+$/) return
+            if (name == "gpio-keys" && up) { up_dev = dev; up_count++ }
+            if (name == "pmic_resin" && down) { down_dev = dev; down_count++ }
+        }
+        /^add device / { record(); dev = $NF; name = ""; up = down = keys = 0; next }
+        /^[[:space:]]+name:[[:space:]]+"gpio-keys"[[:space:]]*$/ { name = "gpio-keys"; next }
+        /^[[:space:]]+name:[[:space:]]+"pmic_resin"[[:space:]]*$/ { name = "pmic_resin"; next }
+        $2 ~ /^\([[:xdigit:]]+\):$/ { keys = ($1 == "KEY" && $2 == "(0001):") }
+        keys {
+            for (i = ($1 == "KEY" ? 3 : 1); i <= NF; i++) {
+                if ($i == "KEY_VOLUMEUP" || $i == "KEY_VOLUMEUP*") up = 1
+                if ($i == "KEY_VOLUMEDOWN" || $i == "KEY_VOLUMEDOWN*") down = 1
+            }
+        }
+        END {
+            record()
+            if (up_count != 1 || down_count != 1 || up_dev == down_dev) exit 1
+            print up_dev
+            print down_dev
+        }
+    '
 }
 # The keys ask the watcher, which acts within a second. A session that is
 # still not returning 5 s later has no working watcher (killed, or stuck): the
@@ -529,6 +558,10 @@ usb_save() {
 
 # --- INTERNAL MODES --------------------------------------------------------
 case "$MODE" in
+    --key-devices)
+        [ -n "$T" ] || { echo "$MODE: for the tests only"; exit 2; }
+        volume_key_devices || refuse "could not validate physical volume keys in getevent (gpio-keys Volume Up, pmic_resin Volume Down)"
+        exit 0 ;;
     --clocks-save|--clocks-tops)
         # The tests' way in (OneiosScriptTest, against a fake sysfs): the same two steps the session takes.
         [ -n "$T" ] || { echo "$MODE: for the tests only"; exit 2; }
@@ -841,11 +874,16 @@ case "$MODE" in
         # (another token) ends this reader, with its getevent, on its next event.
         [ -n "$2" ] && [ -n "$3" ] || exit 3
         kd=$2 tok=$3
+        case "$4" in
+            up) k=up; key=KEY_VOLUMEUP ;;
+            down) k=down; key=KEY_VOLUMEDOWN ;;
+            *) exit 3 ;;
+        esac
         KS="$CTL/keys"
         reader_start
         getevent -lq "$kd" 2>/dev/null | while read -r typ code val rest; do
             [ "$(cat "$KS/session" 2>/dev/null)" = "$tok" ] || reader_end
-            case "$code" in KEY_VOLUMEUP) k=up ;; KEY_VOLUMEDOWN) k=down ;; *) continue ;; esac
+            [ "$typ" = EV_KEY ] && [ "$code" = "$key" ] || continue
             # DOWN and UP only (getevent -l's names, or the bare values). The
             # auto-repeat of a held key (REPEAT, on a device with EV_REP) is
             # not a release: taken as one, a hold would never reach 3 s.
@@ -881,23 +919,24 @@ case "$MODE" in
         # samples with both keys down are 3 s. One sample without them in
         # between does not end the hold (the rocker's chatter, see --keys); two
         # in a row do.
-        [ -n "$2" ] && [ -n "$3" ] || exit 3
-        tok=$2
-        shift 2
+        [ -n "$2" ] && [ -n "$3" ] && [ -n "$4" ] || exit 3
+        tok=$2 updev=$3 downdev=$4
         KS="$CTL/keys"
         reader_start
         TMO=""
         command -v timeout >/dev/null 2>&1 && TMO="timeout 2"
         n=0 miss=0
         while [ "$(cat "$KS/session" 2>/dev/null)" = "$tok" ]; do
-            st=$(for kd in "$@"; do $TMO getevent -pl "$kd" 2>/dev/null; done)
+            up=$($TMO getevent -pl "$updev" 2>/dev/null) || up=""
+            down=$($TMO getevent -pl "$downdev" 2>/dev/null) || down=""
             held=0
-            case "$st" in *"KEY_VOLUMEUP*"*) case "$st" in *"KEY_VOLUMEDOWN*"*) held=1 ;; esac ;; esac
+            case "$up" in *"KEY_VOLUMEUP*"*) case "$down" in *"KEY_VOLUMEDOWN*"*) held=1 ;; esac ;; esac
             if [ $held = 1 ]; then n=$((n + 1)); miss=0
             elif [ $n -gt 0 ]; then miss=$((miss + 1)); [ $miss -lt 2 ] || { n=0; miss=0; }
             fi
             if [ $n -ge 7 ]; then
                 n=0 miss=0
+                [ "$(cat "$KS/session" 2>/dev/null)" = "$tok" ] || break
                 ask_return "keys: Volume Up + Volume Down down for 3 s (polled)"
             fi
             sleep 0.5
@@ -1058,10 +1097,7 @@ for p in $(head -n 3 /sys/fs/cgroup/oneios_session/cgroup.procs 2>/dev/null); do
 # The ways back: the volume keys, and enough battery to get there.
 command -v getevent >/dev/null 2>&1 || refuse "no getevent: Volume Up + Volume Down could not return to One UI"
 command -v ps >/dev/null 2>&1 || refuse "no ps: the key readers could not be told apart"
-KEYS=$(getevent -pl 2>/dev/null)
-case "$KEYS" in *KEY_VOLUMEUP*) ;; *) refuse "no Volume Up key found (getevent)" ;; esac
-case "$KEYS" in *KEY_VOLUMEDOWN*) ;; *) refuse "no Volume Down key found (getevent)" ;; esac
-KDEVS=$(printf '%s\n' "$KEYS" | awk '/^add device/ { dev = $NF } /KEY_VOLUME(UP|DOWN)/ { print dev }' | sort -u)
+KDEVS=$(volume_key_devices) || refuse "could not validate physical volume keys in getevent (gpio-keys Volume Up, pmic_resin Volume Down)"
 BAT=/sys/class/power_supply/battery
 CAP=$(cat $BAT/capacity 2>/dev/null)
 BST=$(cat $BAT/status 2>/dev/null)
@@ -1122,31 +1158,11 @@ awk '{ print $5 }' /proc/1/mountinfo | sort > "$B/mounts"
 for bl in "$T"/sys/class/backlight/*/brightness; do
     [ -f "$bl" ] && echo "${bl#"$T"} $(cat "$bl" 2>/dev/null)"
 done > "$B/backlight" 2>/dev/null
-# The shmem THP mode as One UI has it: xnuhost's 2 MiB host pages map the
-# guest's RAM with MADV_HUGEPAGE, which shmem honours only in the advise mode
-# (OneiOS 8a9caf3, docs/booter.md 2.6c). One UI never advises, so advise
-# changes nothing for it; the return writes the old value back.
-SHMEM_EN="$T/sys/kernel/mm/transparent_hugepage/shmem_enabled"
-if [ -f "$SHMEM_EN" ]; then
-    # The node prints every mode with the active one in brackets:
-    # "always within_size advise [never] deny force". Save the bare mode (the
-    # bracketed token), never the whole line: writing the line back is EINVAL
-    # and that is what failed Gate A on 2026-11-16.
-    shmem_raw=$(cat "$SHMEM_EN" 2>/dev/null)
-    shmem_mode=$(printf '%s\n' "$shmem_raw" | sed -n 's/.*\[\([a-z_]*\)\].*/\1/p')
-    [ -n "$shmem_mode" ] || shmem_mode=$(printf '%s\n' "$shmem_raw" | awk '{ print $1 }')
-    if [ -n "$shmem_mode" ]; then
-        printf '%s\n' "$shmem_mode" > "$B/shmem_enabled" 2>/dev/null
-        if [ "$shmem_mode" != advise ] && echo advise > "$SHMEM_EN" 2>/dev/null; then
-            echo "shmem_enabled: $shmem_mode -> advise"
-        fi
-    fi
-fi
 clocks_save
 # The USB gadget and adbd as One UI has them (control/base/usb), for the
 # session's USB watcher and the return.
 usb_save
-echo "Baseline: boot $(cat "$B/boot_id"), SELinux $(cat "$B/selinux"), shmem $(cat "$B/shmem_enabled" 2>/dev/null || echo -), $(tr '\n' ' ' < "$B/pids")wifi $(cat "$B/wifi_on")"
+echo "Baseline: boot $(cat "$B/boot_id"), SELinux $(cat "$B/selinux"), $(tr '\n' ' ' < "$B/pids")wifi $(cat "$B/wifi_on")"
 
 echo "=== [2/5] $(date +%T) Arming the way back ==="
 # Before the stop: the watcher returns to One UI by itself if this script
@@ -1158,8 +1174,10 @@ echo "=== [2/5] $(date +%T) Arming the way back ==="
 KTOK="$$.$(date +%s)"
 echo "$KTOK" > "$CTL/keys/session"
 readers=1
+role=up
 for kd in $KDEVS; do
-    "$BB" setsid $SH "$SELF" --keys "$kd" "$KTOK" </dev/null >/dev/null 2>&1 &
+    "$BB" setsid $SH "$SELF" --keys "$kd" "$KTOK" "$role" </dev/null >/dev/null 2>&1 &
+    role=down
     readers=$((readers + 1))
 done
 "$BB" setsid $SH "$SELF" --keys-poll "$KTOK" $KDEVS </dev/null >/dev/null 2>&1 &
@@ -1195,7 +1213,7 @@ echo "If that does nothing: hold Power + Volume Down until the phone restarts (a
 
 # A return asked while the switch runs (the watcher, the key readers, the app,
 # adb) wins. The switch and the return meet at one lock, $CTL/stop.lock: the
-# switch holds it from its last look at the state to the end of the stop, the
+# switch holds it while saving and changing shmem and stopping One UI, the
 # return takes it and never gives it back. So a return either sees the stop
 # done (the "stopped" mark) and restores One UI in place, or the switch never
 # stops anything (2026-11-12 11:04: a return during step 3 found no mark yet,
@@ -1209,6 +1227,10 @@ return_asked() { # true when a return was asked or has begun
 end_for_return() { # <step>: the switch ends; the return (already under way, or the watcher's) restores
     echo "A return to One UI was asked before $1 ($(head -c 200 "$SESSION/return.request" 2>/dev/null)): the switch ends here; the return restores One UI"
     exit 4
+}
+release_stop_lock() {
+    rm -f "$CTL/stop.lock/switch"
+    rmdir "$CTL/stop.lock" 2>/dev/null
 }
 return_asked && end_for_return "One UI's framework was stopped"
 
@@ -1226,20 +1248,44 @@ done 2>/dev/null | sort -u > "$CTL/softdog_nodes"
 # The stop lock (above): 15 s at most; a return holds it for good.
 n=0
 until mkdir "$CTL/stop.lock" 2>/dev/null; do
+    [ ! -e "$CTL/stop.lock/return" ] || end_for_return "One UI's framework was stopped (a return holds the stop lock)"
     [ $n -lt 75 ] || end_for_return "One UI's framework was stopped (a return holds the stop lock)"
     sleep 0.2; n=$((n + 1))
 done
-return_asked && end_for_return "One UI's framework was stopped"
+if ! echo $$ 2>/dev/null > "$CTL/stop.lock/switch"; then
+    release_stop_lock
+    echo "Could not record the stop lock's owner. One UI's framework was left running."
+    exit 4
+fi
+return_asked && { release_stop_lock; end_for_return "One UI's framework was stopped"; }
+# xnuhost uses advise for MADV_HUGEPAGE on the guest's RAM. Save the bare
+# active mode before writing and hold the stop lock through both operations
+# so an early return can restore it even if the framework was never stopped.
+SHMEM_EN="$T/sys/kernel/mm/transparent_hugepage/shmem_enabled"
+shmem_mode=$(sed -n 's/.*\[\([a-z_]*\)\].*/\1/p' "$SHMEM_EN" 2>/dev/null)
+case "$shmem_mode" in
+    always|within_size|advise|never|deny|force)
+        if printf '%s\n' "$shmem_mode" 2>/dev/null > "$B/shmem_enabled.tmp" &&
+            mv -f "$B/shmem_enabled.tmp" "$B/shmem_enabled" &&
+            [ "$shmem_mode" != advise ] && echo advise 2>/dev/null > "$SHMEM_EN"; then
+            echo "shmem_enabled: $shmem_mode -> advise"
+        fi ;;
+esac
+return_asked && { release_stop_lock; end_for_return "One UI's framework was stopped"; }
 # From here One UI's framework is down: the return starts it again. Without
 # this mark the return only tidies up (a switch that ended before the stop).
-echo "$(date +%s)" > "$CTL/stopped"
+if ! echo "$(date +%s)" > "$CTL/stopped"; then
+    release_stop_lock
+    echo "Could not record the stop mark. One UI's framework was left running."
+    exit 4
+fi
 setprop ctl.stop zygote
 [ -n "$(getprop init.svc.zygote_secondary)" ] && setprop ctl.stop zygote_secondary
 n=0
 while [ $n -lt 50 ] && pidof system_server >/dev/null 2>&1; do sleep 0.2; n=$((n + 1)); done
 kill -9 $(pidof system_server) 2>/dev/null
 kill -9 $(pidof zygote64) $(pidof zygote) 2>/dev/null
-rmdir "$CTL/stop.lock" 2>/dev/null
+release_stop_lock
 # system_server is gone, so nothing of One UI writes the clock caps any more.
 clocks_tops
 "$BB" setsid /system/bin/sh "$SELF" --stop-loop </dev/null >/dev/null 2>&1 &

@@ -68,6 +68,7 @@ BASE=$CTL/base
 LOG=$S/return.log
 # xnuhost's cgroup (oneios_switch.sh --inner). Only ever this one path.
 CG="$T/sys/fs/cgroup/oneios_session"
+SHMEM_EN="$T/sys/kernel/mm/transparent_hugepage/shmem_enabled"
 WHO="${1:-manual}"
 # Every wait below has its own limit and its own failsafe; all of them
 # together, each used up to its last second, come to about 7 minutes (20 s for
@@ -141,6 +142,40 @@ failsafe() {
     echo "failsafe $(date +%s) $*" > "$S/return.outcome"
     do_reboot oneios-inplace-failsafe
 }
+
+shmem_mode() {
+    # Sysfs lists the modes with the active one in brackets. The fake node
+    # also reads back a bare mode after a write.
+    shmem_raw=$(cat "$SHMEM_EN" 2>/dev/null) || return 1
+    printf '%s\n' "$shmem_raw" | awk '
+        NF == 1 && $1 ~ /^[a-z_]+$/ { print $1; next }
+        { for (i = 1; i <= NF; i++) if ($i ~ /^\[[a-z_]+\]$/) print substr($i, 2, length($i) - 2) }
+    '
+}
+restore_shmem() {
+    shmem_saved="$BASE/shmem_enabled"
+    [ -e "$shmem_saved" ] || return 0
+    shmem_old=$(cat "$shmem_saved" 2>/dev/null) || failsafe "could not read the shmem_enabled baseline"
+    case "$shmem_old" in
+        always|within_size|advise|never|deny|force) ;;
+        *) failsafe "shmem_enabled baseline is unreadable or invalid ($shmem_saved)" ;;
+    esac
+    shmem_now=$(shmem_mode)
+    case "$shmem_now" in
+        always|within_size|advise|never|deny|force) ;;
+        *) failsafe "shmem_enabled node is unavailable or its active mode is unreadable" ;;
+    esac
+    if [ "$shmem_now" != "$shmem_old" ]; then
+        printf '%s\n' "$shmem_old" 2>/dev/null > "$SHMEM_EN" ||
+            failsafe "shmem_enabled is $shmem_now, was $shmem_old at the switch, and the write back failed"
+        shmem_readback=$(shmem_mode)
+        [ "$shmem_readback" = "$shmem_old" ] ||
+            failsafe "shmem_enabled readback is '${shmem_readback:-unavailable}', expected $shmem_old"
+    fi
+    rm -f "$shmem_saved" || failsafe "could not clear the restored shmem_enabled baseline"
+    [ "$shmem_now" = "$shmem_old" ] || say "shmem_enabled back: $shmem_old"
+}
+
 base_prop() { sed -n "s/^\[$1\]: \[\(.*\)\]\$/\1/p" "$BASE/props" 2>/dev/null | head -n 1; }
 base_has() { grep -q "^\[$1\]: " "$BASE/props" 2>/dev/null; }
 # A non-persist prop back to its value at the switch, in memory only
@@ -370,17 +405,6 @@ if ! mkdir "$CTL/returning.lock" 2>/dev/null; then
 fi
 echo $$ > "$CTL/returning.lock/pid"
 echo returning > "$CTL/state"
-# The switch's stop lock (oneios_switch.sh, step 3): taken and kept. A switch in
-# the middle of its stop finishes it first (15 s at most, then the lock counts as
-# that switch's leftover), so the "stopped" mark below is final, and a switch
-# that has not stopped anything yet never will.
-n=0
-until mkdir "$CTL/stop.lock" 2>/dev/null; do
-    [ -e "$CTL/stop.lock/return" ] && break           # an earlier return's: the switch can stop nothing any more
-    [ $n -lt 75 ] || { say "the switch's stop lock is still held after 15 s: taken over"; break; }
-    sleep 0.2; n=$((n + 1))
-done
-echo $$ > "$CTL/stop.lock/return"
 echo oneios_return 2>/dev/null > "$T/sys/power/wake_lock"
 GTOK="$$.$(date +%s)"
 echo "$GTOK" > "$CTL/return.guard"
@@ -394,6 +418,26 @@ finished() { # the guard's mark and the lock go; the wakelocks are released
 }
 
 step "[1/5] Stopping the session" 90
+# The switch writes the shmem mode and stops the framework under this lock.
+# Wait for that critical section before checking the baseline or stop mark.
+# Keep the lock so a switch that has not reached it can never stop One UI.
+n=0
+until mkdir "$CTL/stop.lock" 2>/dev/null; do
+    [ -e "$CTL/stop.lock/return" ] && break
+    switch_pid=$(cat "$CTL/stop.lock/switch" 2>/dev/null)
+    case "$switch_pid" in
+        ''|0|1|*[!0-9]*) ;;
+        *)
+            if [ ! -e "$CTL/stopped" ] && [ -d "$P/1" ] && [ ! -d "$P/$switch_pid" ]; then
+                say "the switch holding the stop lock is gone before the stop (pid $switch_pid)"
+                break
+            fi ;;
+    esac
+    [ $n -lt 75 ] || failsafe "the switch's stop lock is still held after 15 s"
+    sleep 0.2; n=$((n + 1))
+done
+echo $$ > "$CTL/stop.lock/return" || failsafe "could not mark the return's stop lock"
+
 # The boot screen, while it is still up, says what happens now. The watcher
 # wrote its reason there already.
 bootui oneos_boot_write title 'Returning to One UI'
@@ -516,22 +560,6 @@ if [ -e "$CTL/clocks.set" ]; then
     rm -f "$CTL/clocks.set"
 fi
 
-# The switch ended before it stopped One UI's zygote (it marks the stop):
-# One UI never went away, so there is nothing to check or start. Its helpers
-# end, and that is the whole return.
-if [ ! -e "$CTL/stopped" ] && ! framework_down; then
-    true > "$CTL/stop-loop.off"
-    true > "$CTL/feeder.off"
-    end_helper "$CTL/stop-loop.pid" --stop-loop
-    end_helper "$CTL/feeder.pid" --feed
-    [ -z "$CG" ] || rmdir "$CG" 2>/dev/null
-    echo "inplace $(date +%s) One UI was never stopped" > "$S/return.outcome"
-    finished
-    say "The switch ended before One UI's framework was stopped: nothing to restore."
-    echo returned > "$CTL/state"
-    exit 0
-fi
-
 step "[2/5] Gate A: nothing of the session is left" 45
 # A process killed in the stop above ends only when it leaves the kernel: one
 # that is inside a system call that cannot be interrupted (state D: the exit of
@@ -558,8 +586,13 @@ if [ -n "$left" ]; then
 fi
 [ -z "$left" ] || failsafe "processes still in the session's namespace or cgroup: $left"
 [ -z "$CG" ] || rmdir "$CG" 2>/dev/null || say "the session's cgroup $CG is empty but could not be removed (logged only)"
-[ -f "$BASE/boot_id" ] || failsafe "no baseline of the switch ($BASE)"
-[ "$(cat "$BASE/boot_id")" = "$(cat "$P/sys/kernel/random/boot_id" 2>/dev/null)" ] || failsafe "the baseline is another boot's"
+early=0
+if [ ! -e "$CTL/stopped" ] && ! framework_down; then early=1; fi
+if [ "$early" = 0 ] || [ -e "$BASE/shmem_enabled" ]; then
+    saved_boot=$(cat "$BASE/boot_id" 2>/dev/null)
+    [ -n "$saved_boot" ] || failsafe "no baseline of the switch ($BASE)"
+    [ "$saved_boot" = "$(cat "$P/sys/kernel/random/boot_id" 2>/dev/null)" ] || failsafe "the baseline is another boot's"
+fi
 # The stage, in every process's mount table and not only init's (OneOS run 45:
 # another namespace kept its own copy of a stage mount). By mount point or by
 # source. Nothing is unmounted here: a namespace that still has the stage as
@@ -567,6 +600,22 @@ fi
 m=$(grep -H -F "$SRC" "$P"/[0-9]*/mountinfo 2>/dev/null |
     awk -v s="$SM" -v r="$SRC" '$5 == s || index($5, s "/") == 1 || $4 == r || index($4, r "/") == 1 { print $1 " " $5 }' | head -n 3 | tr '\n' ' ')
 [ -z "$m" ] || failsafe "the stage is still mounted (mount table, mount point): $m"
+
+# If the switch never stopped One UI, leave the framework running. It may
+# still have changed shmem before it could write the stop mark.
+if [ "$early" = 1 ]; then
+    true > "$CTL/stop-loop.off"
+    true > "$CTL/feeder.off"
+    end_helper "$CTL/stop-loop.pid" --stop-loop
+    end_helper "$CTL/feeder.pid" --feed
+    restore_shmem
+    echo "inplace $(date +%s) One UI was never stopped" > "$S/return.outcome"
+    finished
+    say "The switch ended before One UI's framework was stopped: left it running."
+    echo returned > "$CTL/state"
+    exit 0
+fi
+
 added=$(awk '{ print $5 }' "$P/1/mountinfo" | sort | comm -13 "$BASE/mounts" - 2>/dev/null | grep -E '^/(data|system|vendor|product|system_ext|odm|apex)(/|$)' | head -n 3 | tr '\n' ' ')
 [ -z "$added" ] || failsafe "mounts added on One UI's partitions during the session: $added"
 # The daemons One UI cannot get back without a boot. surfaceflinger is not one
@@ -585,26 +634,7 @@ for svc in vold keystore2 servicemanager hwservicemanager logd lmkd installd; do
     [ "$(base_prop init.svc.$svc)" = running ] || continue
     [ "$(getprop init.svc.$svc)" = running ] || failsafe "$svc is $(getprop init.svc.$svc), was running at the switch"
 done
-# The shmem THP mode back to what the switch found (the switch wrote advise
-# for the 2 MiB host pages and kept the old value in the base). Nothing when
-# the switch never saved one.
-SHMEM_EN="$T/sys/kernel/mm/transparent_hugepage/shmem_enabled"
-if [ -f "$BASE/shmem_enabled" ] && [ -f "$SHMEM_EN" ]; then
-    ORIG_SHMEM=$(cat "$BASE/shmem_enabled")
-    # The node shows its modes with the active one in brackets; compare the
-    # modes, not the whole line (2026-11-16: the switch saved that line and the
-    # write back was EINVAL, so Gate A failed and the phone rebooted).
-    shmem_raw=$(cat "$SHMEM_EN" 2>/dev/null)
-    CUR_SHMEM=$(printf '%s\n' "$shmem_raw" | sed -n 's/.*\[\([a-z_]*\)\].*/\1/p')
-    [ -n "$CUR_SHMEM" ] || CUR_SHMEM=$(printf '%s\n' "$shmem_raw" | awk '{ print $1 }')
-    if [ "$CUR_SHMEM" != "$ORIG_SHMEM" ]; then
-        echo "$ORIG_SHMEM" > "$SHMEM_EN" 2>/dev/null &&
-            say "shmem_enabled back: $ORIG_SHMEM" ||
-            failsafe "shmem_enabled is $(cat "$SHMEM_EN" 2>/dev/null), was $ORIG_SHMEM at the switch, and the write back failed"
-    fi
-    rm -f "$BASE/shmem_enabled"
-fi
-[ ! -f "$BASE/shmem_enabled" ] || failsafe "shmem_enabled is $(cat "$SHMEM_EN" 2>/dev/null), the switch's old value $(cat "$BASE/shmem_enabled" 2>/dev/null) is still in the base: not restored"
+restore_shmem
 [ "$(getenforce 2>/dev/null)" = "$(cat "$BASE/selinux")" ] || failsafe "SELinux is $(getenforce 2>/dev/null), was $(cat "$BASE/selinux")"
 # The session scripts set no persist property. What differs from the switch
 # is One UI's own daemons' doing, or xnuhost's against its contract: by name

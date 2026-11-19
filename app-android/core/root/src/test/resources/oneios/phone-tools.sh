@@ -161,7 +161,9 @@ case "$me" in
     getevent)
         dev=${2##*/}
         case "$1" in
-            -pl) cat "$T/keystate/$dev" 2>/dev/null ;;
+            -pl)
+                if [ $# -eq 1 ]; then cat "$T/input-devices"
+                else cat "$T/keystate/$dev" 2>/dev/null; fi ;;
             -lq)
                 # The device's events as the test wrote them: "@ N" waits N
                 # (real) seconds, any other line is an event. Then it blocks,
