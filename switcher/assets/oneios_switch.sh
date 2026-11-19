@@ -158,11 +158,43 @@ watchdog_target() {
     done
     printf '%s\n' "$wd_target"
 }
+# Software supervision for the existing S24 path. These are not hardware
+# expiry bounds. Whole seconds of Linux boot uptime, independent of wall time.
+WD_FIRST=3
+WD_MAX_AGE=5
+watchdog_uint() {
+    case "$1" in ''|0[0-9]*|*[!0-9]*|??????????*) return 1 ;; esac
+}
+watchdog_now() {
+    read -r wd_uptime _ < "$P/uptime" || return 1
+    case "$wd_uptime" in *.[0-9][0-9]) ;; *) return 1 ;; esac
+    wd_seconds=${wd_uptime%.*}
+    watchdog_uint "$wd_seconds" || return 1
+    printf '%s\n' "$wd_seconds"
+}
+watchdog_birth() {
+    sed 's/^.*) //' "$P/$1/stat" 2>/dev/null | awk '$1 != "Z" && $1 != "X" && $20 ~ /^[0-9]+$/ { print $20; exit }'
+}
+watchdog_generation() {
+    cat "$CTL/watchdog.generation" 2>/dev/null
+}
+publish_return_request() {
+    # Link a complete record into the shared directory without replacing an
+    # existing request or following a link supplied by the guest.
+    [ ! -e "$SESSION/return.request" ] || return 0
+    req=$(mktemp "$CTL/return.request.XXXXXX") || return 1
+    printf '%s\n' "$1" > "$req" && ln -T "$req" "$SESSION/return.request" 2>/dev/null
+    rm -f "$req"
+}
 watchdog_failed() {
-    echo "$(date +%T) watchdog feeder failed: $*" >> "$L"
-    true > "$CTL/feeder.failed"
-    rm -f "$CTL/feeder.ready"
-    [ -e "$SESSION/return.request" ] || echo "watchdog feeder failed: $*" > "$SESSION/return.request"
+    # A late feeder from an old session, or a normal close, cannot request
+    # recovery. Keep the first diagnosis and never replace another request.
+    [ ! -e "$CTL/feeder.off" ] && [ "$(watchdog_generation)" = "$WD_GEN" ] || return 4
+    if (set -C; printf '%s\n' "$*" > "$CTL/feeder.failed") 2>/dev/null; then
+        echo "$(date +%T) watchdog feeder failed: $*" >> "$CTL/watchdog_feeder.log"
+        rm -f "$CTL/feeder.ready"
+        publish_return_request "watchdog feeder failed: $*"
+    fi
     return 4
 }
 watchdog_pings() {
@@ -170,13 +202,33 @@ watchdog_pings() {
     # the whole session, with plain keepalives and a normal close.
     [ -n "$T" ] || [ "$(watchdog_id "$P/$$/fd/3")" = "$wd_saved" ] || return 1
     wd_keepalive=.
-    while [ ! -e "$CTL/feeder.off" ]; do
+    wd_first=1
+    wd_last=$wd_armed
+    while [ ! -e "$CTL/feeder.off" ] && [ "$(watchdog_generation)" = "$WD_GEN" ]; do
         if [ -n "$T" ]; then "$T/bin/watchdog-io" ping "$wd_keepalive" || return 1
         else printf '%s' "$wd_keepalive" >&3 || return 1; fi
-        if [ ! -e "$CTL/feeder.ready" ]; then
-            echo "Watchdog feeder ready ($wd_name, pid $$)" >> "$L"
-            echo $$ > "$CTL/feeder.ready" || return 1
+        # Only a completed keepalive earns a new timestamp. Never publish
+        # into a new session or turn a late first ping into readiness.
+        [ "$(watchdog_generation)" = "$WD_GEN" ] || return 0
+        wd_tick=$(watchdog_now) || return 1
+        [ "$wd_tick" -ge "$wd_last" ] || return 1
+        if [ "$wd_first" = 1 ]; then
+            if [ "$((wd_tick - wd_armed))" -ge "$WD_FIRST" ]; then
+                watchdog_failed "first keepalive missed its deadline"
+                return 1
+            fi
+        elif [ "$((wd_tick - wd_last))" -ge "$WD_MAX_AGE" ]; then
+            watchdog_failed "feeder keepalive progress stalled before write completed"
+            return 1
         fi
+        printf '%s %s %s %s\n' "$WD_GEN" "$$" "$wd_birth" "$wd_tick" > "$CTL/feeder.heartbeat.$WD_GEN" &&
+            mv -f "$CTL/feeder.heartbeat.$WD_GEN" "$CTL/feeder.heartbeat" || return 1
+        if [ "$wd_first" = 1 ]; then
+            echo $$ > "$CTL/feeder.ready" || return 1
+            echo "Watchdog feeder ready ($wd_name, pid $$)" >> "$L"
+            wd_first=0
+        fi
+        wd_last=$wd_tick
         sleep 2 3>&-
     done
 }
@@ -186,6 +238,11 @@ watchdog_feed() {
     wd_boot=$(boot_id)
     [ -n "$wd_boot" ] && [ "$(cat "$CTL/boot" 2>/dev/null)" = "$wd_boot" ] || return 3
     case "$(cat "$CTL/state" 2>/dev/null)" in starting|running|returning) ;; *) return 3 ;; esac
+    WD_GEN=$(watchdog_generation)
+    [ -n "$WD_GEN" ] && read -r wd_gen wd_armed wd_extra < "$CTL/feeder.arm" &&
+        [ "$wd_gen" = "$WD_GEN" ] && [ -z "$wd_extra" ] && watchdog_uint "$wd_armed" || return 3
+    wd_birth=$(watchdog_birth $$)
+    [ -n "$wd_birth" ] || return 3
     mkdir "$CTL/feeder.lock" 2>/dev/null || return 3
     L="$CTL/watchdog_feeder.log"
     echo $$ > "$CTL/feeder.pid" || { watchdog_failed "could not record the feeder PID"; return; }
@@ -207,18 +264,64 @@ watchdog_feed() {
     fi && return 0
     watchdog_failed "cannot open or keep alive $wd_name"
 }
+# 0: a current successful ping (print the identity); 1: not armed, closing
+# or still within the first-ping window; 2: lost progress (print the reason).
+watchdog_health() {
+    [ ! -e "$CTL/feeder.off" ] && [ "$(watchdog_generation)" = "$WD_GEN" ] || return 1
+    if [ -e "$CTL/feeder.failed" ]; then
+        echo "feeder already failed"
+        return 2
+    fi
+    if [ ! -e "$CTL/feeder.arm" ]; then
+        if [ -e "$CTL/feeder.ready" ] || [ -e "$CTL/feeder.heartbeat" ] ||
+           { [ -e "$CTL/watchdog.target" ] && [ "$(cat "$CTL/state" 2>/dev/null)" = running ]; }; then
+            echo "feeder has no current arm record"
+            return 2
+        fi
+        return 1
+    fi
+    if ! read -r wd_gen wd_arm wd_extra < "$CTL/feeder.arm" ||
+       [ -z "$WD_GEN" ] || [ "$wd_gen" != "$WD_GEN" ] || [ -n "$wd_extra" ] ||
+       ! watchdog_uint "$wd_arm" || ! wd_now=$(watchdog_now) || [ "$wd_arm" -gt "$wd_now" ]; then
+        echo "invalid feeder arm record or monotonic clock"
+        return 2
+    fi
+    if [ ! -e "$CTL/feeder.ready" ]; then
+        [ "$((wd_now - wd_arm))" -lt "$WD_FIRST" ] && return 1
+        echo "first keepalive did not become ready"
+        return 2
+    fi
+    if ! read -r wd_gen wd_live wd_start wd_tick wd_extra < "$CTL/feeder.heartbeat" ||
+       [ "$wd_gen" != "$WD_GEN" ] || [ -n "$wd_extra" ] ||
+       ! watchdog_uint "$wd_live" || [ "$wd_live" -le 1 ] ||
+       ! watchdog_uint "$wd_tick" || [ "$wd_tick" -lt "$wd_arm" ]; then
+        echo "missing or invalid feeder heartbeat"
+        return 2
+    fi
+    # The keeper can publish a new heartbeat between the first clock read
+    # and opening its record. Check its timestamp against a fresh reading.
+    if ! wd_now=$(watchdog_now) || [ "$wd_tick" -gt "$wd_now" ]; then
+        echo "feeder heartbeat is in the future or monotonic clock is invalid"
+        return 2
+    fi
+    case "$wd_start" in ''|*[!0-9]*) echo "invalid feeder process identity"; return 2 ;; esac
+    if [ "$(cat "$CTL/feeder.pid" 2>/dev/null)" != "$wd_live" ] ||
+       [ "$(cat "$CTL/feeder.ready" 2>/dev/null)" != "$wd_live" ] ||
+       [ "$(watchdog_birth "$wd_live")" != "$wd_start" ]; then
+        echo "feeder exited or its process identity changed"
+        return 2
+    fi
+    if [ "$((wd_now - wd_tick))" -ge "$WD_MAX_AGE" ]; then
+        echo "feeder keepalive progress stalled"
+        return 2
+    fi
+    printf '%s %s\n' "$wd_live" "$wd_start"
+}
 watchdog_lost() {
-    [ ! -e "$CTL/feeder.off" ] || return 1
-    [ -e "$CTL/feeder.failed" ] && return 0
-    [ -s "$CTL/feeder.ready" ] || return 1
-    wd_live=$(cat "$CTL/feeder.ready" 2>/dev/null)
-    case "$wd_live" in ''|0|1|*[!0-9]*) return 1 ;; esac
-    case "$(cat "$P/$wd_live/cmdline" 2>/dev/null | tr '\0' ' ')" in
-        *"oneios_switch.sh --feed "*) return 1 ;;
-    esac
-    [ ! -e "$CTL/feeder.off" ] || return 1
-    L="$CTL/watchdog_feeder.log"
-    watchdog_failed "the ready feeder disappeared"
+    wd_problem=$(watchdog_health)
+    [ $? = 2 ] || return 1
+    [ ! -e "$CTL/feeder.off" ] && [ "$(watchdog_generation)" = "$WD_GEN" ] || return 1
+    watchdog_failed "$wd_problem"
     return 0
 }
 
@@ -272,8 +375,9 @@ volume_key_devices() {
 # return then starts from the key reader itself. oneios_return.sh takes one
 # caller at a time, so the two can meet.
 ask_return() { # <why>
-    [ -e "$SESSION/return.request" ] || echo "$1 at $(date '+%F %T')" > "$SESSION/return.request"
+    publish_return_request "$1 at $(date '+%F %T')"
     sleep 5
+    [ "$(cat "$CTL/keys/session" 2>/dev/null)" = "$tok" ] || return 0
     case "$(cat "$CTL/state" 2>/dev/null)" in
         starting|running)
             echo "$(date '+%F %T') keys: the watcher did not start the return within 5 s of '$1'; starting it from the key reader" >> "$STAGE/return.log"
@@ -689,6 +793,15 @@ case "$MODE" in
     --watchdog-probe)
         watchdog_target || refuse "watchdog recovery could not identify One UI's active software watchdog"
         exit 0 ;;
+    --watchdog-health)
+        WD_GEN=$(watchdog_generation)
+        watchdog_health
+        exit $? ;;
+    --watchdog-supervise)
+        WD_GEN=$2
+        [ -n "$WD_GEN" ] || exit 1
+        watchdog_lost
+        exit $? ;;
     --watchdog-test)
         [ -n "$T" ] && [ "$2" = feed ] || exit 3
         watchdog_feed
@@ -1066,6 +1179,7 @@ case "$MODE" in
         # ($SESSION/return.request: the volume keys, the guest, adb), or the
         # guest never said it is up ($SESSION/ready) within ONEIOS_RETURN_MAX
         # seconds of its start (600; 0 = no limit).
+        WD_GEN=$(watchdog_generation)
         echo $$ > "$CTL/watcher.pid"
         out_of_the_way
         MAX="${ONEIOS_RETURN_MAX:-600}"
@@ -1073,6 +1187,7 @@ case "$MODE" in
         awake() { echo oneios_session 2>/dev/null > "$T/sys/power/wake_lock"; }
         SCREEN=""
         go() {
+            [ "$(watchdog_generation)" = "$WD_GEN" ] || exit 0
             echo "$(date '+%F %T') watcher: $*; returning to One UI"
             # The boot screen, while it is still up, says so (and why, in
             # $SCREEN) until the return ends it.
@@ -1083,13 +1198,15 @@ case "$MODE" in
             # Not exec: a return script that cannot be run (gone, damaged) or
             # that ends with an error must still end in One UI, by the reboot.
             # A return that hangs is its own guard's to end (oneios_return.sh).
-            $SH "$STAGE/oneios_return.sh" watcher
+            $SH "$STAGE/oneios_return.sh" watcher "$WD_GEN"
             rc=$?
             [ $rc = 0 ] && exit 0
+            [ "$(watchdog_generation)" = "$WD_GEN" ] || exit 0
             hard_reboot oneios-watcher-failsafe "oneios_return.sh ended with $rc in state '$(cat "$CTL/state" 2>/dev/null)'"
         }
         t=0
         while [ "$(cat "$CTL/state" 2>/dev/null)" = starting ]; do
+            [ "$(watchdog_generation)" = "$WD_GEN" ] || exit 0
             watchdog_lost && SCREEN="The watchdog feeder failed" && go "watchdog feeder failed"
             [ -e "$SESSION/return.request" ] && SCREEN="A return to One UI was asked for" && go "return asked before xnuhost started ($(head -c 200 "$SESSION/return.request" 2>/dev/null))"
             [ $t -lt 60 ] || { SCREEN="iOS did not start within 60 s"; go "the switch did not start xnuhost within 60 s"; }
@@ -1112,6 +1229,7 @@ case "$MODE" in
             case "$(cat "$CTL/state" 2>/dev/null)" in
                 returning|returned) echo "$(date '+%F %T') watcher: a return is under way or done; nothing to do"; exit 0 ;;
             esac
+            [ "$(watchdog_generation)" = "$WD_GEN" ] || exit 0
             watchdog_lost && SCREEN="The watchdog feeder failed" && go "watchdog feeder failed"
             [ -e "$SESSION/return.request" ] && SCREEN="A return to One UI was asked for" && go "return asked ($(head -c 200 "$SESSION/return.request" 2>/dev/null))"
             if ! { [ -n "$pid" ] && [ "$(readlink "$P/$pid/ns/mnt" 2>/dev/null)" = "$ns" ]; }; then
@@ -1215,6 +1333,10 @@ command -v getevent >/dev/null 2>&1 || refuse "no getevent: Volume Up + Volume D
 command -v ps >/dev/null 2>&1 || refuse "no ps: the key readers could not be told apart"
 KDEVS=$(volume_key_devices) || refuse "could not validate physical volume keys in getevent (gpio-keys Volume Up, pmic_resin Volume Down)"
 WD_TARGET=$(watchdog_target) || refuse "watchdog recovery could not identify One UI's active software watchdog"
+watchdog_now >/dev/null || refuse "watchdog recovery could not read monotonic boot uptime"
+WD_BOOT=$(boot_id)
+WD_BIRTH=$(watchdog_birth $$)
+[ -n "$WD_BOOT" ] && [ -n "$WD_BIRTH" ] || refuse "watchdog recovery could not identify the switch process and boot"
 BAT=/sys/class/power_supply/battery
 CAP=$(cat $BAT/capacity 2>/dev/null)
 BST=$(cat $BAT/status 2>/dev/null)
@@ -1287,6 +1409,12 @@ echo "=== [2/5] $(date +%T) Arming the way back ==="
 # the poll are started here, in init's mount namespace, before xnuhost's
 # namespace and cgroup exist: they are never part of either.
 # Each of them writes its own pid (watcher.pid, keys/pids) once it runs.
+WD_GEN="$WD_BOOT.$$.$WD_BIRTH"
+if ! printf '%s\n' "$WD_GEN" > "$CTL/watchdog.generation"; then
+    echo "Could not record the watchdog generation. One UI was left running."
+    echo failed > "$CTL/state"
+    exit 4
+fi
 "$BB" setsid $SH "$SELF" --watch </dev/null >>"$STAGE/return.log" 2>&1 &
 KTOK="$$.$(date +%s)"
 echo "$KTOK" > "$CTL/keys/session"
@@ -1400,13 +1528,22 @@ n=0
 while [ $n -lt 50 ] && pidof system_server >/dev/null 2>&1; do sleep 0.2; n=$((n + 1)); done
 kill -9 $(pidof system_server) 2>/dev/null
 kill -9 $(pidof zygote64) $(pidof zygote) 2>/dev/null
-"$BB" setsid $SH "$SELF" --feed </dev/null >/dev/null 2>&1 &
-wd_pid=$!
-n=0
-while [ $n -lt 10 ] && [ ! -s "$CTL/feeder.ready" ] && [ ! -e "$CTL/feeder.failed" ] &&
-    kill -0 "$wd_pid" 2>/dev/null; do sleep 0.2; n=$((n + 1)); done
-if [ ! -s "$CTL/feeder.ready" ] || [ -e "$CTL/feeder.failed" ] || ! kill -0 "$wd_pid" 2>/dev/null; then
-    L="$CTL/watchdog_feeder.log"
+watchdog_started() {
+    wd_begin=$(watchdog_now) || return 1
+    printf '%s %s\n' "$WD_GEN" "$wd_begin" > "$CTL/feeder.arm.tmp" &&
+        mv -f "$CTL/feeder.arm.tmp" "$CTL/feeder.arm" || return 1
+    "$BB" setsid $SH "$SELF" --feed </dev/null >/dev/null 2>&1 &
+    wd_pid=$!
+    while kill -0 "$wd_pid" 2>/dev/null; do
+        watchdog_health >/dev/null
+        case $? in 0) return 0 ;; 1) ;; *) return 1 ;; esac
+        [ ! -e "$CTL/feeder.off" ] || return 1
+        [ "$(watchdog_generation)" = "$WD_GEN" ] || return 1
+        sleep 0.2
+    done
+    return 1
+}
+if ! watchdog_started; then
     watchdog_failed "the feeder did not become ready after stopping One UI"
     release_stop_lock
     $SH "$STAGE/oneios_return.sh" switch-watchdog-failed

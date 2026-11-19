@@ -32,6 +32,16 @@ use_gnu() { # <name>: Homebrew's g<name>, if there is one
     wrap "$1" "$g" "exec '$g' \"\$@\""
 }
 
+# ln -T: publish the complete return request at the exact destination name.
+if ! ln -T "$probe/f" "$probe/link" 2>/dev/null && real=$(command -v ln); then
+    use_gnu ln || { command -v perl >/dev/null 2>&1 && wrap ln 'Perl link() for -T' "
+if [ \"\$#\" = 3 ] && [ \"\$1\" = -T ]; then
+    shift
+    exec perl -e 'link(\$ARGV[0], \$ARGV[1]) or die \$!' -- \"\$@\"
+fi
+exec '$real' \"\$@\""; }
+fi
+
 # stat -c: GNU's format, checked on a file of ours (BSD's stat refuses -c: the owner check then reads
 # nothing and every stage folder "is not root's").
 if [ "$(stat -c '%u' "$probe/f" 2>/dev/null)" != "$(id -u)" ]; then

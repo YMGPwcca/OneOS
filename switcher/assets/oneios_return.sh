@@ -203,10 +203,12 @@ end_helper() { # <pid file> <mode word>
 # End the feeder before init can fork any framework that needs to open the
 # watchdog. A returning session with a failed handoff cannot certify recovery.
 watchdog_handoff() {
+    wd_birth=""
     if [ -f "$CTL/watchdog.target" ]; then
-        [ -s "$CTL/feeder.ready" ] && [ ! -e "$CTL/feeder.failed" ] && [ ! -e "$CTL/feeder.off" ] ||
-            failsafe "watchdog feeder failed before handoff"
-        wd_pid=$(cat "$CTL/feeder.ready" 2>/dev/null)
+        wd_proof=$($SH "$S/oneios_switch.sh" --watchdog-health) ||
+            failsafe "watchdog feeder failed before handoff: ${wd_proof:-no fresh keepalive}"
+        wd_pid=${wd_proof%% *}
+        wd_birth=${wd_proof#* }
         case "$wd_pid" in ''|0|1|*[!0-9]*) failsafe "watchdog feeder failed to record its PID" ;; esac
         [ "$wd_pid" = "$(cat "$CTL/feeder.pid" 2>/dev/null)" ] && is_ours "$wd_pid" "oneios_switch.sh --feed" ||
             failsafe "watchdog feeder failed before handoff"
@@ -217,6 +219,8 @@ watchdog_handoff() {
     case "$wd_pid" in ''|0|1|*[!0-9]*) return 0 ;; esac
     wd_wait=0
     while is_ours "$wd_pid" "oneios_switch.sh --feed"; do
+        # A reused PID is no longer the feeder. Do not signal its new owner.
+        [ -z "$wd_birth" ] || [ "$(sed 's/^.*) //' "$P/$wd_pid/stat" 2>/dev/null | awk '{print $20}')" = "$wd_birth" ] || break
         [ $wd_wait -lt 20 ] || failsafe "watchdog feeder still holds its descriptor (pid $wd_pid)"
         [ $wd_wait -lt 15 ] || kill -9 "$wd_pid" 2>/dev/null
         sleep 0.2
@@ -350,9 +354,17 @@ wait_found() { # <servicemanager name> <seconds>
 if [ "$WHO" = --guard ]; then
     tok=$2
     [ -n "$tok" ] || exit 3
+    wd_generation=$(cat "$CTL/watchdog.generation" 2>/dev/null)
     t=0 last="" in=0
     while [ $t -lt $GUARD_MAX ]; do
         [ "$(cat "$CTL/return.guard" 2>/dev/null)" = "$tok" ] || exit 0
+        # The session watcher yields once a return owns the session. Still
+        # record lost progress before handoff, while the existing step guard
+        # bounds a return that is stuck. The normal close ends supervision.
+        if [ -n "$wd_generation" ] && [ -f "$CTL/feeder.arm" ] &&
+           [ ! -e "$CTL/feeder.off" ] && [ ! -e "$CTL/feeder.failed" ]; then
+            $SH "$S/oneios_switch.sh" --watchdog-supervise "$wd_generation"
+        fi
         # The step the return is in, and how long it has been in it.
         cur=$(cat "$CTL/return.watch" 2>/dev/null)
         if [ "$cur" = "$last" ]; then in=$((in + 2)); else last=$cur; in=0; fi
@@ -378,6 +390,11 @@ if [ "$WHO" = --usb-restore ]; then
     exit 0
 fi
 
+# A delayed watcher from a previous generation must leave this session alone.
+if [ "$WHO" = watcher ] && [ -n "$2" ] &&
+   [ "$(cat "$CTL/watchdog.generation" 2>/dev/null)" != "$2" ]; then
+    exit 0
+fi
 true >> "$LOG"
 say "=== Return to One UI ($WHO), session state '$(cat "$CTL/state" 2>/dev/null)', boot $(cat "$P/sys/kernel/random/boot_id" 2>/dev/null) ==="
 # The reboot return needs no session state and no lock.

@@ -251,7 +251,14 @@ class OneiosScriptTest {
         }
 
         private fun builder(script: String, args: List<String>, env: Map<String, String>): ProcessBuilder {
-            val pb = ProcessBuilder(listOf(sh, File(stage, script).path) + args).redirectErrorStream(true)
+            val launch = if (args.firstOrNull() == "--watchdog-test") {
+                val register = "proc=\"\$ONEIOS_TEST_ROOT/proc/\$\$\"\n" +
+                    "mkdir -p \"\$proc\"\n" +
+                    "printf '%s (fixture) S 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 800\\n' \"\$\$\" > \"\$proc/stat\"\n" +
+                    "exec \"\$@\""
+                listOf(sh, "-c", register, "feeder-fixture", sh)
+            } else listOf(sh)
+            val pb = ProcessBuilder(launch + File(stage, script).path + args).redirectErrorStream(true)
             pb.environment()["ONEIOS_TEST_ROOT"] = root.path
             HostTools.into(pb.environment())
             pb.environment()["ONEIOS_TEST_SH"] = sh
@@ -1693,6 +1700,7 @@ class OneiosScriptTest {
     private fun watchdogFixture(f: Fake, m3q: Boolean = false) {
         val (model, device, soc) = if (m3q) Triple("SM-S948B", "m3q", "SM8850") else Triple("SM-S928B", "e3q", "SM8650")
         f.file("props").appendText("ro.product.model=$model\nro.product.device=$device\nro.soc.model=$soc\n")
+        watchdogArm(f)
         val nodes = mapOf("watchdog" to "a:82", "watchdog0" to "f2:0", "watchdog1" to "f2:1")
         f.file("dev").mkdir()
         for ((node, id) in nodes) f.file("dev/$node").writeText("$id\n")
@@ -1710,6 +1718,18 @@ class OneiosScriptTest {
         for ((fd, node) in listOf(5 to "watchdog", 6 to "softdog", 7 to "watchdog0")) {
             Files.createSymbolicLink(f.file("proc/321/fd/$fd").toPath(), f.file("dev/$node").toPath())
         }
+    }
+
+    private fun watchdogArm(f: Fake) {
+        f.file("proc/uptime").writeText("100.00 0.00\n")
+        File(f.control, "watchdog.generation").writeText("fixture-watchdog\n")
+        File(f.control, "feeder.arm").writeText("fixture-watchdog 100\n")
+    }
+
+    private fun watchdogReady(f: Fake) {
+        watchdogArm(f)
+        f.file("proc/4500/stat").writeText("4500 (fixture) S " + "0 ".repeat(18) + "800\n")
+        File(f.control, "feeder.heartbeat").writeText("fixture-watchdog 4500 800 100\n")
     }
 
     @Test
@@ -1759,6 +1779,7 @@ class OneiosScriptTest {
         assertEquals(feed.text, 0, feed.exit)
         assertEquals(listOf("open watchdog0", "ping ."), f.lines("log/watchdog"))
         assertTrue(File(f.control, "feeder.ready").isFile)
+        assertTrue(File(f.control, "feeder.heartbeat").readText().trim().endsWith(" 800 100"))
         assertFalse(File(f.control, "feeder.failed").exists())
     }
 
@@ -1827,6 +1848,7 @@ class OneiosScriptTest {
         File(f.control, "feeder.pid").writeText("4500\n")
         File(f.control, "feeder.ready").writeText("4500\n")
         f.proc(4500, "sh", cmdline = "sh /data/local/tmp/oneios/oneios_switch.sh --feed")
+        watchdogReady(f)
         f.behave("watchdog_exclusive_handoff")
         val r = f.returns()
         assertEquals(r.text, 0, r.exit)
@@ -1843,6 +1865,7 @@ class OneiosScriptTest {
         File(f.control, "feeder.pid").writeText("4500\n")
         File(f.control, "feeder.ready").writeText("4500\n")
         f.proc(4500, "sh", cmdline = "sh /data/local/tmp/oneios/oneios_switch.sh --feed").resolve("unkillable").createNewFile()
+        watchdogReady(f)
     }
 
     @Test
@@ -1854,6 +1877,7 @@ class OneiosScriptTest {
         File(f.control, "feeder.pid").writeText("4500\n")
         File(f.control, "feeder.ready").writeText("4500\n")
         f.proc(4500, "sh", cmdline = "sh /data/local/tmp/oneios/oneios_switch.sh --feed")
+        watchdogReady(f)
         f.behave("watchdog_no_reacquire")
     }
 

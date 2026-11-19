@@ -90,10 +90,19 @@ cause refusal before stopping One UI.
 
 The switch rechecks the selection under the stop lock. Once One UI has
 stopped, the feeder opens one numbered node, verifies the opened descriptor,
-and uses an ordinary nonempty write every two seconds. Readiness follows the
-first successful write. Open or write failure invalidates readiness and
-requests return, with no alias retry. The session watcher also detects a lost
-ready feeder. Early cancellation leaves the running framework in control.
+and uses an ordinary nonempty write every two seconds. Each successful write
+atomically publishes a heartbeat with the session generation, PID, process
+start ticks and whole seconds from Linux boot uptime. Readiness follows the
+first timely success. A failed or blocked write cannot advance the heartbeat.
+The watcher treats a missing or invalid heartbeat after readiness, a changed
+PID identity, a late first ping, and lost progress as recovery requests.
+The first-ping threshold is three uptime seconds and the freshness threshold
+is five uptime seconds. These are S24 software supervision thresholds, with
+whole-second resolution and poll and scheduling latency. They establish no
+SM8850 deadline. The first fault and existing return request are preserved.
+While the return is in progress its guard continues to record lost progress
+until the handoff disarms supervision. Early cancellation leaves the
+running framework in control.
 The normal return releases the feeder before a command that could restart
 zygote, with a bounded wait, and confirms the returned `system_server`
 holds the same active watchdog before recording in-place success. The
@@ -105,8 +114,9 @@ The fake-phone tests exercise alias selection, refusal, failure, stop lock
 and handback logic. Hardware remains necessary to verify S24 metadata
 availability, SELinux access to the numbered node, scheduling margin, and
 actual resumed keepalives. S24 builds that hide the required attributes now
-refuse the switch. A kernel write that stalls inside the driver can still
-outlive the timeout. The SM8850 root and app restrictions stay in place.
+refuse the switch. The heartbeat can detect a stall, but a blocked operation
+can still outlive the timeout. A recovery request cannot guarantee timely
+recovery. The SM8850 root and app restrictions stay in place.
 
 ## Safest next physical validation
 
