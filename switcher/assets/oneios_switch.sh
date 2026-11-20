@@ -1976,8 +1976,15 @@ if [ -n "$armed" ]; then
     $SH "$STAGE/oneios_return.sh" switch-not-armed
     exit 4
 fi
-echo "Return to One UI: hold Volume Up + Volume Down for 3 s (key devices: $(echo $KDEVS)); watcher $(cat "$CTL/watcher.pid"), key readers $(tr '\n' ' ' < "$CTL/keys/pids")"
-echo "If that does nothing: hold Power + Volume Down until the phone restarts (about 7 s). It restarts into One UI."
+if [ "$FRAMEWORK_REBOOT" = 1 ]; then
+    echo "SM8850 USB safety: DO NOT press Volume Up + Volume Down during reboot-smoke."
+    echo "Samsung may enter Download Mode if the phone restarts while both volume keys are held with USB connected."
+    echo "After verified Framework stop, independent 20s deadline requests reboot to One UI."
+    echo "If the phone freezes instead, Samsung Side/Power + Volume Down for >7s forces a restart; this does NOT verify the key watcher."
+else
+    echo "Return to One UI: hold Volume Up + Volume Down for 3 s (key devices: $(echo $KDEVS)); watcher $(cat "$CTL/watcher.pid"), key readers $(tr '\n' ' ' < "$CTL/keys/pids")"
+    echo "If that does nothing: hold Power + Volume Down until the phone restarts (about 7 s). It restarts into One UI."
+fi
 
 # A return asked while the switch runs (the watcher, the key readers, the app,
 # adb) wins. The switch and the return meet at one lock, $CTL/stop.lock: the
