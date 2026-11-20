@@ -59,7 +59,7 @@ STAGE="$T/data/local/tmp/oneios"
 FRAMEWORK_STAGE=/data/adb/oneios-m3q-framework
 FRAMEWORK=0
 case "$0:$1" in
-    "$FRAMEWORK_STAGE/oneios_switch.sh":*|*":--framework-audit")
+    "$FRAMEWORK_STAGE/oneios_switch.sh":*|*":--framework-audit"|*":--framework-audit-reboot")
         FRAMEWORK=1
         STAGE="$FRAMEWORK_STAGE" ;;
 esac
@@ -78,6 +78,16 @@ ABI=1
 APP="${ONEIOS_APP:-0}"
 [ "$APP" = 1 ] || APP=0
 MODE="${1:-session}"
+# The sole opt-in for the original OneOS watchdog strategy is a bounded,
+# reboot-only SM8850 smoke. This flag must never authorize a normal iOS run.
+FRAMEWORK_REBOOT=0
+case "$MODE:$2" in
+    --framework-audit-reboot:*|--framework-check:reboot-smoke|--framework-session:reboot-smoke)
+        FRAMEWORK_REBOOT=1 ;;
+    --feed:*)
+        [ "$FRAMEWORK" != 1 ] ||
+            [ "$(cat "$CTL/framework.return" 2>/dev/null)" != reboot ] || FRAMEWORK_REBOOT=1 ;;
+esac
 OWNER=0
 [ -z "$T" ] || OWNER=$(id -u)
 
@@ -157,7 +167,36 @@ framework_watchdog_plan() {
         [ "$(cat "$wd_sys/timeout" 2>/dev/null)" = "$q_timeout" ] || return 1
     printf '%s %s %s %s\n' "$q_mode" "$q_timeout" "$q_return" "$q_binary"
 }
+# OneOS Android-guest-compatible legacy watchdog observation. A matching
+# system_server FD is evidence of ownership, NOT driver/timeout qualification.
+# Never open the watchdog while Android Framework is alive.
+framework_legacy_target() {
+    [ "$FRAMEWORK" = 1 ] && framework_identity || return 1
+    [ "$(cat "$T/sys/class/misc/watchdog/dev" 2>/dev/null)" = 10:130 ] || return 1
+    [ "$(watchdog_id "$T/dev/watchdog")" = a:82 ] || return 1
+    legacy_pid=$(pidof system_server 2>/dev/null)
+    case "$legacy_pid" in ''|*[!0-9]*) return 1 ;; esac
+    legacy_birth=$(watchdog_birth "$legacy_pid")
+    [ -n "$legacy_birth" ] || return 1
+    legacy_count=0
+    for legacy_fd in "$P/$legacy_pid/fd/"*; do
+        legacy_link=$(readlink "$legacy_fd" 2>/dev/null) || continue
+        case "$legacy_link" in
+            "$T/dev/watchdog")
+                [ "$(watchdog_id "$legacy_fd")" = a:82 ] || return 1
+                legacy_count=$((legacy_count + 1)) ;;
+            "$T/dev/watchdog"[0-9]*|"$T/dev/softdog"*) return 1 ;;
+        esac
+    done
+    [ "$legacy_count" = 1 ] && [ "$(pidof system_server 2>/dev/null)" = "$legacy_pid" ] &&
+        [ "$(watchdog_birth "$legacy_pid")" = "$legacy_birth" ] || return 1
+    printf 'legacy a:82\n'
+}
 watchdog_target() {
+    if [ "$FRAMEWORK_REBOOT" = 1 ]; then
+        framework_legacy_target
+        return $?
+    fi
     watchdog_profile || return 1
     wd_holder=$(pidof system_server 2>/dev/null)
     case "$wd_holder" in ''|*[!0-9]*) return 1 ;; esac
@@ -524,11 +563,18 @@ framework_probe() {
         { echo "BLOCKED: experimental firmware or SELinux mismatch"; fw_bad=1; }
     KDEVS=$(volume_key_devices) && printf 'physical recovery inputs: %s\n' "$(echo $KDEVS)" ||
         { echo "BLOCKED: physical recovery keys are ambiguous or missing"; fw_bad=1; }
-    WD_TARGET=$(watchdog_target) && echo "watchdog: $WD_TARGET" ||
-        { echo "BLOCKED: watchdog needs a directly held numbered softdog, active metadata, known nowayout, no pretimeout and >=100s timeout"; fw_bad=1; }
-    if [ -z "$WD_TARGET" ] || ! framework_watchdog_plan "$WD_TARGET" >/dev/null; then
-        echo "BLOCKED: no independently qualified watchdog plan with readable time remaining"
-        fw_bad=1
+    if [ "$FRAMEWORK_REBOOT" = 1 ]; then
+        WD_TARGET=$(framework_legacy_target) &&
+            echo "watchdog: $WD_TARGET (OneOS legacy candidate; reboot-only smoke)" ||
+            { echo "BLOCKED: no stable legacy /dev/watchdog holder matching this SM8850 boot"; fw_bad=1; }
+        echo "WATCHDOG_QUALIFICATION=UNVERIFIED_REBOOT_ONLY"
+    else
+        WD_TARGET=$(watchdog_target) && echo "watchdog: $WD_TARGET" ||
+            { echo "BLOCKED: watchdog needs a directly held numbered softdog, active metadata, known nowayout, no pretimeout and >=100s timeout"; fw_bad=1; }
+        if [ -z "$WD_TARGET" ] || ! framework_watchdog_plan "$WD_TARGET" >/dev/null; then
+            echo "BLOCKED: no independently qualified watchdog plan with readable time remaining"
+            fw_bad=1
+        fi
     fi
     printf 'watchdog sysfs: '
     printf '%s\n' "$T"/sys/class/watchdog/watchdog*/{identity,state,timeout,nowayout,pretimeout} |
@@ -1141,7 +1187,7 @@ case "$MODE" in
         done
         usay "ended (control/usb-watch.off)"
         exit 0 ;;
-    --framework-audit)
+    --framework-audit|--framework-audit-reboot)
         [ -z "$T" ] && [ "$FRAMEWORK" = 1 ] && [ "$(id -u)" = 0 ] || exit 3
         framework_probe
         exit $? ;;
