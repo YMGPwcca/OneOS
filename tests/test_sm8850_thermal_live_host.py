@@ -43,8 +43,8 @@ class HostTrialTest(unittest.TestCase):
             calls.append(args)
             if args[:2]==('shell','-T') and "stat -c %u " in args[-1]:
                 return '0'
-            if args[:2]==('shell','sha256sum'):
-                path=args[2].rsplit('/',1)[-1]
+            if args[:2]==('shell','sha256sum') or (args[:2]==('shell','-T') and 'sha256sum ' in args[-1]):
+                path=args[-1].rstrip("'").rsplit('/',1)[-1]
                 if path=='oneios_sm8850_thermal_trial.sh':
                     value=hashlib.sha256(MOD.SHELL.read_bytes()).hexdigest()
                 elif path=='manifest.v1':
@@ -82,8 +82,8 @@ class HostTrialTest(unittest.TestCase):
         calls=[]
         def fake(adb,serial,*args,timeout=12):
             calls.append(args)
-            if args[:2]==('shell','sha256sum'):
-                name=args[-1].rsplit('/',1)[-1]
+            if args[:2]==('shell','sha256sum') or (args[:2]==('shell','-T') and 'sha256sum ' in args[-1]):
+                name=args[-1].rstrip("'").rsplit('/',1)[-1]
                 if name=='oneios_sm8850_thermal_trial.sh':
                     digest=hashlib.sha256(MOD.SHELL.read_bytes()).hexdigest()
                 elif name=='manifest.v1':
@@ -110,8 +110,8 @@ class HostTrialTest(unittest.TestCase):
         calls=[]
         def fake(adb,serial,*args,timeout=12):
             calls.append(args)
-            if args[:2]==('shell','sha256sum'):
-                name=args[-1].rsplit('/',1)[-1]
+            if args[:2]==('shell','sha256sum') or (args[:2]==('shell','-T') and 'sha256sum ' in args[-1]):
+                name=args[-1].rstrip("'").rsplit('/',1)[-1]
                 if name=='oneios_sm8850_thermal_trial.sh':
                     digest=hashlib.sha256(MOD.SHELL.read_bytes()).hexdigest()
                 elif name=='manifest.v1':
@@ -170,7 +170,7 @@ class HostTrialTest(unittest.TestCase):
 
     def test_missing_hash_result_blocks_before_running(self):
         def fake(adb,serial,*args,timeout=12):
-            if args[:2]==('shell','sha256sum'):
+            if args[:2]==('shell','sha256sum') or (args[:2]==('shell','-T') and 'sha256sum ' in args[-1]):
                 return 'badbad  '+args[-1]
             return ''
         with patch.object(MOD.INVENTORY.mapper,'identity',return_value=IDENT), \
