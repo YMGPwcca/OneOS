@@ -1,5 +1,9 @@
 # ColorOS 17 in the OneLineage container on the Galaxy Z Fold (SM-F976B)
 
+**OneOS · Android guest engineering**
+
+[← Docs hub](README.md) · [Project home](../README.md) · [Device catalog](devices.md)
+
 > **Renamed after 0.3.6:** the stage is `/data/local/tmp/oneos` (was `/data/local/tmp/lineage_stage`), its set-aside copies `oneos.old-<epoch>` / `oneos.trash-<epoch>` (were `lineage_stage.old-*` / `.trash-*`), and the session scripts `oneos_switch.sh`, `guest_prepare.sh`, `guest_start.sh` (were `switch_to_lineage.sh`, `master_prepare.sh`, `master_inner.sh`). The run notes below keep the old names (they describe past runs); the app's root script and `scripts/deploy-phone.sh` rename an old stage and its copies when they are idle.
 
 Guest: ColorOS V17.0.0 from the OPPO Find N6 (PLP120, `CP2A.260605.016`), built
