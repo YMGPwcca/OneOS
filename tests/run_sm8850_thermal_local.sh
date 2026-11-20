@@ -6,7 +6,7 @@ set -Eeuo pipefail
 ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 SCRIPT="$ROOT/switcher/assets"
 TESTS="$ROOT/tests"
-EXPECTED_TESTS=72
+EXPECTED_TESTS=81
 
 for name in \
   oneios_switch.sh \
@@ -29,6 +29,11 @@ test -f "$ROOT/scripts/phone/run-sm8850-thermal-shadow-oneui.sh" || {
 }
 bash -n "$ROOT/scripts/phone/run-sm8850-thermal-shadow-oneui.sh" || exit 3
 bash "$ROOT/scripts/phone/run-sm8850-thermal-shadow-oneui.sh" --audit-only || exit 3
+test -f "$ROOT/scripts/phone/sm8850-soc-candidate-map.py" || {
+  echo "P0_LOCAL=FAIL_MISSING_SOC_MAPPING_TOOL" >&2
+  exit 3
+}
+python3 "$ROOT/scripts/phone/sm8850-soc-candidate-map.py" || exit 3
 
 LOG="$(mktemp /tmp/oneos-p0-thermal-tests.XXXXXX)"
 trap 'rm -f "$LOG"' EXIT
@@ -49,5 +54,5 @@ grep -xq 'OK' "$LOG" || {
   echo "P0_LOCAL=FAIL_MISSING_TEST_OK" >&2
   exit 5
 }
-echo "ONEOS_P0_OFFLINE_72=PASS"
+echo "ONEOS_P0_OFFLINE_81=PASS"
 echo "P0_SAFETY_STATUS=OFFLINE_SIMULATION_ONLY_NO_PHYSICAL_GUARD"
