@@ -1850,24 +1850,45 @@ if [ "$FRAMEWORK" = 1 ]; then
     if [ "$FW_MODE" = run ]; then
         [ "$(cat "$STAGE/image.ready" 2>/dev/null)" = sm8850-ios27-3d-8cpu-600s ] ||
             framework_block "the attested 3D, 8-vCPU, 600s guest stage was not finalized"
-        # Reuse the already observed full Framework-stop + deadline reboot
-        # smoke from a PRIOR boot. Do not require a second destructive smoke
-        # on the current boot merely to set a fresh, artificial marker.
-        old_boot=$(cat "$CTL/boot" 2>/dev/null)
-        old_marker=$(cat "$CTL/framework.takeover-confirmed" 2>/dev/null)
-        old_mode=$(cat "$CTL/framework.mode" 2>/dev/null)
-        old_return=$(cat "$CTL/framework.return" 2>/dev/null)
-        old_outcome=$(cat "$STAGE/return.outcome" 2>/dev/null)
-        [ -n "$old_boot" ] && [ "$old_boot" != "$(boot_id)" ] &&
-            [ "$old_mode" = smoke ] && [ "$old_return" = reboot ] &&
-            [ "${old_marker%%.*}" = "$old_boot" ] &&
-            case "$old_outcome" in
-                reboot-deadline-or-manual*"who=framework-deadline"*"framework deadline reached"*) true ;;
-                *) false ;;
-            esac &&
+        # This exact phone already passed a Framework-only smoke; the
+        # first attempted full run has since replaced control/ with its own
+        # mode=run marker. The switch archives the previous session in
+        # logs/session.XXXXXXXX before replacing control/. Accept only the
+        # verified ORIGINAL smoke record, whether still live or archived.
+        # No need for a second destructive smoke after a guest-launch bug.
+        sm8850_old_smoke_valid() {
+            sr_ctl=$1 sr_outcome_path=$2
+            root_only "$sr_ctl" && root_only "$sr_outcome_path" || return 1
+            sr_boot=$(cat "$sr_ctl/boot" 2>/dev/null)
+            sr_marker=$(cat "$sr_ctl/framework.takeover-confirmed" 2>/dev/null)
+            [ -n "$sr_boot" ] && [ "$sr_boot" != "$(boot_id)" ] &&
+                [ "${sr_marker%%.*}" = "$sr_boot" ] &&
+                [ "$(cat "$sr_ctl/framework.mode" 2>/dev/null)" = smoke ] &&
+                [ "$(cat "$sr_ctl/framework.return" 2>/dev/null)" = reboot ] || return 1
+            sr_outcome=$(cat "$sr_outcome_path" 2>/dev/null)
+            case "$sr_outcome" in
+                reboot-deadline-or-manual*"who=framework-deadline"*"framework deadline reached"*) return 0 ;;
+            esac
+            return 1
+        }
+        smoke_proof=
+        if sm8850_old_smoke_valid "$CTL" "$STAGE/return.outcome"; then
+            smoke_proof=control
+        else
+            for sr_archive in "$STAGE"/logs/session.*; do
+                [ -d "$sr_archive" ] && [ ! -L "$sr_archive" ] &&
+                    root_only "$sr_archive" || continue
+                if sm8850_old_smoke_valid "$sr_archive/control" "$sr_archive/return.outcome"; then
+                    smoke_proof=archived
+                    break
+                fi
+            done
+        fi
+        [ -n "$smoke_proof" ] &&
             [ "$(getprop ro.boot.bootreason)" = reboot,oneios-sm8850-reboot-return ] ||
-            framework_block "recorded previous-boot Framework stop/deadline recovery proof missing; full run refused"
+            framework_block "verified original smoke proof missing from current or archived session; full run refused"
         echo "SM8850_PREVIOUS_REBOOT_SMOKE=VERIFIED_DEADLINE_REQUEST_ONLY"
+        echo "SM8850_SMOKE_PROOF_SOURCE=$smoke_proof"
         echo "UNASSISTED_RETURN_TO_ONEUI=UNVERIFIED"
         echo "SM8850_FULL_RUN=EXPLICIT_RISK_ACCEPTED_WITH_REBOOT_ONLY_RETURN"
         root_only "$STAGE/data" && root_only "$STAGE/data/data.img" && root_only "$STAGE/data/unique-chip-id" &&
