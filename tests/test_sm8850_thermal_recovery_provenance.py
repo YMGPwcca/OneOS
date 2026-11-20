@@ -41,7 +41,7 @@ class RecoveryProvenanceTest(unittest.TestCase):
             "control_generation":"token", "control_state":"returned",
         }
         def fake_call(adb,serial,args,timeout=6):
-            if "zygote" in args:
+            if args[-1]=="init.svc.zygote":
                 return done(zygote)
             return done(boot_reason)
         with patch.object(M.MAPPER,"identity",side_effect=identities or [DEVICE,DEVICE]), \
