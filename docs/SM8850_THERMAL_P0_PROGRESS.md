@@ -241,3 +241,15 @@ Run from an isolated extracted/checked revision and keep One UI fully present. I
 - Local operator JSON: `out/sm8850/soc-candidate/cpu-candidate-20261120T181955Z.json` (its raw JSON was not uploaded here). This is source-supported output only, not a review of JSON internals.
 - Thermal-zone number 16 is **not stable across boots**; future thermal reads must validate exact `type=cpu-0-5-1`, unchanged boot identity and plausible millidegree values rather than trusting the index alone.
 - The candidate is a **genuine changing CPU temperature read** in this short sample, not certified as the hottest SoC junction or the only needed CPU/GPU thermal input. No safety thresholds or post-Framework availability are accepted. Full 600s takeover remains blocked.
+
+## Boot-pinned four-sensor reader prototype — P0.2 groundwork
+
+Based on the operator's **81/81 CachyOS PASS** at `289b306a0315d448a3d6be7cb4da96882a47bf32` and real `cpu-0-5-1` readings **30.0/30.0/29.6 C** from `/sys/class/thermal/thermal_zone16/temp`, the branch adds `switcher/assets/oneios_sm8850_thermal_pinned_reader.sh`.
+
+This is a **one-shot, read-only, not-enabled prototype** which combines battery, LRP, board AP (deci-C) and **one CPU candidate** (`cpu-0-5-1`, millidegrees C). It deliberately **does not hardcode thermal_zone16 as a permanent sensor**. The caller must pin a **current-boot UUID and zone index**. Before and after each four-sensor read the reader verifies `type=cpu-0-5-1`, and rechecks boot UUID. In live opt-in mode it also validates exact model/device/firmware, SELinux Enforcing and fully running One UI before/after the read. Wrong type, missing/sentinel sensor, changed boot, impossible sample duration or fixture symlink escapes yield nonzero failure without a partial success record. A real temperature above 105 C is **not** hidden by the pseudo-zone filter if the type is genuinely `cpu-0-5-1`.
+
+The only two explicit modes are `--fixture-root /tmp/DIR ZONE_INDEX BOOT_UUID` (offline synthetic files) and `--live-oneui-readonly ZONE_INDEX BOOT_UUID` (root, One UI fully running, opt-in; **not authorized after Framework stop**). No root enumeration, no sysfs writes, no watchdog, no guest, no thermal limits, no reboot or switcher integration.
+
+**Tests:** `tests/test_sm8850_thermal_pinned_reader.py` adds **13** offline cases. The exact source/test GitHub blobs match the versions executed in assistant-side Linux with **13/13 PASS**, plus `sh -n` PASS. The strict branch runner now expects **94** cases total. **Operator's CachyOS has not yet run these new 13**, so current confirmed user CI remains **81/81**; do not claim 94/94 before the operator tests it.
+
+The CPU candidate is not a substitute for **hottest genuine CPU/GPU/DDR junction** monitoring. The next safety-design step is a verified per-boot allowlist of all essential junction sensors, firmware-calibrated policy, independent root supervisor, real bounded recovery and independently verified return. Full 600-second takeover remains blocked.
