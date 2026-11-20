@@ -171,6 +171,15 @@ class SourceAdmissionGateTests(unittest.TestCase):
         self.assertIn("--framework-session:probe", source)
         self.assertIn("I_ACCEPT_SM8850_SHORT_TAKEOVER_90S_RISK", source)
         self.assertIn('fw_seconds=90', source)
+        # The 90-second experimental limit is an independent reboot
+        # request deadline measured from verified Framework stop, not a
+        # timer started by host ADB, guest exec or the first iOS frame.
+        self.assertIn('P0_SHORT_PROBE_DEADLINE=REQUEST_REBOOT_AT_FRAMEWORK_STOP_PLUS_90S_NOT_GUEST_RUNTIME_90S', source)
+        self.assertIn('ONEIOS_GUEST_EXEC_ATTEMPT_TICK=', source)
+        self.assertIn('P0_SHORT_PROBE_TIMING=framework_stop_tick:', source)
+        self.assertIn('remaining_to_reboot_request_seconds:', source)
+        self.assertLess(source.index('fw_tick=$(watchdog_now)'),
+                        source.index('echo "xnuhost: pid $XP'))
         self.assertIn('framework_thermal_guard_healthy()', source)
         self.assertIn('P0_SHORT_PROBE_THERMAL=ARMED_ROOT_SENSOR_GUARD_NOT_PRODUCTION_CERTIFIED', source)
         self.assertIn('oneios_sm8850_thermal_takeover_guard.sh', source)
