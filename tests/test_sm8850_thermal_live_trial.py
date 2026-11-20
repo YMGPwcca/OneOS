@@ -48,6 +48,14 @@ class LiveTrialTest(unittest.TestCase):
     def test_syntax(self):
         r=subprocess.run(['sh','-n',str(SCRIPT)],capture_output=True,text=True)
         self.assertEqual(0,r.returncode,r.stderr)
+        # A shell PID must be two dollar signs. A single '$' parses but
+        # produces an invalid proc path and silently disables the trial.
+        source = SCRIPT.read_text()
+        self.assertIn('parent_birth=$(birth_ticks "$$")', source)
+        self.assertIn('"/proc/$$/stat"', source)
+        self.assertIn('atomic trial.identity "$$ $parent_birth $parent_sid"', source)
+        self.assertIn('supervisor_birth=$(birth_ticks "$$")', source)
+        self.assertIn('atomic supervisor.identity "$$ $supervisor_birth"', source)
 
     def test_real_two_pid_siblings_and_3_snapshots(self):
         r=self.run_trial()
