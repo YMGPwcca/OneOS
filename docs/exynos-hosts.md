@@ -1,5 +1,9 @@
 # Exynos phones as hosts (Galaxy S26+, Z Flip7, S23)
 
+**OneOS · Android guest engineering**
+
+[← Docs hub](README.md) · [Project home](../README.md) · [Device catalog](devices.md)
+
 Findings from the S26+ bundle 4cad07e6 (SM-S947B, s5e9965, One UI 8.5, app 0.4.19,
 ColorOS X9U IN; 2026-10-26). Two separate faults, one chained into the other.
 
