@@ -186,6 +186,7 @@ class SourceAdmissionGateTests(unittest.TestCase):
         self.assertIn('SOFT_FAULT_DETAIL="crossed=', thermal_guard)
         self.assertIn('CPU_MAX_ZONE=$typ@$idx', thermal_guard)
         self.assertIn('atom thermal.guard.fault "$BOOT $GEN $ $BIRTH $reason ${detail}"', thermal_guard)
+        self.assertNotIn('atom thermal.guard.fault "$BOOT $GEN $ $BIRTH', thermal_guard)
         self.assertIn('if [ "$FRAMEWORK" = 1 ] && { [ "$FW_MODE" = run ] || [ "$FW_MODE" = probe ]; }; then', source)
 
     def test_check_only_continues_to_allow_passive_preflight(self):
