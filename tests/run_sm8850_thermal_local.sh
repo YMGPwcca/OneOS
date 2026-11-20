@@ -6,7 +6,7 @@ set -Eeuo pipefail
 ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 SCRIPT="$ROOT/switcher/assets"
 TESTS="$ROOT/tests"
-EXPECTED_TESTS=154
+EXPECTED_TESTS=159
 
 for name in \
   oneios_switch.sh \
@@ -80,5 +80,5 @@ grep -xq 'OK' "$LOG" || {
   echo "P0_LOCAL=FAIL_MISSING_TEST_OK" >&2
   exit 5
 }
-echo "ONEOS_P0_OFFLINE_154=PASS"
+echo "ONEOS_P0_OFFLINE_159=PASS"
 echo "P0_SAFETY_STATUS=OFFLINE_SIMULATION_ONLY_NO_PHYSICAL_GUARD"
