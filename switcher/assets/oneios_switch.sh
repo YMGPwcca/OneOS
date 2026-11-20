@@ -78,11 +78,13 @@ ABI=1
 APP="${ONEIOS_APP:-0}"
 [ "$APP" = 1 ] || APP=0
 MODE="${1:-session}"
-# The sole opt-in for the original OneOS watchdog strategy is a bounded,
-# reboot-only SM8850 smoke. This flag must never authorize a normal iOS run.
+# The original OneOS V watchdog strategy remains a reboot-only RETURN
+# path: a full iOS guest may run for at most 600 seconds, but the return
+# after it ends is a mandatory reboot, NEVER an in-place watchdog handback.
+# A full-run needs a separate risk token and a recorded prior takeover smoke.
 FRAMEWORK_REBOOT=0
 case "$MODE:$2" in
-    --framework-audit-reboot:*|--framework-check:reboot-smoke|--framework-session:reboot-smoke)
+    --framework-audit-reboot:*|--framework-check:reboot-smoke|--framework-session:reboot-smoke|--framework-check:run|--framework-session:run)
         FRAMEWORK_REBOOT=1 ;;
     --feed:*|--watch:*|--keys:*|--keys-poll:*|--framework-deadline:*|--stop-loop:*|--watchdog-health:*|--watchdog-supervise:*)
         # These are independent children of the already armed session.
@@ -1702,6 +1704,10 @@ if [ "$FRAMEWORK" = 1 ]; then
     [ "$APP" = 0 ] && framework_identity || framework_block "experimental profile requires SM-S948B/m3q/SM8850 firmware S948BXXS4BZIG with SELinux enforcing"
     if [ "$MODE" = --framework-session ]; then
         [ "$3" = I_ACCEPT_SM8850_FRAMEWORK_TAKEOVER ] || framework_block "explicit SM8850 framework takeover acknowledgement required"
+        if [ "$FW_MODE" = run ]; then
+            [ "$5" = I_ACCEPT_LEGACY_WATCHDOG_FULL_600S_RISK ] ||
+                framework_block "600-second legacy-watchdog guest requires separate explicit risk acknowledgement"
+        fi
         FW_LAUNCH=$4
         case "$FW_LAUNCH" in ''|*[!a-f0-9]*) framework_block "invalid experiment log identifier" ;; esac
         [ "${#FW_LAUNCH}" -eq 32 ] || framework_block "invalid experiment log identifier"
@@ -1811,10 +1817,28 @@ if [ "$FRAMEWORK" = 1 ]; then
     fi
     [ "$(getprop init.svc.zygote_next)" = running ] || framework_block "the expected zygote_next service is not running"
     if [ "$FW_MODE" = run ]; then
-        [ "$(cat "$STAGE/image.ready" 2>/dev/null)" = sm8850-ios27-bench ] ||
-            framework_block "the isolated benchmark stage was not finalized"
-        [ "$(cat "$STAGE/smoke.accepted" 2>/dev/null)" = "$(boot_id)" ] ||
-            framework_block "a verified recovery smoke on this boot is required before launching a guest"
+        [ "$(cat "$STAGE/image.ready" 2>/dev/null)" = sm8850-ios27-3d-8cpu-600s ] ||
+            framework_block "the attested 3D, 8-vCPU, 600s guest stage was not finalized"
+        # Reuse the already observed full Framework-stop + deadline reboot
+        # smoke from a PRIOR boot. Do not require a second destructive smoke
+        # on the current boot merely to set a fresh, artificial marker.
+        old_boot=$(cat "$CTL/boot" 2>/dev/null)
+        old_marker=$(cat "$CTL/framework.takeover-confirmed" 2>/dev/null)
+        old_mode=$(cat "$CTL/framework.mode" 2>/dev/null)
+        old_return=$(cat "$CTL/framework.return" 2>/dev/null)
+        old_outcome=$(cat "$STAGE/return.outcome" 2>/dev/null)
+        [ -n "$old_boot" ] && [ "$old_boot" != "$(boot_id)" ] &&
+            [ "$old_mode" = smoke ] && [ "$old_return" = reboot ] &&
+            [ "${old_marker%%.*}" = "$old_boot" ] &&
+            case "$old_outcome" in
+                reboot-deadline-or-manual*"who=framework-deadline"*"framework deadline reached"*) true ;;
+                *) false ;;
+            esac &&
+            [ "$(getprop ro.boot.bootreason)" = reboot,oneios-sm8850-reboot-return ] ||
+            framework_block "recorded previous-boot Framework stop/deadline recovery proof missing; full run refused"
+        echo "SM8850_PREVIOUS_REBOOT_SMOKE=VERIFIED_DEADLINE_REQUEST_ONLY"
+        echo "UNASSISTED_RETURN_TO_ONEUI=UNVERIFIED"
+        echo "SM8850_FULL_RUN=EXPLICIT_RISK_ACCEPTED_WITH_REBOOT_ONLY_RETURN"
         root_only "$STAGE/data" && root_only "$STAGE/data/data.img" && root_only "$STAGE/data/unique-chip-id" &&
             [ "$(stat -c '%s:%h' "$STAGE/data/data.img")" = 8589934592:1 ] &&
             [ "$(stat -c '%s:%h' "$STAGE/data/unique-chip-id")" = 8:1 ] ||
