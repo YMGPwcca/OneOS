@@ -198,7 +198,7 @@ def begin_preboot_host_log_stream(adb_path,serial,token,output_dir):
         proc=subprocess.Popen(
             [str(adb_path),"-s",serial,"shell","-T",
              f"su -c 'echo PREBOOT_ROOT_LOG_STREAM_READY; exec /system/bin/tail -n +1 -f {remote}'"],
-            stdout=sink,stderr=subprocess.STDOUT)
+            stdin=subprocess.DEVNULL,stdout=sink,stderr=subprocess.STDOUT)
     except BaseException:
         sink.close()
         raise
@@ -289,7 +289,8 @@ def run(adb_path,serial,output_dir):
         f"</dev/null >{STAGE}/logs/probe-{token}.log 2>&1 &"
     )
     try:
-        print("SHORT_PROBE_LAUNCHING_REAL_IOS_GUEST_90S",flush=True)
+        print("SHORT_PROBE_REQUESTING_REAL_IOS_GUEST",flush=True)
+        print("SHORT_PROBE_BUDGET=90S_MAX_FROM_VERIFIED_FRAMEWORK_STOP_NOT_GUEST_EXEC",flush=True)
         try:
             remote_root(adb_path,serial,launch,timeout=12)
         except (Refused,INVENTORY.mapper.Blocked) as exc:
@@ -400,7 +401,7 @@ def main(argv=None):
     a=p.parse_args(argv)
     if not a.prepare_probe and not a.run_90s:
         print("SHORT_PROBE=AUDIT_NO_ADB. --prepare-probe stages guarded source without Framework stop.")
-        print("Explicit --run-90s executes a real, bounded 90-second iOS takeover and mandatory reboot-only return.")
+        print("Explicit --run-90s requests a real iOS guest with at most 90 seconds AFTER verified Framework stop; preparation/guest launch consume part of that budget.")
         print("Hardware watchdog/thermal critical limits and unassisted return are not yet certified.")
         return 0
     try:
