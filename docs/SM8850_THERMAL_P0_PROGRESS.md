@@ -128,6 +128,42 @@ It rechecks current boot/run, rejects missing or symlink-escaping fixture files,
 The next P0 work remains: a real, independently run and supervised root-side monitor that continuously publishes this heartbeat outside the guest namespace/cgroup, firmware-source-qualified sensor/threshold policy including a genuine SoC junction, and an independently proven mandatory reboot-only recovery path. No bypass to the 600-second source gate exists in this branch.
 
 
+
+### Single local CI entrypoint (67 cases)
+
+The branch now provides `tests/run_sm8850_thermal_local.sh` to prevent the earlier false PASS caused by a malformed Git refspec and a shell that continued after extraction failed. It validates the **four** POSIX shell files with `sh -n`, runs all four `test_sm8850_thermal_*.py` regression modules with Python unittest discovery, checks the exact expected 67 tests and `OK`, then emits `ONEOS_P0_OFFLINE_67=PASS` **only after every prerequisite succeeds**. There is no ADB, root, watchdog or phone action in this runner.
+
+To run after the branch has been fetched on CachyOS, export the exact current HEAD into a fresh scratch directory and invoke the script there; never replace an existing checkout or staged phone files:
+
+```bash
+bash -c '
+set -Eeuo pipefail
+REPO="$HOME/projects/OneiOS/app"
+BRANCH="feat/sm8850-p0-thermal-reader-sim"
+git -C "$REPO" fetch --no-tags origin "$BRANCH"
+REV=$(git -C "$REPO" rev-parse --verify "FETCH_HEAD^{commit}")
+echo "ONEOS_HEAD=$REV"
+SCRATCH=$(mktemp -d /tmp/oneos-p0-local.XXXXXX)
+git -C "$REPO" archive "$REV" \
+    switcher/assets/oneios_switch.sh \
+    switcher/assets/oneios_sm8850_thermal_reader.sh \
+    switcher/assets/oneios_sm8850_thermal_shadow.sh \
+    switcher/assets/oneios_sm8850_thermal_health.sh \
+    tests/sm8850_thermal_policy_sim.py \
+    tests/sm8850_thermal_e2e_dryrun.py \
+    tests/test_sm8850_thermal_guard_p0.py \
+    tests/test_sm8850_thermal_e2e.py \
+    tests/test_sm8850_thermal_shadow.py \
+    tests/test_sm8850_thermal_health.py \
+    tests/run_sm8850_thermal_local.sh \
+    | tar -xf - -C "$SCRATCH"
+bash "$SCRATCH/tests/run_sm8850_thermal_local.sh"
+'
+```
+
+**Current verification:** previous 50/50 cases PASS on CachyOS at `5185a642ab7c7d29aa0f2d758fd04ac7b2f3af15`; seven representative heartbeat checks passed in assistant-side Linux, but the entire new 17-case heartbeat suite and 67-case combined runner are **pending operator CachyOS confirmation**. This is not a claim of live physical guard qualification.
+
+
 ## Mandatory gaps before P0 acceptance and any 600-second run
 
 1. Validate targeted kernel reader availability **while One UI Framework is absent**, in an authorized short recovery-qualified trial; previous reads were on intact Android only.
