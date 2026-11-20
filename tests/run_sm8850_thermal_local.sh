@@ -6,7 +6,7 @@ set -Eeuo pipefail
 ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 SCRIPT="$ROOT/switcher/assets"
 TESTS="$ROOT/tests"
-EXPECTED_TESTS=67
+EXPECTED_TESTS=72
 
 for name in \
   oneios_switch.sh \
@@ -22,6 +22,13 @@ for name in \
     exit 3
   }
 done
+
+test -f "$ROOT/scripts/phone/run-sm8850-thermal-shadow-oneui.sh" || {
+  echo "P0_LOCAL=FAIL_MISSING_HOST_COLLECTOR" >&2
+  exit 3
+}
+bash -n "$ROOT/scripts/phone/run-sm8850-thermal-shadow-oneui.sh" || exit 3
+bash "$ROOT/scripts/phone/run-sm8850-thermal-shadow-oneui.sh" --audit-only || exit 3
 
 LOG="$(mktemp /tmp/oneos-p0-thermal-tests.XXXXXX)"
 trap 'rm -f "$LOG"' EXIT
@@ -42,5 +49,5 @@ grep -xq 'OK' "$LOG" || {
   echo "P0_LOCAL=FAIL_MISSING_TEST_OK" >&2
   exit 5
 }
-echo "ONEOS_P0_OFFLINE_67=PASS"
+echo "ONEOS_P0_OFFLINE_72=PASS"
 echo "P0_SAFETY_STATUS=OFFLINE_SIMULATION_ONLY_NO_PHYSICAL_GUARD"
