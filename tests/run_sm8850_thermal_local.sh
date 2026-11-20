@@ -14,7 +14,8 @@ for name in \
   oneios_sm8850_thermal_shadow.sh \
   oneios_sm8850_thermal_health.sh \
   oneios_sm8850_thermal_pinned_reader.sh \
-  oneios_sm8850_thermal_trial.sh; do
+  oneios_sm8850_thermal_trial.sh \
+  oneios_sm8850_thermal_takeover_guard.sh; do
   test -f "$SCRIPT/$name" || {
     echo "P0_LOCAL=FAIL_MISSING_FILE $name" >&2
     exit 3
@@ -72,6 +73,12 @@ test -f "$ROOT/scripts/phone/sm8850-reboot-witness.py" || {
 }
 python3 -m py_compile "$ROOT/scripts/phone/sm8850-reboot-witness.py" || exit 3
 python3 "$ROOT/scripts/phone/sm8850-reboot-witness.py" || exit 3
+test -f "$ROOT/scripts/phone/sm8850-takeover-short-probe.py" || {
+  echo "P0_LOCAL=FAIL_MISSING_SHORT_PROBE_ORCHESTRATOR" >&2
+  exit 3
+}
+python3 -m py_compile "$ROOT/scripts/phone/sm8850-takeover-short-probe.py" || exit 3
+python3 "$ROOT/scripts/phone/sm8850-takeover-short-probe.py" || exit 3
 
 LOG="$(mktemp /tmp/oneos-p0-thermal-tests.XXXXXX)"
 trap 'rm -f "$LOG"' EXIT
