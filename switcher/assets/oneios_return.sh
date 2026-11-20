@@ -582,6 +582,24 @@ fi
 # a state they cannot read is a session whose control folder is gone; if One
 # UI's framework is down as well, nothing here can be checked: the reboot.
 framework_down() { [ "$(getprop init.svc.zygote)" != running ] && ! pidof system_server >/dev/null 2>&1; }
+# Experimental SM8850 legacy-watchdog smoke: no unsupported in-place
+# watchdog handback. Once Framework has actually stopped, every exit path
+# reboots through the existing OneOS-style reboot/failsafe chain. The key
+# reader and independent deadline both reach this path without ADB.
+if [ "$FRAMEWORK" = 1 ] &&
+   [ "$(cat "$CTL/framework.return" 2>/dev/null)" = reboot ] &&
+   [ -e "$CTL/stopped" ] &&
+   [ "$(cat "$CTL/boot" 2>/dev/null)" = "$(cat "$P/sys/kernel/random/boot_id" 2>/dev/null)" ] &&
+   framework_down; then
+    trigger=$(head -c 180 "$S/session/return.request" 2>/dev/null | tr '\r\n' '  ')
+    case "$trigger" in
+        keys:*) kind=key ;;
+        *) kind=deadline-or-manual ;;
+    esac
+    say "SM8850 reboot-only return: $WHO, trigger $kind; no in-place watchdog handback"
+    printf 'reboot-%s %s who=%s reason=%s\n' "$kind" "$(date +%s)" "$WHO" "$trigger" > "$S/return.outcome"
+    do_reboot oneios-sm8850-reboot-return
+fi
 case "$(cat "$CTL/state" 2>/dev/null)" in
     returned)
         # Returned, but the switch stopped One UI's framework after that return
