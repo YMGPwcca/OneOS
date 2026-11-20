@@ -1,5 +1,9 @@
 # Guest root compatibility
 
+**OneOS · Android guest engineering**
+
+[← Docs hub](README.md) · [Project home](../README.md) · [Device catalog](devices.md)
+
 The guest uses a common userspace broker rather than importing the host root
 manager. It authenticates the caller's peer UID and filesystem root, checks the
 current guest package/UID mapping, and defaults to deny. The guest OneOS app has
