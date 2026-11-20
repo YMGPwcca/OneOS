@@ -1,5 +1,9 @@
 # Returning to One UI without a reboot
 
+**OneOS · Android guest engineering**
+
+[← Docs hub](README.md) · [Project home](../README.md) · [Device catalog](devices.md)
+
 `return_to_oneui.sh` normally reboots. Its in-place mode restarts One UI's
 framework on the same kernel boot, and it can only do that if every daemon One
 UI cannot restart still owns its servicemanager names. This page covers the
