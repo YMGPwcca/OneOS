@@ -41,6 +41,8 @@ class HostTrialTest(unittest.TestCase):
         calls=[]
         def fake(adb,serial,*args,timeout=12):
             calls.append(args)
+            if args[:2]==('shell','-T') and "stat -c %u " in args[-1]:
+                return '0'
             if args[:2]==('shell','sha256sum'):
                 path=args[2].rsplit('/',1)[-1]
                 if path=='oneios_sm8850_thermal_trial.sh':
@@ -72,6 +74,36 @@ class HostTrialTest(unittest.TestCase):
         self.assertEqual(2,len(result['runs']))
         self.assertFalse(result['p0_complete'])
         self.assertFalse(result['physical_return_issued'])
+        self.assertTrue(any(args[:2]==('shell','-T') and 'rmdir' in args[-1] for args in calls))
+        self.assertTrue(any(args[:2]==('shell','-T') and 'chown 0:0 ' in args[-1] for args in calls))
+        self.assertGreaterEqual(sum(args[:2]==('shell','-T') and 'stat -c %u ' in args[-1] for args in calls), 4)
+
+    def test_root_ownership_mismatch_aborts_before_live_scenario(self):
+        calls=[]
+        def fake(adb,serial,*args,timeout=12):
+            calls.append(args)
+            if args[:2]==('shell','sha256sum'):
+                name=args[-1].rsplit('/',1)[-1]
+                if name=='oneios_sm8850_thermal_trial.sh':
+                    digest=hashlib.sha256(MOD.SHELL.read_bytes()).hexdigest()
+                elif name=='manifest.v1':
+                    with patch.object(MOD.MANIFEST,'validate',return_value=VALID_MANIFEST):
+                        digest=hashlib.sha256(MOD.create_line_manifest({})[0]).hexdigest()
+                else:
+                    digest=fake.identity_sha
+                return digest+'  '+args[-1]
+            if args and args[0]=='push' and args[-1].endswith('identity.v1'):
+                fake.identity_sha=hashlib.sha256(Path(args[1]).read_bytes()).hexdigest()
+            if args[:2]==('shell','-T') and 'stat -c %u ' in args[-1]:
+                return '2000'
+            return ''
+        with patch.object(MOD.INVENTORY.mapper,'identity',return_value=IDENT), \
+             patch.object(MOD.INVENTORY,'collect',return_value={'hottest_by_group':{}}), \
+             patch.object(MOD.MANIFEST,'validate',return_value=VALID_MANIFEST), \
+             patch.object(MOD,'invoke',side_effect=fake):
+            with self.assertRaisesRegex(MOD.Refused,'root ownership verification failed'):
+                MOD.run_trial('adb','S')
+        self.assertFalse(any(args[:2]==('shell','-T') and 'monitor-exit-after-two' in args[-1] for args in calls))
         self.assertTrue(any(args[:2]==('shell','-T') and 'rmdir' in args[-1] for args in calls))
 
     def test_remote_clean_rejects_untrusted_stage(self):
