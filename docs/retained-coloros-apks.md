@@ -1,5 +1,9 @@
 # Retained ColorOS APK activation
 
+**OneOS · Android guest engineering**
+
+[← Docs hub](README.md) · [Project home](../README.md) · [Device catalog](devices.md)
+
 The Fold8/Find N6 preparation path now activates the previously verified local
 APK bundle retained in `stage/verified_addons`. Updating OneOS had preserved
 those files but replaced the custom preparation hooks, so the guest reverted
