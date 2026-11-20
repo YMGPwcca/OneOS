@@ -1,6 +1,6 @@
 # SM8850 P0.2 — Independent thermal recovery acceptance contract
 
-**Target:** SM-S948B / m3q / S948BXXS4BZIG. **Current status: DESIGN / EVIDENCE ONLY — NO LIVE GUARD.**
+**Target:** SM-S948B / m3q / S948BXXS4BZIG. **Current status (2026-11-21): LIVE 90s PROBE OBSERVED; ROOT GUARD ABORTED ON EXPERIMENTAL THERMAL CUTOFF; P0 NOT CERTIFIED.**
 
 ## Physical facts and unresolved risks
 
@@ -137,3 +137,16 @@ The operator physically confirmed **154/154 offline P0 tests PASS** on exact One
 - `docs/SM8850_SHORT_GUARDED_IOS_PROBE.md` documents the single command, actual phone reboot risks, emergency hardware restart, and data clone preconditions.
 - **Important validation distinction:** the previously confirmed 159/159 CachyOS and live 28-zone detached trial/9+10 target tests were for earlier source. This new takeover integration has **NOT** been executed on the operator's CachyOS or S26; all physical results from the new probe are **pending**. Existing 178-case CI runner now syntax-checks the two new files without adding more test methods; it continues to require the original 178 cases.
 - This is **experimental opt-in enablement**, not closure of P0 production acceptance: real Framework stop + rebinding risks remain, vendor watchdog and unassisted physical recovery not yet independently certified. But unlike the 600s branch, the short iOS probe is source-enabled and may be exercised at the owner's explicit request.
+
+
+## 2026-11-21: physical 90-second probe forensics — root cause VERIFIED
+
+**This section supersedes earlier assertions that the physical guest/Framework stop/thermal supervisor was unobserved.** The operator recovered the root-owned logs after the normal One UI reboot; the original host JSON had `postboot_root_log_accessible=False` only at the time it attempted capture. That was a collector evidence gap, **not** proof that the switch did not run.
+
+- The root switch recorded `APFS_DATA_CLONE=CONSUMED_ONE_SHOT_BEFORE_FRAMEWORK_STOP`, then `P0_SHORT_PROBE_THERMAL=ARMED_ROOT_SENSOR_GUARD_NOT_PRODUCTION_CERTIFIED` at 04:23:33.
+- Android Framework was **verified stopped** and app groups drained; input absent; `system_server` gone. `vm.max_map_count` changed from `65530` to `1048576` with saved baseline. The independently requested **90-second deadline** was armed at device monotonic uptime `44592`, target `44682`.
+- At **04:23:46**, OneOS recorded `xnuhost pid 23992`, a separate mount namespace `mnt:[4026536369]`, session state running and `=== ONEIOS SESSION LAUNCHED ===`. The original guest log confirms actual native `xnuhost` exec, 8 accessible CPU mask `0-7` (not independent vCPU pinning), a 4096 MiB guest, APFS disk mounts, runtime GPU capability not yet proven and a connected display helper. **No iOS guest-ready marker, posted display frame or KGSL 3D success** was present in the supplied excerpt.
+- At **04:23:47**, the independent root monitor logged `P0_THERMAL_GUARD=FAIL_CLOSED soft_temperature_abort` and its root fault file recorded the same reason. OneOS `framework.guard` immediately requested a **reboot-only return** because the thermal monitor faulted. Root-owned `return.outcome` confirms `reboot-deadline-or-manual ... who=framework-deadline reason=root thermal monitor lost, stale, or requested early return`. Host witnessed ADB loss and a **new normal One UI boot** with bootreason `reboot,oneios-sm8850-reboot-return`. This is **an early thermal-triggered return, not expiry of the 90-second deadline**; the exact physical sensor/temperature above the abort threshold was not preserved by the old guard.
+- Original **experimental soft cutoffs** remain CPU/GPU/DDR >=55°C, battery >=38°C, LRP/board AP >=42°C. These are NOT manufacturer hardware limits. Do not raise cutoffs, disable monitoring or retry guest merely to evade the abort. A new guard source revision records `crossed=...` and precise CPU/GPU/DDR max zone/index (millidegrees Celsius) plus battery/LRP/AP values (deci-Celsius) in its `thermal.guard.fault` and `thermal-guard.log` for any *future, separately approved* run. **This diagnostic improvement does not retroactively reveal which sensor crossed in the prior run.**
+- Original legacy `/dev/watchdog` magic-close returned `EBUSY`, with a bounded feeder retry. Reboot-return was requested and One UI returned, but **hardware watchdog independence, unassisted return with no physical key intervention, vendor thermal calibration and sustained guest performance are NOT yet qualified**.
+- **P0 status revised:** `LIVE_ROOT_THERMAL_MONITOR_AND_REBOOT_ONLY_ABORT=OBSERVED`, `FRAMEWORK_STOP_AND_NATIVE_XNUHOST_EXEC=OBSERVED`, `GUEST_IOS_READY_FIRST_FRAME=NOT_VERIFIED`, `PHYSICAL_SOFT_THRESHOLD_IDENTITY=NOT_RECORDED`, `UNASSISTED_RECOVERY_CERTIFIED=NO`, `FULL_600S_TAKEOVER=BLOCKED`. No additional device takeover was performed for this documentation update.
