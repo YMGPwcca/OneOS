@@ -1,5 +1,9 @@
 # Guest root and modules
 
+**OneOS · Android guest engineering**
+
+[← Docs hub](README.md) · [Project home](../README.md) · [Device catalog](devices.md)
+
 Enable guest root on the OS pre-boot page, choose a Zygisk framework if needed,
 and import module ZIPs there or in the guest OneOS app. Module files, framework
 state and package/UID grants live in that guest's `data/oneos_root/adb` tree.
