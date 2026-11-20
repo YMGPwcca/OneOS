@@ -1405,6 +1405,14 @@ case "$MODE" in
             [ "$host_online" = 0-7 ] && [ "$host_allowed" = 0-7 ] ||
                 die_inner "all 8 SM8850 host cores not accessible (online=$host_online allowed=$host_allowed)"
             echo "ONEIOS_TAKEOVER_CPU=8 host_online=$host_online host_allowed=$host_allowed"
+            # Presence in the allowed mask is not per-vCPU affinity proof.
+            # The bench/bridges=0 path keeps touch isolation but does NOT
+            # initialize OneiOS's thermal bridge or the CPU topology bridge.
+            # Never enable bridges=1 as a shortcut: it can mutate unrelated
+            # phone hardware state. Kernel/firmware thermal guards remain.
+            echo "ONEIOS_BENCH_THERMAL_BRIDGE=INACTIVE"
+            echo "ONEIOS_CPU_PLACEMENT_BRIDGE=INACTIVE"
+            echo "ONEIOS_GPU_3D=RUNTIME_KGSL_PROOF_REQUIRED"
             ulimit -c 0
             exec "/data/runtime/$R_XNUHOST" --session-abi 1 --mode bench \
                 --runtime /data/runtime --image /data/image --data /data/data --session /data/session \
@@ -1895,6 +1903,17 @@ if [ "$FRAMEWORK" = 1 ]; then
         echo "SM8850_SMOKE_PROOF_SOURCE=$smoke_proof"
         echo "UNASSISTED_RETURN_TO_ONEUI=UNVERIFIED"
         echo "SM8850_FULL_RUN=EXPLICIT_RISK_ACCEPTED_WITH_REBOOT_ONLY_RETURN"
+        # The 2026-11-20 SM-S948B physical run did execute xnuhost for
+        # ~600.6 s and show guest-ready/first-frame with real KGSL traffic.
+        # That is NOT proof of fast UI, independent watchdog qualification,
+        # thermal safety or an unassisted return to One UI. The full-run
+        # remains bench/bridges=0 for exclusive touch: the OneiOS thermal
+        # bridge and CPU topology/affinity bridge are not started here.
+        echo "SM8850_FULL_RUN_GUEST_BOOT=PRIOR_PHYSICAL_OBSERVATION_NOT_A_NEW_SESSION_PASS"
+        echo "SM8850_FULL_RUN_THERMAL_BRIDGE=INACTIVE_BENCH_BRIDGES_0"
+        echo "SM8850_FULL_RUN_CPU_AFFINITY=NOT_PROVEN_BY_MASK_0_7"
+        echo "SM8850_FULL_RUN_GPU_3D=KGSL_OBSERVED_PRIOR_RUN_AUTO_FALLBACK_POSSIBLE"
+        echo "SM8850_FULL_RUN_RECOVERY=DEADLINE_AND_UNASSISTED_RETURN_NOT_FULLY_VERIFIED"
         root_only "$STAGE/data" && root_only "$STAGE/data/data.img" && root_only "$STAGE/data/unique-chip-id" &&
             [ "$(stat -c '%s:%h' "$STAGE/data/data.img")" = 8589934592:1 ] &&
             [ "$(stat -c '%s:%h' "$STAGE/data/unique-chip-id")" = 8:1 ] ||
