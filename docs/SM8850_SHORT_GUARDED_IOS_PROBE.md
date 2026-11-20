@@ -1,4 +1,4 @@
-# SM8850 real short iOS takeover probe — 90 seconds (opt-in)
+# SM8850 real short iOS takeover probe — 90-second Framework-stop return deadline (opt-in)
 
 **Status:** integrated into the OneOS `oneios_switch.sh` takeover path on the P0 draft branch; physical 90s probe **OBSERVED**, early thermal abort, guest-ready unverified; diagnostic guard update not yet deployed. This is **not** production-certified P0 and does **not** unlock the 600-second `run` profile.
 
@@ -26,8 +26,18 @@ Default `sm8850-takeover-short-probe.py` is a **zero-ADB audit**. Optional `--pr
 4. Start a host witness **before** the experiment. The witness records the current healthy boot ID. The user-requested real `--framework-session probe` then starts in a separate root session with redirected logs.
 5. The switch stages **an independent root thermal monitor before stopping One UI's Framework**, alongside existing watcher and `framework-deadline`. The monitor reads all mapped real CPU/GPU/DDR sensors and Samsung BAT/LRP/board AP every cycle, checks types and boot, and atomically emits boot/generation/PID-birth/sequence/uptime heartbeat. The existing watcher and deadline each treat the monitor's death, stale heartbeat or fault as a **reboot-only return request**.
 6. **EARLY EXPERIMENT ABORT cutoffs**, intentionally conservative *trial-specific* numbers, not vendor-certified critical temperatures: CPU/GPU/DDR 55 C, battery 38 C, LRP/board AP 42 C. Missing sensor, type mismatch and stale heartbeat also abort early; the independent existing return path triggers the reboot. These values cannot be reused to certify production thermal protection.
-7. `probe` uses **90 seconds maximum from verified Framework stop**, not the previous 600 seconds. It still uses the genuine 8-vCPU iOS guest, display helper, real GPU/touch path and the APFS one-shot clone. Successful startup and first frame are **not guaranteed** within 90 seconds; preflight can decline a previously consumed clone.
+7. `probe` arms a **reboot-return REQUEST deadline** at `watchdog_now() + 90` **after** Framework-down verification and guest memory preparation. It does **not** run the guest for 90 seconds from its `exec`, and is not an end-to-end limit measured from host ADB launch. A prior 45-second stage-preparation cutoff protects the period before the final deadline is armed. Thermal faults can return earlier; the actual kernel reboot may finish later. The runtime is genuine native `xnuhost` (8 allowed CPUs), but a first frame is **not guaranteed**; a previously consumed APFS clone is refused.
 8. The external host watches for ADB disconnect followed by an **independent new boot ID and fully restored One UI**, then records historical return correlation and launch-log evidence separately. Missing/uncorroborated evidence must not be called a successful guest boot. User must attest whether any physical restart keys were used.
+
+
+## Exact 90-second timebase (verified from switch source, 2026-11-21)
+
+- **Host request / witness:** clocks on CachyOS start before ADB launch and are for transport/reboot observation only. They are **not guest runtime clocks**.
+- **Stage safety:** an independent `framework.cutoff` starts at guard-arming +45 seconds before Framework stop, to cover stage/setup failure. This is not a 45-second iOS guest limit.
+- **Framework-down request deadline:** after the full Framework-stop checks, Android input drain, memory validation and `vm.max_map_count` setup, OneOS writes `framework.deadline=fw_tick+90` using device monotonic whole seconds. This 90 seconds is a *deadline for the recovery helper to request reboot*, not proof of actual reboot completion within 90 seconds.
+- **Guest exec:** only later does `--inner` attempt `exec xnuhost`. New source logs `ONEIOS_GUEST_EXEC_ATTEMPT_TICK` and `P0_SHORT_PROBE_TIMING` (PID-observed monotonic tick and seconds remaining to the already-armed deadline). These are telemetry, **not** admission, a successful iOS boot, or a reset of the deadline.
+- **Previous physical attempt:** `04:23:34` was the *start* of the Framework stop phase; the timestamp at which `fw_tick=44592` was recorded was after several preparations. The outer log recorded native guest launch at `04:23:46`; thermal guard requested an immediate early return at `04:23:47`. The guest did **not** get 90 seconds and the abort was **not** due to the +90 deadline. Do not infer a precise post-stop setup duration from the first phase header alone.
+- **Safety policy:** keep the existing 90-second Framework-down request deadline and thermal thresholds unchanged. Giving the guest a *full separate* 90 seconds from exec would extend Framework-down exposure, requiring a separately reviewed risk profile and explicit authorization; this change only clarifies and measures the clocks.
 
 ## Hard safety boundary
 
