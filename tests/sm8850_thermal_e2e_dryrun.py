@@ -59,6 +59,8 @@ def validate_fixture(root):
     if str(root) == "/" or not root.is_dir() or root.is_symlink():
         raise FixtureError("fixture root must be a real directory other than /")
     base = root.resolve(strict=True)
+    if base == Path("/"):
+        raise FixtureError("fixture root cannot resolve to / or real host sysfs")
     for rel in FIXTURE_FILES:
         path = root / rel
         if not path.is_file():
@@ -208,7 +210,7 @@ def main(argv=None):
         event = engine.step(i * args.step_ms)
         print(json.dumps(event, sort_keys=True))
         if event["state"] in ("FAIL_CLOSED", "RETURN_REQUESTED"):
-            break
+            return 4  # simulated fail-closed or return request, never a physical action
     return 0
 
 
