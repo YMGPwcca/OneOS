@@ -36,6 +36,8 @@ WeWaffles, and builds its guest images with
 > a phone you can afford to reset. Nothing here is supported by Samsung,
 > Google or OPPO.
 
+**[Documentation](docs/README.md)** · [Device compatibility](docs/compatibility.md) · [SM8850 OneiOS research](docs/SM8850_ONEIOS_FULL_RUN_STATUS.md)
+
 ## Status
 
 ### OneiOS on Galaxy S26 Ultra — root-only lab experiment, 2026-11-20
