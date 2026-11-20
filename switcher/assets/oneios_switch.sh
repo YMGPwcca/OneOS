@@ -1654,9 +1654,12 @@ P_MODEL=$(getprop ro.product.model)
 P_DEVICE=$(getprop ro.product.device)
 P_SOC=$(getprop ro.soc.model)
 if [ "$FRAMEWORK" = 1 ]; then
-    case "$MODE:$2" in --framework-check:smoke|--framework-check:run|--framework-session:smoke|--framework-session:run) ;;
-        *) framework_block "use the explicit SM8850 experimental Framework profile" ;; esac
+    case "$MODE:$2" in
+        --framework-check:smoke|--framework-check:run|--framework-session:smoke|--framework-session:run|--framework-check:reboot-smoke|--framework-session:reboot-smoke) ;;
+        *) framework_block "use the explicit SM8850 experimental Framework profile" ;;
+    esac
     FW_MODE=$2
+    [ "$FW_MODE" != reboot-smoke ] || FW_MODE=smoke
     [ "$APP" = 0 ] && framework_identity || framework_block "experimental profile requires SM-S948B/m3q/SM8850 firmware S948BXXS4BZIG with SELinux enforcing"
     if [ "$MODE" = --framework-session ]; then
         [ "$3" = I_ACCEPT_SM8850_FRAMEWORK_TAKEOVER ] || framework_block "explicit SM8850 framework takeover acknowledgement required"
@@ -1754,10 +1757,16 @@ command -v ps >/dev/null 2>&1 || refuse "no ps: the key readers could not be tol
 KDEVS=$(volume_key_devices) || refuse "could not validate physical volume keys in getevent (gpio-keys Volume Up, pmic_resin Volume Down)"
 if [ "$FRAMEWORK" = 1 ]; then
     framework_probe || framework_block "SM8850 recovery cannot be armed"
-    qualified=$(framework_watchdog_plan "$WD_TARGET") || framework_block "watchdog qualification changed"
+    if [ "$FRAMEWORK_REBOOT" = 1 ]; then
+        [ "$WD_TARGET" = "legacy a:82" ] ||
+            framework_block "the legacy watchdog holder does not match the reboot-only profile"
+        qualified=legacy-reboot-only
+    else
+        qualified=$(framework_watchdog_plan "$WD_TARGET") || framework_block "watchdog qualification changed"
     [ -x "$STAGE/oneios-watchdog" ] && root_only "$STAGE/oneios-watchdog" &&
         [ "$(sha256sum "$STAGE/oneios-watchdog" | cut -d' ' -f1)" = "${qualified##* }" ] ||
         framework_block "the qualified native watchdog supervisor is not staged"
+    fi
     [ "$(getprop init.svc.zygote_next)" = running ] || framework_block "the expected zygote_next service is not running"
     if [ "$FW_MODE" = run ]; then
         [ "$(cat "$STAGE/image.ready" 2>/dev/null)" = sm8850-ios27-bench ] ||
@@ -1854,6 +1863,10 @@ if [ "$FRAMEWORK" = 1 ]; then
     mkdir "$CTL/captures" || framework_setup_failed "could not prepare screenshot directory"
     printf '%s\n' "$FW_MODE" > "$CTL/framework.mode" || framework_setup_failed "could not record framework mode"
     printf '%s\n' "$FW_LAUNCH" > "$CTL/framework.launch" || framework_setup_failed "could not record framework log identifier"
+    if [ "$FRAMEWORK_REBOOT" = 1 ]; then
+        printf 'reboot\n' > "$CTL/framework.return" ||
+            framework_setup_failed "cannot record mandatory reboot-only return"
+    fi
 else
     clocks_save
 fi
@@ -1978,10 +1991,12 @@ return_asked && { release_stop_lock; end_for_return "One UI's framework was stop
 if [ "$(watchdog_target)" != "$WD_TARGET" ] || ! printf '%s\n' "$WD_TARGET" > "$CTL/watchdog.target" ||
     { [ "$FRAMEWORK" = 1 ] && ! { framework_recovery_ready && [ "$(volume_key_devices)" = "$KDEVS" ] &&
         [ "$(framework_service_pids)" = "$(cat "$B/framework_services")" ] &&
-        [ "$(framework_watchdog_plan "$WD_TARGET")" = "$qualified" ] &&
+        { [ "$FRAMEWORK_REBOOT" = 1 ] ||
+            [ "$(framework_watchdog_plan "$WD_TARGET")" = "$qualified" ]; } &&
         watchdog_uint "$(pidof system_server)" &&
         pidof system_server > "$CTL/watchdog.owner" &&
-        printf '%s\n' "$qualified" > "$CTL/watchdog.plan" &&
+        { [ "$FRAMEWORK_REBOOT" = 1 ] ||
+            printf '%s\n' "$qualified" > "$CTL/watchdog.plan"; } &&
         printf '%s FRAMEWORK_OWNS\n' "$WD_GEN" > "$CTL/watchdog.phase"; }; }; then
     release_stop_lock
     echo "The watchdog recovery target could not be recorded. One UI's framework was left running."
@@ -2071,6 +2086,7 @@ if [ "$FRAMEWORK" = 1 ]; then
         fw_recover "Android input services did not stop with system_server"
     grep -E '^(MemAvailable|SwapFree):' "$P/meminfo"
     fw_seconds=10
+    [ "$FRAMEWORK_REBOOT" != 1 ] || fw_seconds=20
     if [ "$FW_MODE" = run ]; then
         fw_seconds=240
         [ "$(awk '/^MemAvailable:/ {print $2}' "$P/meminfo")" -ge 5500000 ] ||
@@ -2081,6 +2097,10 @@ if [ "$FRAMEWORK" = 1 ]; then
         mv -f "$CTL/framework.deadline.tmp" "$CTL/framework.deadline" ||
         fw_recover "could not arm the phase deadline"
     echo "Framework stopped, app groups drained and Android input absent at uptime $fw_tick. Deadline: $((fw_tick + fw_seconds))"
+    if [ "$FRAMEWORK_REBOOT" = 1 ]; then
+        printf '%s\n' "$WD_GEN" > "$CTL/framework.takeover-confirmed" ||
+            fw_recover "could not record verified Framework stop"
+    fi
     if [ "$FW_MODE" = smoke ]; then
         echo running > "$CTL/state" || fw_recover "could not record smoke state"
         release_stop_lock
