@@ -178,6 +178,49 @@ def preflight(adb_path,serial):
         raise Refused("short probe thermal admission did not pass: "+output[-1000:])
     return output
 
+def begin_preboot_host_log_stream(adb_path,serial,token,output_dir):
+    """Capture the root-only switch log to the Linux host BEFORE reboot.
+
+    DirtyFrag may lose su after the Framework stops or after kernel reboot.
+    This root reader is established while stock One UI and su still work.
+    Only the host-side output file is persistent; the reader never asks
+    Android to reboot, stop Framework or modify watchdog/thermal settings.
+    """
+    if not re.fullmatch(r"[a-f0-9]{32}",token):
+        raise Refused("invalid log token")
+    remote=f"{STAGE}/logs/probe-{token}.log"
+    local=output_dir/f"preboot-switch-{token}.log"
+    # Create an empty, private, one-session log before starting the reader.
+    # The switch's original > redirection then writes this exact inode.
+    remote_root(adb_path,serial,f"umask 077; set -C; : > {remote}",timeout=10)
+    sink=local.open("xb")
+    try:
+        proc=subprocess.Popen(
+            [str(adb_path),"-s",serial,"shell","-T",
+             f"su -c '/system/bin/tail -n +1 -f {remote}'"],
+            stdout=sink,stderr=subprocess.STDOUT)
+    except BaseException:
+        sink.close()
+        raise
+    time.sleep(0.6)
+    if proc.poll() is not None:
+        sink.close()
+        raise Refused("ADB root preboot log stream failed before experiment launch")
+    return proc,sink,local
+
+
+def end_preboot_host_log_stream(proc,sink):
+    if proc.poll() is None:
+        proc.terminate()
+    try:
+        proc.wait(timeout=3)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait(timeout=3)
+    sink.flush()
+    sink.close()
+
+
 def run(adb_path,serial,output_dir):
     artifact=prepare(adb_path,serial)
     print("SHORT_PROBE_PREPARED zones="+str(artifact["zones"]),flush=True)
@@ -208,6 +251,11 @@ def run(adb_path,serial,output_dir):
     watcher.start()
     if not witness_ready.wait(timeout=25):
         raise Refused("host reboot witness could not establish preprobe boot")
+    # Root log capture must be opened BEFORE the guest can stop Framework.
+    # The host file survives reboot and loss of ephemeral DirtyFrag su.
+    stream_proc,stream_sink,stream_file=begin_preboot_host_log_stream(
+        adb_path,serial,token,output_dir)
+    artifact["preboot_host_log_path"]=str(stream_file)
     # The risk token is intentionally explicit. This is a real disruptive
     # command: Framework stop, XNU guest start, and mandatory reboot return.
     # Run in its own session, not within ADB's process group.
@@ -221,47 +269,54 @@ def run(adb_path,serial,output_dir):
         f"--framework-session probe {ACK} {token} {RISK} "
         f"</dev/null >{STAGE}/logs/probe-{token}.log 2>&1 &"
     )
-    print("SHORT_PROBE_LAUNCHING_REAL_IOS_GUEST_90S",flush=True)
     try:
-        remote_root(adb_path,serial,launch,timeout=12)
-    except (Refused,INVENTORY.mapper.Blocked) as exc:
-        # ADB may drop while Framework/reboot transitions, never silently
-        # turn launch transport errors into a successful guest test.
-        print("SHORT_PROBE_LAUNCH_TRANSPORT_UNCERTAIN "+str(exc),flush=True)
-    # Collect positive progress evidence WHILE the original boot/root may
-    # still be available. After a real reboot temporary DirtyFrag su may be
-    # unavailable, so a postboot tail alone is not a reliable guest verdict.
-    milestones = {
-        "thermal_guard_armed": False,
-        "framework_stop": False,
-        "xnuhost_launch": False,
-    }
-    live_log_excerpt = ""
-    def observe_log(text):
-        milestones["thermal_guard_armed"] |= (
-            "P0_SHORT_PROBE_THERMAL=ARMED_ROOT_SENSOR_GUARD_NOT_PRODUCTION_CERTIFIED" in text
-        )
-        milestones["framework_stop"] |= (
-            "Framework stopped, app groups drained" in text
-        )
-        milestones["xnuhost_launch"] |= (
-            "=== ONEIOS SESSION LAUNCHED ===" in text
-        )
-
-    deadline=time.monotonic()+305
-    while watcher.is_alive() and time.monotonic()<deadline:
-        watcher.join(timeout=2)
-        # If switch rejected preflight before stopping Framework, stop early.
+        print("SHORT_PROBE_LAUNCHING_REAL_IOS_GUEST_90S",flush=True)
         try:
-            log=remote_root(adb_path,serial,f"tail -n 400 {STAGE}/logs/probe-{token}.log",timeout=6)
-            observe_log(log)
-            if log:
-                live_log_excerpt=log[-16000:]
-            if "PREFLIGHT REFUSED" in log or "PREFLIGHT REFUSED:" in log:
-                raise Refused("switch refused before Framework stop:\n"+log[-1200:])
-        except (INVENTORY.mapper.Blocked,Refused) as exc:
-            if "switch refused" in str(exc):
-                raise
+            remote_root(adb_path,serial,launch,timeout=12)
+        except (Refused,INVENTORY.mapper.Blocked) as exc:
+            # ADB may drop while Framework/reboot transitions, never silently
+            # turn launch transport errors into a successful guest test.
+            print("SHORT_PROBE_LAUNCH_TRANSPORT_UNCERTAIN "+str(exc),flush=True)
+        # Collect positive progress evidence WHILE the original boot/root may
+        # still be available. After a real reboot temporary DirtyFrag su may be
+        # unavailable, so a postboot tail alone is not a reliable guest verdict.
+        milestones = {
+            "thermal_guard_armed": False,
+            "framework_stop": False,
+            "xnuhost_launch": False,
+        }
+        live_log_excerpt = ""
+        def observe_log(text):
+            milestones["thermal_guard_armed"] |= (
+                "P0_SHORT_PROBE_THERMAL=ARMED_ROOT_SENSOR_GUARD_NOT_PRODUCTION_CERTIFIED" in text
+            )
+            milestones["framework_stop"] |= (
+                "Framework stopped, app groups drained" in text
+            )
+            milestones["xnuhost_launch"] |= (
+                "=== ONEIOS SESSION LAUNCHED ===" in text
+            )
+    
+        deadline=time.monotonic()+305
+        while watcher.is_alive() and time.monotonic()<deadline:
+            watcher.join(timeout=2)
+            # If switch rejected preflight before stopping Framework, stop early.
+            try:
+                log=remote_root(adb_path,serial,f"tail -n 400 {STAGE}/logs/probe-{token}.log",timeout=6)
+                observe_log(log)
+                if log:
+                    live_log_excerpt=log[-16000:]
+                if "PREFLIGHT REFUSED" in log or "PREFLIGHT REFUSED:" in log:
+                    raise Refused("switch refused before Framework stop:\n"+log[-1200:])
+            except (INVENTORY.mapper.Blocked,Refused) as exc:
+                if "switch refused" in str(exc):
+                    raise
+    finally:
+        end_preboot_host_log_stream(stream_proc,stream_sink)
+    streamed_log=stream_file.read_text(encoding="utf-8",errors="replace")
+    artifact["preboot_host_log_bytes"]=stream_file.stat().st_size
+    artifact["preboot_host_log_tail"]=streamed_log[-30000:]
+    observe_log(streamed_log)
     if "report" not in witness_result:
         raise Refused("no independently observed healthy new One UI boot: "+
                       witness_result.get("error","host witness timeout"))
@@ -299,6 +354,8 @@ def run(adb_path,serial,output_dir):
         f.write("\n")
     out.chmod(0o600)
     print("ONEUI_NEW_BOOT=OBSERVED_AFTER_PROBE_REQUEST")
+    print("PREBOOT_HOST_LOG_CAPTURED_BYTES="+str(artifact["preboot_host_log_bytes"]))
+    print("PREBOOT_HOST_LOG="+str(stream_file))
     print("POSTBOOT_ROOT_LOG_ACCESSIBLE="+str(
         artifact["postboot_root_log_accessible"]).upper())
     print("THERMAL_GUARD_ARMED="+str(artifact["thermal_guard_armed_marker_observed"]).upper())
