@@ -1410,6 +1410,11 @@ case "$MODE" in
             *) die_inner "the switch is no longer starting (state '$ST'): xnuhost is not started" ;;
         esac
         AT="exec of /data/runtime/$R_XNUHOST"
+        # Monotonic guest exec ATTEMPT marker, not guest-ready or first frame.
+        # The independent Framework-down deadline has already been armed;
+        # this marker never extends or resets that mandatory reboot cutoff.
+        guest_exec_attempt_tick=$(watchdog_now) || guest_exec_attempt_tick=unavailable
+        echo "ONEIOS_GUEST_EXEC_ATTEMPT_TICK=$guest_exec_attempt_tick"
         echo "oneios inner: $(date '+%F %T') starting /data/runtime/$R_XNUHOST (pid $$)"
         if [ "$FRAMEWORK" = 1 ]; then
             case "$(cat /data/control/framework.mode)" in run|probe) ;; *) die_inner "no guest-session admission" ;; esac
@@ -2362,6 +2367,9 @@ if [ "$FRAMEWORK" = 1 ]; then
         mv -f "$CTL/framework.deadline.tmp" "$CTL/framework.deadline" ||
         fw_recover "could not arm the phase deadline"
     echo "Framework stopped, app groups drained and Android input absent at uptime $fw_tick. Deadline: $((fw_tick + fw_seconds))"
+    if [ "$FW_MODE" = probe ]; then
+        echo "P0_SHORT_PROBE_BUDGET=90S_FROM_VERIFIED_FRAMEWORK_STOP_NOT_90S_OF_XNUHOST_EXEC"
+    fi
     if [ "$FRAMEWORK_REBOOT" = 1 ]; then
         printf '%s\n' "$WD_GEN" > "$CTL/framework.takeover-confirmed" ||
             fw_recover "could not record verified Framework stop"
@@ -2431,6 +2439,22 @@ echo "$XP" > "$CTL/xnuhost.pid"
 echo "$XNS" > "$CTL/mntns"
 [ "$FRAMEWORK" = 1 ] || echo running > "$CTL/state"
 echo "xnuhost: pid $XP in mount namespace $XNS, log $SESSION/xnuhost.log"
+if [ "$FRAMEWORK" = 1 ] && [ "$FW_MODE" = probe ]; then
+    # Only observational evidence: pid publication may precede exec; the
+    # inner shell emits a separate guest-exec ATTEMPT marker just before exec.
+    # Never reset framework.deadline or lengthen the thermal exposure here.
+    guest_observed_tick=$(watchdog_now) || guest_observed_tick=
+    framework_cap=$(cat "$CTL/framework.deadline" 2>/dev/null)
+    if watchdog_uint "$guest_observed_tick" && watchdog_uint "$framework_cap" && watchdog_uint "$fw_tick"; then
+        setup_elapsed=$((guest_observed_tick - fw_tick))
+        remaining=$((framework_cap - guest_observed_tick))
+        [ "$setup_elapsed" -ge 0 ] || setup_elapsed=0
+        [ "$remaining" -ge 0 ] || remaining=0
+        echo "P0_SHORT_PROBE_TIMING=framework_stop_tick:$fw_tick guest_pid_observed_tick:$guest_observed_tick setup_elapsed_seconds:$setup_elapsed remaining_framework_budget_seconds:$remaining"
+    else
+        echo "P0_SHORT_PROBE_TIMING=UNKNOWN_MONOTONIC_READ_FAILED"
+    fi
+fi
 
 # The guest's screen: the runtime's display helper, when it carries one. It
 # runs here, on One UI's side (it needs surfaceflinger's binder and the
