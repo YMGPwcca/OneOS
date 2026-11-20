@@ -162,6 +162,22 @@ class ThermalEndToEnd(unittest.TestCase):
         with self.assertRaises(E.FixtureError):
             engine(self.root)
 
+    def test_resolved_root_cannot_be_slash(self):
+        with self.assertRaises(E.FixtureError):
+            engine(Path("/tmp/.."))
+
+    def test_cli_fail_closed_result_is_nonzero_and_no_action(self):
+        put(self.root, "sys/class/power_supply/battery/lrp", 0)
+        proc = subprocess.run([
+            sys.executable, str(HERE / "sm8850_thermal_e2e_dryrun.py"),
+            "--fixture-root", str(self.root),
+            "--boot-id", BOOT, "--generation", GEN, "--launch-token", LAUNCH,
+        ], capture_output=True, text=True, timeout=5)
+        self.assertEqual(4, proc.returncode, proc.stderr)
+        event = json.loads(proc.stdout.splitlines()[0])
+        self.assertEqual("FAIL_CLOSED", event["state"])
+        self.assertFalse(event["physical_return_issued"])
+
     def test_reader_output_stale_uptime_or_negative_rejected(self):
         valid = subprocess.run(["sh", str(E.READER), "--fixture-root", str(self.root)],
                                capture_output=True, text=True, timeout=1)
