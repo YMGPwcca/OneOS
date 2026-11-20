@@ -1,5 +1,9 @@
 # OneOS SM8850 / OneiOS Framework experiment: physical status (2026-11-20)
 
+**OneOS · Galaxy S26 Ultra / SM8850 · current research evidence**
+
+[← Docs hub](README.md) · [Port](SM8850_PORT.md) · [OneiOS manual](oneios.md) · [Watchdog](oneios-watchdog-recovery.md)
+
 > **Root-only research path, not the normal OneOS Android app switch.**
 > Verified device scope: Samsung SM-S948B / m3q / SM8850, firmware
 > S948BXXS4BZIG, Android 17 / One UI 9, SELinux enforcing, ephemeral
