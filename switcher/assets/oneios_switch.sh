@@ -277,12 +277,24 @@ watchdog_failed() {
 watchdog_pings() {
     # Confirm the opened descriptor before sending any byte. One open for
     # the whole session, with plain keepalives and a normal close.
-    [ -n "$T" ] || [ "$(watchdog_id "$P/$$/fd/3")" = "$wd_saved" ] || return 1
-    wd_keepalive=.
+    if [ "$FRAMEWORK_REBOOT" = 1 ]; then
+        [ "$wd_name $wd_saved" = "legacy a:82" ] &&
+            [ "$(watchdog_id "$T/dev/watchdog")" = a:82 ] || return 1
+        wd_keepalive=V
+    else
+        [ -n "$T" ] || [ "$(watchdog_id "$P/$/fd/3")" = "$wd_saved" ] || return 1
+        wd_keepalive=.
+    fi
     wd_first=1
     wd_last=$wd_armed
     while [ ! -e "$CTL/feeder.off" ] && [ "$(watchdog_generation)" = "$WD_GEN" ]; do
-        if [ -n "$T" ]; then "$T/bin/watchdog-io" ping "$wd_keepalive" || return 1
+        if [ "$FRAMEWORK_REBOOT" = 1 ]; then
+            # Same V open/write/close cadence as original OneOS Android guest.
+            # An open failure must request immediate recovery, not pretend
+            # the watchdog is being fed.
+            if [ -n "$T" ]; then "$T/bin/watchdog-io" ping V || return 1
+            else printf V > "$T/dev/watchdog" || return 1; fi
+        elif [ -n "$T" ]; then "$T/bin/watchdog-io" ping "$wd_keepalive" || return 1
         else printf '%s' "$wd_keepalive" >&3 || return 1; fi
         # Only a completed keepalive earns a new timestamp. Never publish
         # into a new session or turn a late first ping into readiness.
@@ -331,6 +343,15 @@ watchdog_feed() {
     [ -z "$wd_extra" ] && [ -n "$wd_saved" ] || { watchdog_failed "invalid watchdog identity"; return; }
     if pidof system_server >/dev/null 2>&1 || [ "$(getprop init.svc.zygote)" = running ]; then
         watchdog_failed "One UI still owns the watchdog"
+        return
+    fi
+    if [ "$FRAMEWORK_REBOOT" = 1 ]; then
+        [ "$wd_name $wd_saved" = "legacy a:82" ] &&
+            [ "$(cat "$CTL/framework.return" 2>/dev/null)" = reboot ] &&
+            [ "$(watchdog_id "$T/dev/watchdog")" = a:82 ] ||
+            { watchdog_failed "legacy reboot watchdog identity changed"; return; }
+        watchdog_pings 2>>"$L" && return 0
+        watchdog_failed "OneOS legacy watchdog feeder stopped making progress"
         return
     fi
     if [ "$FRAMEWORK" = 1 ]; then
