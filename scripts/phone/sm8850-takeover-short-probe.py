@@ -228,12 +228,35 @@ def run(adb_path,serial,output_dir):
         # ADB may drop while Framework/reboot transitions, never silently
         # turn launch transport errors into a successful guest test.
         print("SHORT_PROBE_LAUNCH_TRANSPORT_UNCERTAIN "+str(exc),flush=True)
+    # Collect positive progress evidence WHILE the original boot/root may
+    # still be available. After a real reboot temporary DirtyFrag su may be
+    # unavailable, so a postboot tail alone is not a reliable guest verdict.
+    milestones = {
+        "thermal_guard_armed": False,
+        "framework_stop": False,
+        "xnuhost_launch": False,
+    }
+    live_log_excerpt = ""
+    def observe_log(text):
+        milestones["thermal_guard_armed"] |= (
+            "P0_SHORT_PROBE_THERMAL=ARMED_ROOT_SENSOR_GUARD_NOT_PRODUCTION_CERTIFIED" in text
+        )
+        milestones["framework_stop"] |= (
+            "Framework stopped, app groups drained" in text
+        )
+        milestones["xnuhost_launch"] |= (
+            "=== ONEIOS SESSION LAUNCHED ===" in text
+        )
+
     deadline=time.monotonic()+305
     while watcher.is_alive() and time.monotonic()<deadline:
         watcher.join(timeout=2)
         # If switch rejected preflight before stopping Framework, stop early.
         try:
-            log=remote_root(adb_path,serial,f"tail -n 12 {STAGE}/logs/probe-{token}.log",timeout=6)
+            log=remote_root(adb_path,serial,f"tail -n 400 {STAGE}/logs/probe-{token}.log",timeout=6)
+            observe_log(log)
+            if log:
+                live_log_excerpt=log[-16000:]
             if "PREFLIGHT REFUSED" in log or "PREFLIGHT REFUSED:" in log:
                 raise Refused("switch refused before Framework stop:\n"+log[-1200:])
         except (INVENTORY.mapper.Blocked,Refused) as exc:
@@ -248,18 +271,22 @@ def run(adb_path,serial,output_dir):
     # witness of healthy One UI is still valid even if postboot su is gone.
     try:
         launch_log=remote_root(adb_path,serial,
-                               f"tail -n 110 {STAGE}/logs/probe-{token}.log",timeout=12)
+                               f"tail -n 650 {STAGE}/logs/probe-{token}.log",timeout=12)
         artifact["postboot_root_log_accessible"]=True
     except (Refused,INVENTORY.mapper.Blocked):
         launch_log=""
         artifact["postboot_root_log_accessible"]=False
-    artifact["switch_launch_log_tail"]=launch_log[-12500:]
-    artifact["framework_stop_confirmed_in_log"]=(
-        "Framework stopped, app groups drained" in launch_log)
-    artifact["xnuhost_launch_marker_observed"]=(
-        "=== ONEIOS SESSION LAUNCHED ===" in launch_log)
-    artifact["thermal_guard_armed_marker_observed"]=(
-        "P0_SHORT_PROBE_THERMAL=ARMED_ROOT_SENSOR_GUARD_NOT_PRODUCTION_CERTIFIED" in launch_log)
+    observe_log(launch_log)
+    artifact["switch_launch_log_tail"]=launch_log[-30000:]
+    artifact["live_root_log_excerpt"]=live_log_excerpt
+    artifact["framework_stop_confirmed_in_log"]=milestones["framework_stop"]
+    artifact["xnuhost_launch_marker_observed"]=milestones["xnuhost_launch"]
+    artifact["thermal_guard_armed_marker_observed"]=milestones["thermal_guard_armed"]
+    artifact["guest_launch_evidence_complete"]=all(milestones.values())
+    artifact["milestone_evidence_source"]=(
+        "live_or_postboot_root_log" if all(milestones.values()) else
+        "insufficient_log_evidence"
+    )
     artifact["witness"]=witness_result["report"]
     artifact["recovery_certified"]=False
     artifact["unassisted_return_proven"]=False
@@ -271,7 +298,9 @@ def run(adb_path,serial,output_dir):
         json.dump(artifact,f,indent=2,ensure_ascii=False)
         f.write("\n")
     out.chmod(0o600)
-    print("SHORT_PROBE=NEW_NORMAL_ONEUI_BOOT_OBSERVED_AFTER_PROBE_REQUEST")
+    print("ONEUI_NEW_BOOT=OBSERVED_AFTER_PROBE_REQUEST")
+    print("POSTBOOT_ROOT_LOG_ACCESSIBLE="+str(
+        artifact["postboot_root_log_accessible"]).upper())
     print("THERMAL_GUARD_ARMED="+str(artifact["thermal_guard_armed_marker_observed"]).upper())
     print("FRAMEWORK_STOP_MARKER="+str(artifact["framework_stop_confirmed_in_log"]).upper())
     print("XNUHOST_LAUNCH_MARKER="+str(artifact["xnuhost_launch_marker_observed"]).upper())
@@ -279,6 +308,10 @@ def run(adb_path,serial,output_dir):
         artifact["witness"]["historical_return_record_correlated_to_pre_smoke_boot"]).upper())
     print("UNASSISTED_RETURN=OPERATOR_ATTESTATION_REQUIRED")
     print("OUTPUT="+str(out))
+    if not artifact["guest_launch_evidence_complete"]:
+        print("SHORT_PROBE=INSUFFICIENT_GUEST_LAUNCH_EVIDENCE_NOT_PASS")
+        return 4
+    print("SHORT_PROBE=GUEST_LAUNCH_MARKERS_OBSERVED_RECOVERY_NOT_CERTIFIED")
     return 0
 
 def main(argv=None):
