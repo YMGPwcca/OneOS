@@ -336,10 +336,15 @@ watchdog_feed() {
     L="$CTL/watchdog_feeder.log"
     echo $$ > "$CTL/feeder.pid" || { watchdog_failed "could not record the feeder PID"; return; }
     read -r wd_name wd_saved wd_extra < "$CTL/watchdog.target" || { watchdog_failed "missing watchdog target"; return; }
-    case "${wd_name#watchdog}" in
-        ''|*[!0-9]*) watchdog_failed "invalid watchdog target"; return ;;
-    esac
-    case "$wd_name" in watchdog*) ;; *) watchdog_failed "invalid watchdog target"; return ;; esac
+    if [ "$FRAMEWORK_REBOOT" = 1 ]; then
+        [ "$wd_name" = legacy ] ||
+            { watchdog_failed "invalid legacy reboot watchdog target"; return; }
+    else
+        case "${wd_name#watchdog}" in
+            ''|*[!0-9]*) watchdog_failed "invalid watchdog target"; return ;;
+        esac
+        case "$wd_name" in watchdog*) ;; *) watchdog_failed "invalid watchdog target"; return ;; esac
+    fi
     [ -z "$wd_extra" ] && [ -n "$wd_saved" ] || { watchdog_failed "invalid watchdog identity"; return; }
     if pidof system_server >/dev/null 2>&1 || [ "$(getprop init.svc.zygote)" = running ]; then
         watchdog_failed "One UI still owns the watchdog"
