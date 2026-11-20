@@ -9,7 +9,7 @@
 
 ## Browse by topic
 
-## OneiOS · S26 Ultra experimental track
+### OneiOS · S26 Ultra experimental track
 
 | Document | Focus |
 | :--- | :--- |
@@ -18,7 +18,7 @@
 | [oneios](oneios.md) | iOS 27 root-only experiment, compatibility limits and session flow |
 | [oneios watchdog recovery](oneios-watchdog-recovery.md) | Legacy watchdog provenance and unverified recovery requirements |
 
-## OneOS · Android guest behavior
+### OneOS · Android guest behavior
 
 | Document | Focus |
 | :--- | :--- |
@@ -33,7 +33,7 @@
 | [new guest systems](new-guest-systems.md) | Adding and validating a new Android guest |
 | [zygote sockets](zygote-sockets.md) | Service/socket setup notes |
 
-## Platform and guest-specific engineering
+### Platform and guest-specific engineering
 
 | Document | Focus |
 | :--- | :--- |
@@ -52,7 +52,7 @@
 | [samsung ims in guest](samsung-ims-in-guest.md) | Samsung IMS bridge |
 | [patch notes/2026 10 31 coloros fold8](patch-notes/2026-10-31-coloros-fold8.md) | Historic foldable patch note |
 
-## App UI and maintenance
+### App UI and maintenance
 
 | Document | Focus |
 | :--- | :--- |
