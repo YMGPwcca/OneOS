@@ -213,3 +213,23 @@ Five added fake-ADB host regression tests in `tests/test_sm8850_thermal_phone_ho
 - The operator's log shows two audited scripts were staged and the host-script reported successful post-check; cleanup is designed into the host script, but the log alone does **not** prove the temporary directory was removed. No watchdog/governor/reboot path was intentionally invoked.
 - **Next sensor mapping:** the existing OneiOS thermal backend documents 28 genuine zones including real CPU zone `cpu-0-5-1` around 40.5 C on a 2026-11-16 S26 Ultra pass, while `cpu-hw-trip-0/1` were constant 105 C pseudo-zones and must never be treated as live sensors. The three battery/LRP/board paths do **not** cover the SoC junction. Before expanding the OneOS reader, positively map the exact firmware thermal-zone path for a genuine CPU sensor and verify stable units/sampling with read-only, bounded access; do not attempt root recursive sysfs scans.
 - **Safety gate:** the `--framework-session run` source refusal remains on the draft branch only; the phone's prior staged switch is unchanged. Independent thermal protection and unassisted reboot-return are still NOT QUALIFIED. Full 600-second takeover remains BLOCKED.
+
+
+## Next: identify a previously verified genuine CPU thermal zone (read-only)
+
+The OneiOS thermal backend already lists real CPU/GPU/DDR zones. Its 2026-11-16 SM8850 report observed `cpu-0-5-1` around 40.5 C as the hottest CPU zone in that sample, after excluding bogus constant 105 C `cpu-hw-trip-0/1` pseudo-zones. The newly added **explicit opt-in** host mapper at `scripts/phone/sm8850-soc-candidate-map.py` searches **only immediate** `/sys/class/thermal/thermal_zone*/type` attributes, unprivileged, bounded at 256 zones, for **exactly** `cpu-0-5-1`. It then reads **only the one matched `thermal_zoneNN/temp`** three times, with root fallback only if direct named reads are denied. It rechecks exact model, firmware, running One UI/`system_server`, SELinux and boot identity; outputs JSON marked `acceptance=NOT_QUALIFIED`.
+
+This does **not** claim `cpu-0-5-1` is the universal maximum SoC junction sensor or that it is available with Framework stopped. Neither its temperature nor the values in simulated tests provide a validated warning/critical policy. It will **never** read the `cpu-hw-trip-*` temperature pseudo-zones. Root is never used to enumerate sysfs and there is no recursive traversal.
+
+`tests/test_sm8850_thermal_soc_map.py` adds nine offline mock-based regression cases (audit does not contact ADB, exact mapping, rejected spoof/duplicate, named root fallback, denied/malformed node, 3-sample verification, boot change refusal). The strict local runner now expects **81** tests in total: the previous **72/72 operator PASS** plus 9 **pending CachyOS verification**. Do not claim a new P0 guard acceptance merely from this evidence.
+
+Once the latest revision passes local CI, the operator can explicitly execute:
+
+```bash
+python3 scripts/phone/sm8850-soc-candidate-map.py  # audit only, no ADB
+python3 scripts/phone/sm8850-soc-candidate-map.py --run-readonly \
+  --adb "$HOME/Android/Sdk/platform-tools/adb" \
+  --output "$HOME/projects/OneiOS/out/sm8850/soc-candidate"
+```
+
+Run from an isolated extracted/checked revision and keep One UI fully present. If `cpu-0-5-1` cannot be uniquely identified as a thermal-zone type, stop; do not broaden the root scan or invent a substitute without a new source review. No Framework takeover is permitted.
