@@ -147,14 +147,27 @@ Known open issues for each system are in `docs/pixel-guest.md` and
 Everything else (other Exynos phones, other models, other images, other
 Android versions) is refused by the app's compatibility checks.
 
-## iOS 27 (OneiOS), in this fork
+## iOS 27 · OneiOS experimental track
 
-This fork (`akshaynexus/OneOS`, branch `oneios`) adds one more kind of system, for the **Galaxy S24 Ultra
-(SM-S928) only** and behind an experimental tick: **iOS 27**, run by
-[OneiOS](https://github.com/akshaynexus/OneiOS)'s xnuhost, a source-built XNU that runs as a process on One UI's
-kernel. Its runtime comes from OneiOS's releases; its image set is built by you from Apple's firmware and
-imported from a file, never downloaded and never in git. It has its own stage and its own session scripts, and
-it has not run on a phone yet. Everything about it: [docs/oneios.md](docs/oneios.md).
+> [!CAUTION]
+> **Galaxy S26 Ultra / SM-S948B / m3q / SM8850 only for this research track.**
+> OneiOS has physically booted iOS 27.0.1 and displayed its first frame
+> during a separately authorized root-only Framework takeover. The
+> `xnuhost` session lasted about **600.6 seconds**. **Severe lag and heat**
+> were reported; independent thermal protection and fully unattended
+> reboot-return remain **unverified**.
+
+The **normal OneOS app still blocks iOS switching on SM8850**. The
+root-only experiment is not an app feature or a production-ready
+installation. No iOS firmware or image is distributed in this repository.
+
+| Topic | Reference |
+| :--- | :--- |
+| Physical run, evidence and limitations | [Full-run status](docs/SM8850_ONEIOS_FULL_RUN_STATUS.md) |
+| Device/firmware scope and safety gates | [SM8850 port](docs/SM8850_PORT.md) |
+| Hosted XNU and experimental workflow | [OneiOS guide](docs/oneios.md) |
+| Watchdog and reboot-return gaps | [Recovery evidence](docs/oneios-watchdog-recovery.md) |
+| OneiOS runtime and optimization backlog | [OneiOS documentation](https://github.com/YMGPwcca/OneiOS/blob/feat/oneios-sm8850-m3q/docs/README.md) |
 
 ## Your phone is not listed?
 
