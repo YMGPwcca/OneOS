@@ -109,6 +109,25 @@ Additional changes in this draft branch:
 
 The live root-owned process must run outside the iOS guest namespace and be independently supervised, with pre-stop binding to actual boot/run identities, a real, trusted **SoC junction sensor** in addition to battery/case/board, firmware-qualified limits, bounded monitor-death response and an independently audited reboot-only return request with durable evidence. This has **not been implemented**. The existing switcher may still need a separate safe staging/update path to enforce the new source-level block on the actual device; no such deployment happened here.
 
+
+## Independent thermal process-health *contract* (fixture-only; 2026-11-21)
+
+New `switcher/assets/oneios_sm8850_thermal_health.sh` defines the **future** return-guard-side admission check, currently supported **only** as `--fixture-root` under `/tmp`. It binds:
+
+- expected verified boot ID;
+- watchdog generation (the switcher's exact run-generation record);
+- 32-hex launch token (`framework.launch`);
+- `control/thermal.monitor` as monitored PID + Linux process-birth start ticks;
+- `control/thermal.heartbeat` as exact `v1 boot generation launch pid birth sequence sample_ms OK`;
+- a monotonic-now timestamp and a bounded age allowance (1..30000 ms).
+
+It rechecks current boot/run, rejects missing or symlink-escaping fixture files, mismatched/reused monitor PID, missing or zombie proc state, malformed/multiline heartbeat, future/stale samples, bad status and changed identity during inspection. The only possible outputs are `THERMAL_HEALTH=FRESH_FIXTURE_ONLY` or `FAIL_CLOSED_FIXTURE_ONLY` **without a physical action**. It never opens `/dev/watchdog*`, calls the returner or runs outside host fixtures; it does **not** publish or supervise actual heartbeat files on the phone. This explicitly tests the **contract**, not a live independent watchdog.
+
+`tests/test_sm8850_thermal_health.py` adds **17 offline cases** (healthy, stale/future, missing/forged boot, generation, launch, PID birth reuse, process death/zombie, malformed heartbeat, symlink escape, bad TTL and disabled live mode). These 17 are **pending CachyOS verification**, in addition to the user's prior verified 50/50.
+
+The next P0 work remains: a real, independently run and supervised root-side monitor that continuously publishes this heartbeat outside the guest namespace/cgroup, firmware-source-qualified sensor/threshold policy including a genuine SoC junction, and an independently proven mandatory reboot-only recovery path. No bypass to the 600-second source gate exists in this branch.
+
+
 ## Mandatory gaps before P0 acceptance and any 600-second run
 
 1. Validate targeted kernel reader availability **while One UI Framework is absent**, in an authorized short recovery-qualified trial; previous reads were on intact Android only.
