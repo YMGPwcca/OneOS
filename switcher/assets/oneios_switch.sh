@@ -282,7 +282,7 @@ watchdog_pings() {
             [ "$(watchdog_id "$T/dev/watchdog")" = a:82 ] || return 1
         wd_keepalive=V
     else
-        [ -n "$T" ] || [ "$(watchdog_id "$P/$/fd/3")" = "$wd_saved" ] || return 1
+        [ -n "$T" ] || [ "$(watchdog_id "$P/$$/fd/3")" = "$wd_saved" ] || return 1
         wd_keepalive=.
     fi
     wd_first=1
