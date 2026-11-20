@@ -1,5 +1,9 @@
 # ColorOS session handover and Fold8 personalisation
 
+**OneOS · Release engineering**
+
+[← Docs hub](../README.md) · [Project home](../../README.md) · [Device catalog](../devices.md)
+
 ## Version and validation baseline
 
 These changes were developed and tested on a rooted Galaxy Z Fold8 running the
