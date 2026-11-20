@@ -51,6 +51,14 @@ if [ "$MODE" = --fixture-root ]; then
 fi
 SELF=$0
 [ -f "$SELF" ] || blocked source_missing
+if [ "$MODE" = --live-oneui-readonly ]; then
+    # The stage and source must be root-owned BEFORE any monitor starts.
+    # A shell-owned directory can replace heartbeat or sensor mapping.
+    [ "$(stat -c %u "$STAGE" 2>/dev/null)" = 0 ] &&
+    [ "$(stat -c %u "$STAGE/manifest.v1" 2>/dev/null)" = 0 ] &&
+    [ "$(stat -c %u "$STAGE/identity.v1" 2>/dev/null)" = 0 ] &&
+    [ "$(stat -c %u "$SELF" 2>/dev/null)" = 0 ] || blocked untrusted_stage_owner
+fi
 
 # A random private stage from the host has a fake, never-production launch ID.
 set -f
