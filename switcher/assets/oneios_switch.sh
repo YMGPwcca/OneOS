@@ -237,7 +237,11 @@ watchdog_target() {
 }
 # Software supervision for the existing S24 path. These are not hardware
 # expiry bounds. Whole seconds of Linux boot uptime, independent of wall time.
+# The OneOS Android feeder logs transient EBUSY instead of aborting on
+# the first V write. Bound that grace period for the reboot-only S26 smoke:
+# no readiness or keepalive heartbeat is published until V actually succeeds.
 WD_FIRST=3
+[ "$FRAMEWORK_REBOOT" != 1 ] || WD_FIRST=10
 WD_MAX_AGE=5
 watchdog_uint() {
     case "$1" in ''|0[0-9]*|*[!0-9]*|??????????*) return 1 ;; esac
@@ -289,11 +293,29 @@ watchdog_pings() {
     wd_last=$wd_armed
     while [ ! -e "$CTL/feeder.off" ] && [ "$(watchdog_generation)" = "$WD_GEN" ]; do
         if [ "$FRAMEWORK_REBOOT" = 1 ]; then
-            # Same V open/write/close cadence as original OneOS Android guest.
-            # An open failure must request immediate recovery, not pretend
-            # the watchdog is being fed.
-            if [ -n "$T" ]; then "$T/bin/watchdog-io" ping V || return 1
-            else printf V > "$T/dev/watchdog" || return 1; fi
+            # Ported from OneOS guest_prepare.sh: attempt V open/write/close
+            # repeatedly. Its feeder logs EBUSY as "refused", NOT a fatal
+            # first-attempt error. Unlike OneOS's long-running Android guest,
+            # our reboot-only smoke must still prove one successful V before
+            # reporting ownership/readiness. EBUSY is retried only within
+            # WD_FIRST; no false heartbeat is ever published.
+            if [ -n "$T" ]; then
+                wd_error=$("$T/bin/watchdog-io" ping V 2>&1) && wd_written=1 || wd_written=0
+            else
+                wd_error=$(printf V 2>&1 > "$T/dev/watchdog") && wd_written=1 || wd_written=0
+            fi
+            if [ "$wd_written" = 0 ]; then
+                [ "$wd_first" = 1 ] || return 1
+                wd_retry=$(watchdog_now) || return 1
+                if [ "$((wd_retry - wd_armed))" -ge "$WD_FIRST" ]; then
+                    watchdog_failed "OneOS legacy V write never succeeded within bounded handoff"
+                    return 1
+                fi
+                printf '%s OneOS legacy /dev/watchdog V refused (%s), waiting for FD release\n' \
+                    "$(date +%T)" "$wd_error" >> "$L"
+                sleep 0.2 3>&-
+                continue
+            fi
         elif [ -n "$T" ]; then "$T/bin/watchdog-io" ping "$wd_keepalive" || return 1
         else printf '%s' "$wd_keepalive" >&3 || return 1; fi
         # Only a completed keepalive earns a new timestamp. Never publish
@@ -2040,6 +2062,23 @@ if ! stop_android_framework; then
     publish_return_request "Framework stop failed"
     $SH "$SELF_RETURN" switch-stop-failed
     exit 4
+fi
+if [ "$FRAMEWORK_REBOOT" = 1 ]; then
+    # Exact first action of OneOS Android after stopping system_server,
+    # oneos_switch.sh:1396-1398. A refused first magic close is logged and
+    # the bounded feeder gets a chance to acquire the released FD. No
+    # persist.vendor.softdog mutation: OneiOS has no safe persistent
+    # post-reboot rollback for the original OneOS property fallback.
+    if [ -n "$T" ]; then
+        legacy_error=$("$T/bin/watchdog-io" ping V 2>&1) && legacy_written=1 || legacy_written=0
+    else
+        legacy_error=$(printf V 2>&1 > "$T/dev/watchdog") && legacy_written=1 || legacy_written=0
+    fi
+    if [ "$legacy_written" = 1 ]; then
+        echo "OneOS legacy /dev/watchdog magic close: V written after Framework stop"
+    else
+        echo "OneOS legacy /dev/watchdog magic close refused ($legacy_error); feeder will retry for at most ${WD_FIRST}s"
+    fi
 fi
 watchdog_started() {
     wd_begin=$(watchdog_now) || return 1
