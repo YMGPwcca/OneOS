@@ -2021,10 +2021,15 @@ if [ -n "$armed" ]; then
     exit 4
 fi
 if [ "$FRAMEWORK_REBOOT" = 1 ]; then
-    echo "SM8850 USB safety: DO NOT press Volume Up + Volume Down during reboot-smoke."
+    echo "SM8850 USB safety: DO NOT press Volume Up + Volume Down during the experimental session."
     echo "Samsung may enter Download Mode if the phone restarts while both volume keys are held with USB connected."
-    echo "After verified Framework stop, independent 20s deadline requests reboot to One UI."
-    echo "If the phone freezes instead, Samsung Side/Power + Volume Down for >7s forces a restart; this does NOT verify the key watcher."
+    if [ "$FW_MODE" = run ]; then
+        echo "FULL iOS guest, 8 vCPUs, GPU auto/3D and touch: independent 600s mandatory reboot-return deadline after Framework stop."
+        echo "Legacy watchdog a:82 and normal One UI boot are NOT independently qualified. Explicit-risk experiment."
+    else
+        echo "Framework-only smoke: independent 20s deadline requests reboot after Framework stop."
+    fi
+    echo "If frozen, Samsung Side/Power + Volume Down for >7s forces restart; this does NOT verify key watcher."
 else
     echo "Return to One UI: hold Volume Up + Volume Down for 3 s (key devices: $(echo $KDEVS)); watcher $(cat "$CTL/watcher.pid"), key readers $(tr '\n' ' ' < "$CTL/keys/pids")"
     echo "If that does nothing: hold Power + Volume Down until the phone restarts (about 7 s). It restarts into One UI."
