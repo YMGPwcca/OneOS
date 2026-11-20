@@ -1,5 +1,9 @@
 # HyperOS guest: guards and audit
 
+**OneOS · Android guest engineering**
+
+[← Docs hub](README.md) · [Project home](../README.md) · [Device catalog](devices.md)
+
 The HyperOS image is built from the Xiaomi 18 Fold (lhasa) CN OTA,
 OS4.0.26.0.XPNCNXM (build CP2A.260605.016, MysticGSI's HyperOS patch set).
 It is not in the app yet. This page covers what keeps it away from One UI's
