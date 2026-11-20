@@ -1,5 +1,9 @@
 # Which system image to download
 
+**OneOS · Android guest engineering**
+
+[← Docs hub](README.md) · [Project home](../README.md) · [Device catalog](devices.md)
+
 Generated from the app's phone list (`ImageGuide`); `ImageGuideTest` keeps it in step. Download only the `.gz` of a system your phone is listed under, then pick it in OneOS. OneOS checks the file's SHA-256 before it uses it.
 
 Downloads: each system's own link below (the SourceForge mirror, resumable); all of them are also in the Google Drive folder https://drive.google.com/drive/folders/1KuyNegquzVGxX3WfqyjQW5NErAYNEsUv
