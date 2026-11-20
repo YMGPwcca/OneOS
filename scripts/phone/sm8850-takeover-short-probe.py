@@ -175,9 +175,10 @@ def run(adb_path,serial,output_dir):
     witness_result={}
     def initial_identity(adb_path,serial):
         state=WITNESS.MAPPER.identity(adb_path,serial)
-        if state["boot_id"]!=boot:
-            raise Refused("witness saw different preprobe boot")
-        witness_ready.set()
+        if not witness_ready.is_set():
+            if state["boot_id"]!=boot:
+                raise Refused("witness saw different preprobe boot")
+            witness_ready.set()
         return state
     def witness_thread():
         try:
