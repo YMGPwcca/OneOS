@@ -1737,8 +1737,11 @@ if [ "$FRAMEWORK" = 1 ]; then
     fi
     if [ "$MODE" = --framework-session ]; then
         [ ! -L "$STAGE/start.lock" ] || framework_block "invalid start lock"
-        exec 8>"$STAGE/start.lock"
-        flock -n 8 || framework_block "another experimental switch is starting"
+        # Android mksh hides exec-opened fd 8 from external commands.
+        # Redirect the same open file description through fd 0 for flock;
+        # the shell retains fd 8 (and the lock) throughout the switch.
+        exec 8>>"$STAGE/start.lock"
+    flock -n 0 0<&8 || framework_block "another experimental switch is starting"
     fi
 fi
 left=$(awk -v s="$STAGE" -v o="$ANDROID_STAGE" '$5 == s || index($5, s "/") == 1 || index($5, o "/") == 1 { print $5 }' /proc/self/mountinfo | head -n 3 | tr '\n' ' ')
