@@ -62,6 +62,7 @@ check_fixture() {
 
 readfile="$(dirname "$0")/oneios_sm8850_thermal_reader.sh"
 [ -f "$readfile" ] && [ ! -L "$readfile" ] || failed reader_missing_or_linked
+BOUND_BOOT=''
 n=1
 while [ "$n" -le "$SAMPLES" ]; do
     [ "$MODE" != --fixture-root ] || check_fixture
@@ -70,12 +71,35 @@ while [ "$n" -le "$SAMPLES" ]; do
     else
         output=$(timeout 3 sh "$readfile" --live-readonly) || failed sensor_read_timeout_or_error
     fi
-    # The one-shot reader already rejects missing/malformed/zero sensor values;
-    # strict re-admission here avoids treating its warnings as a good reading.
-    first=$(printf '%s\n' "$output" | sed -n '1p')
-    [ "$first" = 'THERMAL_READER=READ_ONLY_SNAPSHOT_NOT_GUARD' ] || failed invalid_reader_result
-    reader_boot=$(printf '%s\n' "$output" | sed -n 's/^boot_id=//p')
-    [ -n "$reader_boot" ] || failed missing_reader_boot
+    # Strictly re-admit all fields: no extra, duplicate, malformed or missing
+    # values may turn a broken reader into an apparently healthy sample.
+    expected_source=--live-readonly
+    [ "$MODE" != --fixture-root ] || expected_source=--fixture-root
+    reader_boot=$(printf '%s\n' "$output" | awk -F= -v source="$expected_source" '
+      BEGIN {
+        split("THERMAL_READER source boot_id uptime_start uptime_end battery_deci_c lrp_deci_c board_ap_deci_c", fields, " ")
+        for (i in fields) expected[fields[i]]=1
+      }
+      NF != 2 { invalid=1; next }
+      {
+        if (!($1 in expected) || seen[$1]++) invalid=1
+        val[$1]=$2; count++
+      }
+      END {
+        if (count != 8 || invalid || val["THERMAL_READER"] != "READ_ONLY_SNAPSHOT_NOT_GUARD" || val["source"] != source || length(val["boot_id"]) != 36) exit 1
+        for (i=1; i<=3; i++) {
+          key = (i==1 ? "battery_deci_c" : (i==2 ? "lrp_deci_c" : "board_ap_deci_c"))
+          if (val[key] !~ /^[1-9][0-9]*$/ || val[key]+0 > 1200) exit 1
+        }
+        if (val["uptime_start"] !~ /^[0-9]+([.][0-9]+)?$/ || val["uptime_end"] !~ /^[0-9]+([.][0-9]+)?$/ || val["uptime_end"]+0 < val["uptime_start"]+0) exit 1
+        print val["boot_id"]
+      }
+    ') || failed invalid_reader_result
+    if [ -n "$BOUND_BOOT" ]; then
+        [ "$reader_boot" = "$BOUND_BOOT" ] || failed boot_changed_across_samples
+    else
+        BOUND_BOOT=$reader_boot
+    fi
     if [ "$MODE" = --fixture-root ]; then
         [ "$reader_boot" = "$BOOT_EXPECTED" ] || failed reader_boot_mismatch
         check_fixture
