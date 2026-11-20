@@ -1359,15 +1359,24 @@ case "$MODE" in
         echo "oneios inner: $(date '+%F %T') starting /data/runtime/$R_XNUHOST (pid $$)"
         if [ "$FRAMEWORK" = 1 ]; then
             [ "$(cat /data/control/framework.mode)" = run ] || die_inner "no full-session admission"
+            # S26 Ultra has 8 online CPUs. A kernel cpuset may restrict our
+            # thread affinity even if xnuhost creates eight vCPU threads.
+            # Do not claim full-core execution unless the guest's *inherited*
+            # CPU mask actually includes CPUs 0-7. No governor or cpufreq writes.
+            host_online=$(cat /sys/devices/system/cpu/online 2>/dev/null)
+            host_allowed=$(awk '/^Cpus_allowed_list:/ {print $2}' /proc/$/status)
+            [ "$host_online" = 0-7 ] && [ "$host_allowed" = 0-7 ] ||
+                die_inner "all 8 SM8850 host cores not accessible (online=$host_online allowed=$host_allowed)"
+            echo "ONEIOS_TAKEOVER_CPU=8 host_online=$host_online host_allowed=$host_allowed"
             ulimit -c 0
             exec "/data/runtime/$R_XNUHOST" --session-abi 1 --mode bench \
                 --runtime /data/runtime --image /data/image --data /data/data --session /data/session \
-                --cpus 4 --ram 2G --set ram-giveback=0 --set ram-prefault=1 --set ram-lock=1 \
+                --cpus 8 --ram 4G --set ram-giveback=0 --set ram-prefault=1 --set ram-lock=1 \
                 --set ram-huge=0 --set host-mem-log=5 --set bridges=0 --set wifi=off \
                 --set bluetooth=virtual --set haptics=off --set encoder=off --set return-graceful-ms=0 \
-                --gpu 2d --display shm --set input=1 --width 1080 --height 2340 --hz 60 \
+                --gpu auto --display shm --set touch-exclusive=1 --width 1080 --height 2340 --hz 60 \
                 --boot-args 'debug=0x14e serial=3 -v kt_fixed_zones=120 -no_slto_panic ml-timeout-lock-panic-scale=40 tlto_us=0 armcpu-self-ipi=1 armcpu-spi-ipi=1 use_contiguous_hint=0 interrupt-masked-debug-mode=0 sched_preemption_disable_debug_mode=0 wdt=-1 sheng-smp=1 oneios-data-wait=3000'
-            die_inner "could not exec the benchmark runtime"
+            die_inner "could not exec the GPU-3D benchmark runtime"
         fi
         exec "/data/runtime/$R_XNUHOST" --session-abi $ABI --mode takeover \
             --runtime /data/runtime --image /data/image --data /data/data --session /data/session
@@ -2145,7 +2154,10 @@ if [ "$FRAMEWORK" = 1 ]; then
     fw_seconds=10
     [ "$FRAMEWORK_REBOOT" != 1 ] || fw_seconds=20
     if [ "$FW_MODE" = run ]; then
-        fw_seconds=240
+        # Exactly ten minutes from verified Framework stop, not from ADB
+        # launch. The independent framework-deadline guard stays active
+        # even if xnuhost hangs or USB disconnects.
+        fw_seconds=600
         [ "$(awk '/^MemAvailable:/ {print $2}' "$P/meminfo")" -ge 5500000 ] ||
             fw_recover "available memory is below the benchmark minimum"
         framework_configure || fw_recover "could not set and verify vm.max_map_count"
