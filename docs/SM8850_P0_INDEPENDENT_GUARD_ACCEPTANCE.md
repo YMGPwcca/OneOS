@@ -38,3 +38,11 @@
 - **P0.2-E — Admission acceptance:** prove full independent monitor survives loss of `xnuhost` and Android Framework and that every failure reliably returns normal One UI. Only then create an explicit reviewed change to the source admission block; do not use a runtime flag/ACK to bypass.
 
 **No change in this document authorizes a 600s full takeover.** Until P0.2-D/E and vendor thresholds are accepted, the old staged phone script must be considered unsafe regardless of passing offline CI.
+
+
+## P0.2-A progress — One UI sensor inventory complete, production admission not qualified
+
+- CachyOS offline 123/123 PASS on `cdcc89d211fe8af4b10833dd248aad0405897664` and physical One UI survey: 28 selected real zones, no read or type errors, required CPU/GPU/DDR present; XO optional unavailable. Group peaks CPU 37.0 C, GPU 35.1 C, DDR 35.1 C. This closes the **snapshot discovery subtask only**.
+- A new explicit offline manifest builder validates that 28-zone JSON evidence, binds discovered paths to the source boot ID and fingerprints content without claiming a signature. New 16 regression tests (139 proposed total) are pending CachyOS.
+- **Still required for P0.2-A admission:** independently recheck current-boot sensor-type mappings and all required zones from the actual root monitor, prove sensor accessibility after Framework stop without depending on Android HAL/system_server, and bound missing sensor/read errors. Complete inventory with One UI up does not satisfy these conditions.
+- P0.2-B through P0.2-E remain open; the unconditional source 600s run block is unchanged.
