@@ -1,5 +1,12 @@
 # OneLineage
 
+**OneOS · Session and switcher reference**
+
+[← OneOS documentation](../docs/README.md) · [Project home](../README.md)
+
+> [!NOTE]
+> This switcher README retains historical OneLineage source credit and Android guest mechanics. For **current SM8850 OneiOS** evidence and restrictions see the [experimental status](../docs/SM8850_ONEIOS_FULL_RUN_STATUS.md); an Android guest workflow is not proof of iOS app switch availability.
+
 > **OneOS note:** this is WeWaffles' original OneLineage README, kept as the credit for the project OneOS started from. In OneOS the session scripts are `assets/oneos_switch.sh` (was `switch_to_lineage.sh`), `assets/guest_prepare.sh` (was `master_prepare.sh`) and `assets/guest_start.sh` (was `master_inner.sh`), the stage is `/data/local/tmp/oneos` (was `/data/local/tmp/lineage_stage`), and OneLineage's own app (`src/`, `res/`, `build_apk.sh`, `probe-av/`) is not part of this repository: it is no longer built or used (the OneOS app is `app-android/`); it is in [WeWaffles/OneLineage](https://github.com/WeWaffles/OneLineage).
 
 Hot-switch between stock **One UI** and a **LineageOS 23.2 (Android 16) GSI** on a rooted Samsung phone, with no reflashing and no second partition. OneLineage stages the GSI under `/data/local/tmp`, pivots into it as a container with its own zygote and system_server, and can hand the screen back to One UI.
