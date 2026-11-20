@@ -1,5 +1,9 @@
 # OneOS interface: cover and inner screens
 
+**OneOS · App design & maintenance**
+
+[← Docs hub](../README.md) · [Project home](../../README.md) · [Device catalog](../devices.md)
+
 Captured from the physical Galaxy Z Fold8 (SM-F971B), running the accepted
 OneOS 0.4.38 debug build on One UI. These are actual app captures, not Figma
 mockups. The captures precede the upstream 0.4.37 merge; the UI source is
