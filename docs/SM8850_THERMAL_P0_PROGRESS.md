@@ -184,3 +184,19 @@ At exact OneOS revision `5185a642ab7c7d29aa0f2d758fd04ac7b2f3af15`, the operator
 ## Operator milestone — full 67/67 PASS (2026-11-21)
 
 The operator reran the exact OneOS revision `d8759313e90da0f2af849b7150bc9aede36dcbf2` in a fresh extracted archive on CachyOS: `bash tests/run_sm8850_thermal_local.sh` executed 67 cases (14 reader/policy + 19 E2E + 17 shadow/source gate + 17 heartbeat) with `Ran 67 tests ... OK`, and emitted `ONEOS_P0_OFFLINE_67=PASS` and `P0_SAFETY_STATUS=OFFLINE_SIMULATION_ONLY_NO_PHYSICAL_GUARD`. This is the **local offline acceptance checkpoint** for that exact commit only. There was **no** new physical Android Framework stop, iOS guest run, watchdog operation or live thermal guard installed by this command.
+
+
+## P0.1 passive physical next step: three One UI-only shadow samples
+
+The operator's CachyOS host verified **67/67** offline tests at `d8759313e90da0f2af849b7150bc9aede36dcbf2`. These do not establish whether the actual phone can continuously read three kernel nodes.
+
+A new **explicit opt-in** host collector exists at `scripts/phone/run-sm8850-thermal-shadow-oneui.sh`:
+- Default `--audit-only`: **zero ADB contact**. Explicit `--run-readonly` requires exactly one authorized ADB device, correct SM-S948B/m3q/S948BXXS4BZIG model/firmware, boot completion, `system_server`, and SELinux Enforcing.
+- Copies **only** the two audited thermal reader/shadow scripts into a fresh, private temporary `/data/local/tmp/oneos-p0-shadow-<random>` directory. Checks SHA-256 of each remote file, runs **exactly three** root read-only sensor samples through `adb shell -T` with a host-side 30s deadline, confirms each tick and boot identity, and rechecks intact One UI before deleting both staged files.
+- Saves raw output in `~/projects/OneiOS/out/sm8850/thermal-shadow-oneui` with restrictive permissions; raw log contains boot ID and sensor values, so review before sharing.
+- Does **not** touch the root-owned experiment stage, iOS launch, Framework control, watchdog, governors, thermal sysfs writes or reboot. The only on-phone changes are temporary diagnostic script files.
+- `P0_SHADOW_ONEUI=PASS_READ_ONLY_EVIDENCE_NOT_GUARD` denotes **three accepted read-only snapshots**, never thermal guard acceptance.
+
+Five added fake-ADB host regression tests in `tests/test_sm8850_thermal_phone_host.py` verify no-device audit, wrong-model refusal, staged hash/cleanup, root denial and truncated output. The strict local runner now requires **72 tests** and syntax-checks/audits the host collector. These five new cases require operator CachyOS verification.
+
+**Run order:** fetch a pinned revision into a scratch directory, run `tests/run_sm8850_thermal_local.sh`, run host collector `--audit-only`, then explicitly `--run-readonly` while stock One UI is fully booted. A successful three-sample reading does not prove post-Framework sensor availability, real SoC junction coverage, trusted thresholds, or reboot safety. Full 600s takeover remains BLOCKED.
