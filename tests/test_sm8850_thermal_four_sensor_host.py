@@ -56,6 +56,11 @@ class FourSensorOneUITests(unittest.TestCase):
             with self.subTest(text=bad[-50:]), self.assertRaises(M.Refused):
                 M.parse_sample(bad, BOOT, PATH)
 
+    def test_hot_real_cpu_above_120c_is_not_suppressed(self):
+        sample = output(cpu_milli_c="130000", cpu_deci_c="1300")
+        values = M.parse_sample(sample, BOOT, PATH)
+        self.assertEqual(130000, values["cpu_milli_c"])
+        self.assertEqual(1300, values["cpu_deci_c"])
     def test_bad_sensor_or_clock_rejected(self):
         for mutation in ({"battery_deci_c":"0"}, {"lrp_deci_c":"1201"},
                          {"board_ap_deci_c":"nan"}, {"cpu_milli_c":"-273000"},
