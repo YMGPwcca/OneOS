@@ -9,7 +9,6 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
-import textwrap
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -58,7 +57,7 @@ elif s == ["pidof", "system_server"]:
 elif s == ["cat", "/proc/sys/kernel/random/boot_id"]:
     print("123e4567-e89b-12d3-a456-426614174000")
 elif s[0]=="mkdir":
-    mapping(s[1]).mkdir()
+    mapping(s[1]).mkdir(parents=True)
 elif s[0]=="chmod":
     pass
 elif s[0]=="sha256sum":
