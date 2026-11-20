@@ -197,15 +197,34 @@ def begin_preboot_host_log_stream(adb_path,serial,token,output_dir):
     try:
         proc=subprocess.Popen(
             [str(adb_path),"-s",serial,"shell","-T",
-             f"su -c '/system/bin/tail -n +1 -f {remote}'"],
+             f"su -c 'echo PREBOOT_ROOT_LOG_STREAM_READY; exec /system/bin/tail -n +1 -f {remote}'"],
             stdout=sink,stderr=subprocess.STDOUT)
     except BaseException:
         sink.close()
         raise
-    time.sleep(0.6)
-    if proc.poll() is not None:
+    # Popen alone is not proof the root reader survived su permission
+    # checks: demand its own READY receipt while One UI is still intact.
+    ready=False
+    end=time.monotonic()+7
+    while time.monotonic()<end:
+        if proc.poll() is not None:
+            break
+        if local.stat().st_size:
+            head=local.read_bytes()[:160]
+            if b"PREBOOT_ROOT_LOG_STREAM_READY" in head:
+                ready=True
+                break
+        time.sleep(0.2)
+    if not ready:
+        if proc.poll() is None:
+            proc.terminate()
+        try:
+            proc.wait(timeout=3)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait(timeout=3)
         sink.close()
-        raise Refused("ADB root preboot log stream failed before experiment launch")
+        raise Refused("root ADB log stream never became ready while One UI was intact; NO guest launched")
     return proc,sink,local
 
 
