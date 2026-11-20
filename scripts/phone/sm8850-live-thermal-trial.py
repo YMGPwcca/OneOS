@@ -76,7 +76,7 @@ def remote_clean(adb, serial, stage):
     files=' '.join(stage+'/'+name for name in names)
     # Temporary writes have suffix .tmp.<pid>; remove only manifest-defined
     # tmp artifacts in this private staging directory.
-    command=f"su -c 'rm -f {files} {stage}/monitor.*.tmp.* && rmdir {stage}'"
+    command=f"su -c 'rm -f {files} {stage}/monitor.*.tmp.* {stage}/supervisor.*.tmp.* {stage}/trial.*.tmp.* && rmdir {stage}'"
     invoke(adb,serial,'shell','-T',command,timeout=20)
 
 def run_trial(adb, serial, source=SHELL, detached=False):
