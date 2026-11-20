@@ -1877,6 +1877,17 @@ if [ "$MODE" = --check ] || [ "$MODE" = --framework-check ]; then
     echo "PREFLIGHT OK"
     exit 0
 fi
+if [ "$FRAMEWORK" = 1 ] && [ "$FW_MODE" = run ]; then
+    # Consume this independently cloned APFS Data BEFORE the first possible
+    # writable guest open. A failed/aborted takeover cannot reuse the clone.
+    [ ! -L "$STAGE/data.consumed" ] && [ ! -e "$STAGE/data.consumed" ] ||
+        framework_block "isolated APFS Data clone was already consumed"
+    (set -C; printf '%s %s\n' "$(boot_id)" "$FW_LAUNCH" > "$STAGE/data.consumed") ||
+        framework_block "could not atomically claim isolated APFS Data clone"
+    chmod 600 "$STAGE/data.consumed" ||
+        framework_block "could not protect APFS Data consumption record"
+    echo "APFS_DATA_CLONE=CONSUMED_ONE_SHOT_BEFORE_FRAMEWORK_STOP"
+fi
 
 # --- THE SESSION -----------------------------------------------------------
 # From here on something changes. Out of the launching app's cgroup and away
