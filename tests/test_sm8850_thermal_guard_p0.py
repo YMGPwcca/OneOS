@@ -158,11 +158,16 @@ class PolicySimulationTest(unittest.TestCase):
         self.assertEqual(S.State.FAIL_CLOSED, update(m, 1001, sample(999)))
         m = monitor()
         update(m, 1000, sample(1000))
+        self.assertEqual(S.State.FAIL_CLOSED, update(m, 1001, sample(1000)))
+        m = monitor()
+        update(m, 1000, sample(1000))
         self.assertEqual(S.State.FAIL_CLOSED, update(m, 900, sample(900)))
 
     def test_invalid_policy_is_rejected(self):
         with self.assertRaises(ValueError):
             S.Limits(500, 400, 420, 480, 600, 700, 20, 1000, 2000)
+        with self.assertRaises(ValueError):
+            S.Limits(400.0, 460, 420, 480, 600, 700, 20, 1000, 2000)
 
 
 if __name__ == "__main__":
