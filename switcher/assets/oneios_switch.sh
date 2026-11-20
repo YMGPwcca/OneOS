@@ -1334,7 +1334,7 @@ case "$MODE" in
         # accidentally made the two intended write areas read-only.
         at "checking writable guest Data/session islands"
         for check in /data/data /data/session/tmp; do
-            probe="$check/.oneios-write-check.$"
+            probe="$check/.oneios-write-check.$$"
             if ! (set -C; true 2>/dev/null > "$probe"); then
                 die_inner "guest writable island is read-only: $check"
             fi
