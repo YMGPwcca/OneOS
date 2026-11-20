@@ -44,7 +44,7 @@ The original **14/14 offline regression tests passed on the operator's CachyOS**
 This branch now also includes:
 - `tests/sm8850_thermal_e2e_dryrun.py` — connects the **actual three-node shell reader** to the pure fail-closed policy model, only from explicitly provided host fixture files. Requires exact synthetic boot ID, watchdog generation, launch token and watcher-health fixture. It checks them before and after each reading and refuses duplicate/malformed reader output, root/symlink escapes, expired or reversed sample intervals and sensor/read timeouts. Every event explicitly declares `live_thermal_guard=false` and `physical_return_issued=false`; the only proposed action is `WOULD_REQUEST_RETURN_NOT_EXECUTED`. Terminal simulations return nonzero (4).
 - `tests/test_sm8850_thermal_e2e.py` — **19 additional end-to-end regression tests**, using real shell reader invocations with fake sysfs, injected errors, synthetic watcher death, critical latching and strict output admission.
-- Validation on assistant-side local Linux: **14/14 original + 19/19 new tests PASS**. The **new 19 tests still require CachyOS confirmation**. No Android device was contacted by these changes.
+- Validation on assistant-side local Linux: **14/14 original + 19/19 new tests PASS**. The operator subsequently ran **19/19 additional E2E tests PASS on CachyOS**, for **33/33 total original tests PASS**. No Android device was contacted by these changes.
 
 All threshold values in these fixtures are fake and NOT firmware-calibrated. The Python harness requires a host Python interpreter, is not deployed as an Android process and does not guarantee live monitoring, unassisted return, independent survival after `xnuhost` death, or kernel-level throttling.
 
@@ -70,6 +70,44 @@ All threshold values in these fixtures are fake and NOT firmware-calibrated. The
 ```
 
 The harness must **never** be pointed to a physical root or provided real operator tokens in place of its synthetic fixture inputs. It does not open ADB, write a `return.request`, control watchdogs or reboot.
+
+## P0.2 follow-up: source-level takeover lock + bounded shadow observer (2026-11-21)
+
+**Physical operator CachyOS evidence:** **14/14 original + 19/19 E2E tests = 33/33 PASS** on the operator's actual Linux host, with **no phone takeover**.
+
+Additional changes in this draft branch:
+
+- **Fail-closed source gate** in `switcher/assets/oneios_switch.sh`: on the SM8850 `--framework-session run` path, a non-bypassable `framework_block` rejects unqualified 600-second iOS takeover **before APFS Data consumption, Framework stop, watchdog transfer, or guest start**. The gate has no environment override, acknowledgement-token override or policy fixture bypass. The read-only `--framework-check run` path remains available and now prints `P0_FULL_600S_TAKEOVER=BLOCKED_UNQUALIFIED_THERMAL_GUARD` to distinguish preflight from authorization. The gate exists **only in this source branch until reviewed and explicitly staged**; an already staged old copy on the phone is **NOT** retroactively protected.
+- **`switcher/assets/oneios_sm8850_thermal_shadow.sh`**: a bounded, root-only One UI *observer* mode or isolated `/tmp` fixture mode. Both invoke the **real existing named-node shell reader** with a 3-second subprocess timeout per sample and at most ten samples. The fixture mode binds synthetic boot ID, watchdog generation, launch token and watcher-alive marker before/after each read, rejects linked/outside-root files and strictly validates all eight output fields. Live root mode is explicitly `--live-oneui-readonly`, requiring stock One UI for the underlying reader; it has no post-Framework path and no automatic launch. It pins boot ID across samples, emits telemetry only, and **never writes a return request, reboots or opens watchdog**. On faults it exits nonzero with `FAIL_CLOSED_NO_PHYSICAL_ACTION` — which is **diagnostic fail-closed, not physical safety**.
+- **`tests/test_sm8850_thermal_shadow.py`** adds **17 new offline tests**: 14 observer and fake-sensor cases (tested in assistant Linux container, including real shell-reader invocations), plus 3 source-gate syntax/order/static tests. All 17 require local CachyOS execution on the exact new GitHub commit. The test suite does not operate the real S26.
+- No phone staging, root shell session monitoring, returner modifications, watchdog ownership modifications or physical thermal protection was performed.
+
+### Run only the new 17 tests on CachyOS
+
+```bash
+(
+  set -euo pipefail
+  REPO="$HOME/projects/OneiOS/app"
+  git -C "$REPO" fetch origin \
+    refs/heads/feat/sm8850-p0-thermal-reader-sim:refs/remotes/origin/feat/sm8850-p0-thermal-reader-sim
+  TEST_DIR=$(mktemp -d /tmp/oneos-sm8850-p0-shadow.XXXXXX)
+  git -C "$REPO" archive origin/feat/sm8850-p0-thermal-reader-sim \
+    switcher/assets/oneios_switch.sh \
+    switcher/assets/oneios_sm8850_thermal_reader.sh \
+    switcher/assets/oneios_sm8850_thermal_shadow.sh \
+    tests/test_sm8850_thermal_shadow.py | tar -xf - -C "$TEST_DIR"
+  sh -n "$TEST_DIR/switcher/assets/oneios_switch.sh"
+  sh -n "$TEST_DIR/switcher/assets/oneios_sm8850_thermal_shadow.sh"
+  python3 "$TEST_DIR/tests/test_sm8850_thermal_shadow.py" -v
+  echo "P0_THERMAL_SHADOW_OFFLINE=PASS"
+)
+```
+
+**Do not run the root-only live observer or stage the updated switcher for takeover to complete these tests.** The new code is a bounded measurement primitive and a conservative source block, **not** the mandatory independently supervised thermal return guard required to proceed.
+
+### Remaining before any thermal guard acceptance
+
+The live root-owned process must run outside the iOS guest namespace and be independently supervised, with pre-stop binding to actual boot/run identities, a real, trusted **SoC junction sensor** in addition to battery/case/board, firmware-qualified limits, bounded monitor-death response and an independently audited reboot-only return request with durable evidence. This has **not been implemented**. The existing switcher may still need a separate safe staging/update path to enforce the new source-level block on the actual device; no such deployment happened here.
 
 ## Mandatory gaps before P0 acceptance and any 600-second run
 
