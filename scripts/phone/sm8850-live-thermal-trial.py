@@ -140,8 +140,11 @@ def run_trial(adb, serial, source=SHELL, detached=False):
                 # Launch a bounded root-only trial in a NEW session with
                 # stdin/out/err disconnected from its original adb shell.
                 # Reconnect separately to read the completion receipts.
-                cmd=(f"su -c 'command -v setsid >/dev/null 2>&1 || exit 10; "
-                     f"setsid /system/bin/sh {stage}/oneios_sm8850_thermal_trial.sh "
+                cmd=(f"su -c 'bb=; for p in /data/adb/ksu/bin/busybox "
+                     f"/data/adb/ap/bin/busybox /data/adb/magisk/busybox; do "
+                     f"[ ! -x \"$p\" ] || {{ bb=\"$p\"; break; }}; done; "
+                     f"[ -n \"$bb\" ] || exit 10; \"$bb\" setsid /system/bin/sh "
+                     f"{stage}/oneios_sm8850_thermal_trial.sh "
                      f"--live-oneui-readonly {stage} 4 normal >{stage}/trial.out "
                      f"2>&1 </dev/null & echo $! >{stage}/trial.parent'")
                 invoke(adb,serial,'shell','-T',cmd,timeout=12)
