@@ -1,5 +1,9 @@
 # Samsung Camera in a non-Samsung guest
 
+**OneOS · Session and switcher reference**
+
+[← OneOS documentation](../docs/README.md) · [Project home](../README.md)
+
 Nothing OS's own camera (com.nothing.camera) cannot work on a Samsung phone: it
 loads `libcameradecision.so` and talks to `vendor.noth.hardware.camera`, both on
 Nothing's vendor partition, written for Nothing's sensors (Nothing run 11:
