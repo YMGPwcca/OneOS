@@ -55,6 +55,9 @@ verified by another destructive full run.
 - OneiOS: [full run and prior BusyBox failure](https://github.com/YMGPwcca/OneiOS/blob/feat/oneios-sm8850-m3q/docs/SM8850_FULL_IOS_10MIN.md)
 - OneOS: [watchdog provenance and remaining hardware gaps](oneios-watchdog-recovery.md)
 - OneOS: [port boundary and Android app allowlist](SM8850_PORT.md)
+- OneiOS: [thermal guard — proposed design, not accepted](https://github.com/YMGPwcca/OneiOS/blob/feat/oneios-sm8850-m3q/docs/SM8850_THERMAL_GUARD.md)
+- OneiOS: [recovery acceptance — independent evidence requirements](https://github.com/YMGPwcca/OneiOS/blob/feat/oneios-sm8850-m3q/docs/SM8850_RECOVERY_ACCEPTANCE.md)
+- OneiOS: [performance baseline — observed sample versus missing measurements](https://github.com/YMGPwcca/OneiOS/blob/feat/oneios-sm8850-m3q/docs/SM8850_PERFORMANCE_BASELINE.md)
 - OneOS assets: `switcher/assets/oneios_switch.sh` and `switcher/assets/oneios_return.sh`.
 
 **Documentation updates are not evidence of another physical test.** Do not

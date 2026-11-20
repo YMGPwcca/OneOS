@@ -18,6 +18,8 @@
 | [oneios](oneios.md) | iOS 27 root-only experiment, compatibility limits and session flow |
 | [oneios watchdog recovery](oneios-watchdog-recovery.md) | Legacy watchdog provenance and unverified recovery requirements |
 
+The companion [OneiOS thermal guard](https://github.com/YMGPwcca/OneiOS/blob/feat/oneios-sm8850-m3q/docs/SM8850_THERMAL_GUARD.md), [recovery acceptance](https://github.com/YMGPwcca/OneiOS/blob/feat/oneios-sm8850-m3q/docs/SM8850_RECOVERY_ACCEPTANCE.md) and [performance baseline](https://github.com/YMGPwcca/OneiOS/blob/feat/oneios-sm8850-m3q/docs/SM8850_PERFORMANCE_BASELINE.md) are **proposed acceptance contracts**, not evidence that thermal protection or unattended return has passed.
+
 ### OneOS · Android guest behavior
 
 | Document | Focus |

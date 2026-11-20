@@ -57,6 +57,8 @@ Relevant upstream documentation: [Linux watchdog userspace API](https://www.kern
 
 ## Verification strategy
 
+The [cross-repository recovery acceptance matrix](https://github.com/YMGPwcca/OneiOS/blob/feat/oneios-sm8850-m3q/docs/SM8850_RECOVERY_ACCEPTANCE.md) tracks the independently required receipts and fail-closed outcomes. Documentation itself cannot satisfy those checks.
+
 Prioritize the saved logs and local CachyOS tests. When available, read `/proc/<holder>/fdinfo`, `/sys/dev/char` metadata and firmware module provenance without opening the watchdog character device. Distinguish independent hardware acceptance from a script's own confirmation marker. New destructive tests require separate user authorization and completed thermal gating.
 
 ---

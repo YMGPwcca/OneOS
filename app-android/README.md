@@ -447,9 +447,11 @@ M2 and later.
 `CompatEvaluator` lives in `:core:model` rather than `:core:device` (DESIGN.md
 section 3) so the rules run as plain JVM tests and, later, on the server.
 
-## iOS 27 (OneiOS), this fork
+## iOS 27 (OneiOS): legacy app interface, separate SM8850 experiment
 
-`docs/oneios.md`. In the app: `core/model/.../Oneios.kt` (`OneiosSystem`, the S24 Ultra-only gate and its tick;
+Read [the current SM8850 evidence](../docs/SM8850_ONEIOS_FULL_RUN_STATUS.md) and [root-only OneiOS contract](../docs/oneios.md) before using these app implementation notes. **The S26 Ultra/SM8850 cannot switch into iOS from the OneOS Android app.** The model/UI/job gate intentionally remains blocked; a physical iOS first frame from the separate root-only experiment does not change app eligibility.
+
+The existing app code retains a **historical S24 Ultra-specific gate**, not an SM8850 allowlist. In the app: `core/model/.../Oneios.kt` (`OneiosSystem`, the legacy S24-specific gate and its tick;
 `OneiosManifests`, `OneiosPackage`, `TarReader`, `OneiosReleases`, `JsonRead`), `core/root/.../OneiosRoot.kt` (the
 launcher and `OneiosStatus`), `app/src/full`: `assets/root/oneios_root.sh`, `session/OneiosJob.kt`,
 `ui/OneiosActivity.kt`, the card in `SystemsActivity`. The session scripts `switcher/assets/oneios_switch.sh` and

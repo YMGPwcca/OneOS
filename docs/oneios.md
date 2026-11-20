@@ -86,4 +86,6 @@ Mandatory reboot-return on deadline or earlier failure
 
 [Physical SM8850 evidence](SM8850_ONEIOS_FULL_RUN_STATUS.md) · [Watchdog investigation](oneios-watchdog-recovery.md) · [OneiOS engineering roadmap](https://github.com/YMGPwcca/OneiOS/blob/feat/oneios-sm8850-m3q/docs/TODO.md)
 
+For acceptance criteria rather than another live run, use the companion OneiOS [thermal-guard design](https://github.com/YMGPwcca/OneiOS/blob/feat/oneios-sm8850-m3q/docs/SM8850_THERMAL_GUARD.md), [recovery evidence matrix](https://github.com/YMGPwcca/OneiOS/blob/feat/oneios-sm8850-m3q/docs/SM8850_RECOVERY_ACCEPTANCE.md), and [performance baseline](https://github.com/YMGPwcca/OneiOS/blob/feat/oneios-sm8850-m3q/docs/SM8850_PERFORMANCE_BASELINE.md). These are proposed engineering gates, **not new physical test results**.
+
 Historical details remain accessible in Git history; they are not the current SM8850 switching contract.
