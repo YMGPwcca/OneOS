@@ -1,5 +1,9 @@
 # Changelog
 
+**OneOS · Project reference**
+
+[← OneOS documentation](docs/README.md) · [Project home](README.md)
+
 New in 0.4.33, untested: the Galaxy Z Fold6 (SM-F956, q6q, the S24 Ultra's
 Snapdragon 8 Gen 3) with the Find N6 build and Infinity-X, and the Galaxy A07
 (SM-A075, MediaTek MT6789, One UI 9), the first MediaTek phone, with Infinity-X
