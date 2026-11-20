@@ -4,6 +4,7 @@
 import os
 from pathlib import Path
 import shutil
+import shlex
 import subprocess
 import tempfile
 import unittest
@@ -118,6 +119,24 @@ class ShadowTests(unittest.TestCase):
                                  BOOT, GEN, LAUNCH, "1"], capture_output=True, text=True,
                                 timeout=3)
         self.assertEqual(2, result.returncode)
+
+    def test_duplicate_or_extra_reader_lines_fail_closed(self):
+        correct = subprocess.run(["sh", str(ROOT / "switcher/assets/oneios_sm8850_thermal_reader.sh"),
+                                  "--fixture-root", str(self.root)],
+                                 capture_output=True, text=True, timeout=3)
+        self.assertEqual(0, correct.returncode, correct.stderr)
+        for suffix in ("battery_deci_c=285\n", "unknown_sensor=280\n"):
+            with self.subTest(suffix=suffix), tempfile.TemporaryDirectory() as tmp:
+                where = Path(tmp)
+                shutil.copyfile(SHADOW, where / SHADOW.name)
+                fake_reader = where / "oneios_sm8850_thermal_reader.sh"
+                fake_reader.write_text("#!/bin/sh\nprintf %s " +
+                                       shlex.quote(correct.stdout + suffix) + "\n")
+                result = subprocess.run(["sh", str(where / SHADOW.name), "--fixture-root",
+                                         str(self.root), BOOT, GEN, LAUNCH, "1"],
+                                        capture_output=True, text=True, timeout=3)
+                self.assertEqual(4, result.returncode)
+                self.assertIn("invalid_reader_result", result.stderr)
 
     def test_no_unbounded_or_implicit_session_mode(self):
         for count in ("0", "11", "invalid"):
