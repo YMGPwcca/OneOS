@@ -1,5 +1,9 @@
 # Exynos phones (first runs, 0.4.17)
 
+**OneOS · Android guest engineering**
+
+[← Docs hub](README.md) · [Project home](../README.md) · [Device catalog](devices.md)
+
 Two probe reports of 2026-10-25 brought the first Exynos profiles (a third, the
 Galaxy A57, came in 0.4.29, and a fourth, the A56, in 0.4.31; see the end):
 
