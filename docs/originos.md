@@ -1,5 +1,9 @@
 # vivo OriginOS 17 as a guest
 
+**OneOS · Android guest engineering**
+
+[← Docs hub](README.md) · [Project home](../README.md) · [Device catalog](devices.md)
+
 The global vivo X500 Pro Max build (V2610_EEA, MediaTek Dimensity k6995,
 CP2A.260605.016, Android 17), built with MysticGSI
 (the image build (MysticGSI, not in this repository) ... --type originos`, `MysticGSI's patch set/37/originos`: no
