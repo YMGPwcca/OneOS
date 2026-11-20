@@ -174,6 +174,18 @@ class SourceAdmissionGateTests(unittest.TestCase):
         self.assertIn('framework_thermal_guard_healthy()', source)
         self.assertIn('P0_SHORT_PROBE_THERMAL=ARMED_ROOT_SENSOR_GUARD_NOT_PRODUCTION_CERTIFIED', source)
         self.assertIn('oneios_sm8850_thermal_takeover_guard.sh', source)
+        thermal_guard = (ROOT / "switcher/assets/oneios_sm8850_thermal_takeover_guard.sh").read_text()
+        # Physical 90s probe crossed an experimental cutoff after xnuhost
+        # launched. Keep exact soft cutoffs and future fault provenance.
+        for threshold in (
+            '"$CPU_MAX" -lt 55000', '"$GPU_MAX" -lt 55000',
+            '"$DDR_MAX" -lt 55000', '"$BAT" -lt 380',
+            '"$LRP" -lt 420', '"$AP" -lt 420',
+        ):
+            self.assertIn(threshold, thermal_guard)
+        self.assertIn('SOFT_FAULT_DETAIL="crossed=', thermal_guard)
+        self.assertIn('CPU_MAX_ZONE=$typ@$idx', thermal_guard)
+        self.assertIn('atom thermal.guard.fault "$BOOT $GEN $ $BIRTH $reason ${detail}"', thermal_guard)
         self.assertIn('if [ "$FRAMEWORK" = 1 ] && { [ "$FW_MODE" = run ] || [ "$FW_MODE" = probe ]; }; then', source)
 
     def test_check_only_continues_to_allow_passive_preflight(self):
