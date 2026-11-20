@@ -106,6 +106,64 @@ class HostTrialTest(unittest.TestCase):
         self.assertFalse(any(args[:2]==('shell','-T') and 'monitor-exit-after-two' in args[-1] for args in calls))
         self.assertTrue(any(args[:2]==('shell','-T') and 'rmdir' in args[-1] for args in calls))
 
+    def mock_detached(self, *, bad_session=False, bad_supervisor=False):
+        calls=[]
+        def fake(adb,serial,*args,timeout=12):
+            calls.append(args)
+            if args[:2]==('shell','sha256sum'):
+                name=args[-1].rsplit('/',1)[-1]
+                if name=='oneios_sm8850_thermal_trial.sh':
+                    digest=hashlib.sha256(MOD.SHELL.read_bytes()).hexdigest()
+                elif name=='manifest.v1':
+                    with patch.object(MOD.MANIFEST,'validate',return_value=VALID_MANIFEST):
+                        digest=hashlib.sha256(MOD.create_line_manifest({})[0]).hexdigest()
+                else:
+                    digest=fake.identity_sha
+                return digest+'  '+args[-1]
+            if args and args[0]=='push' and args[-1].endswith('identity.v1'):
+                fake.identity_sha=hashlib.sha256(Path(args[1]).read_bytes()).hexdigest()
+            if args[:2]==('shell','-T') and 'stat -c %u ' in args[-1]:
+                return '0'
+            if args[:2]==('shell','-T') and 'cat ' in args[-1]:
+                if args[-1].endswith("trial.identity'"):
+                    return '101 11000 999' if bad_session else '101 11000 101'
+                if args[-1].endswith("monitor.identity'"):
+                    return '102 11001'
+                if args[-1].endswith("supervisor.identity'"):
+                    return '102 11002' if bad_supervisor else '103 11002'
+            return ''
+        trial_log=('MONITOR=FINITE_SMOKE_DONE samples=4 physical_return=NO\n'
+                   'SUPERVISOR=MONITOR_COMPLETED_SEPARATE_PID samples=4 physical_return=NO\n'
+                   'THERMAL_TRIAL=PASS_OBSERVER_SUPERVISOR_ONLY_NO_PHYSICAL_RETURN\n')
+        with patch.object(MOD.INVENTORY.mapper,'identity',return_value=IDENT), \
+             patch.object(MOD.INVENTORY,'collect',return_value={'hottest_by_group':{}}), \
+             patch.object(MOD.MANIFEST,'validate',return_value=VALID_MANIFEST), \
+             patch.object(MOD,'invoke',side_effect=fake), \
+             patch.object(MOD.INVENTORY.mapper,'adb_call',
+                 return_value=subprocess.CompletedProcess([],0,trial_log,'')), \
+             patch.object(MOD.time,'sleep'):
+            if bad_session or bad_supervisor:
+                with self.assertRaisesRegex(MOD.Refused,'detached session or distinct PID'):
+                    MOD.run_trial('adb','S',detached=True)
+                return calls,None
+            else:
+                result=MOD.run_trial('adb','S',detached=True)
+                return calls,result
+
+    def test_detached_sets_sid_new_shell_and_verifies_separate_pids(self):
+        calls,result=self.mock_detached()
+        self.assertTrue(result['launcher_adb_command_detach_tested'])
+        self.assertFalse(result['recovery_certified'])
+        self.assertEqual('detached-normal',result['runs'][0]['scenario'])
+        self.assertTrue(any(args[:2]==('shell','-T') and 'setsid ' in args[-1] for args in calls))
+        self.assertTrue(any(args[:2]==('shell','-T') and 'rmdir' in args[-1] for args in calls))
+
+    def test_detached_wrong_session_never_certifies(self):
+        self.mock_detached(bad_session=True)
+
+    def test_detached_shared_worker_supervisor_pid_rejected(self):
+        self.mock_detached(bad_supervisor=True)
+
     def test_remote_clean_rejects_untrusted_stage(self):
         with self.assertRaises(MOD.Refused):
             MOD.remote_clean('adb','S','/data/adb/oneios-m3q-framework')
