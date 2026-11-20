@@ -58,6 +58,24 @@ class LiveTrialTest(unittest.TestCase):
         self.assertEqual(3,r.stdout.count('MONITOR=OBSERVED tick='))
         self.assertEqual('3', (self.stage/'monitor.heartbeat').read_text().split()[6])
 
+    def test_detached_own_session_keeps_separate_worker_and_supervisor(self):
+        # Launcher need not stay connected: a separate kernel session hosts
+        # the finite observer while output is redirected to a local file.
+        out = self.stage/'detached-test.out'
+        with out.open('w') as stream:
+            proc = subprocess.Popen(
+                ['sh', str(SCRIPT), '--fixture-root', str(self.sys),
+                 str(self.stage), '3', 'normal'],
+                start_new_session=True, stdin=subprocess.DEVNULL,
+                stdout=stream, stderr=subprocess.STDOUT)
+        self.assertEqual(0, proc.wait(timeout=20), out.read_text())
+        parent_pid, birth, sid = (self.stage/'trial.identity').read_text().split()
+        worker_pid = (self.stage/'monitor.identity').read_text().split()[0]
+        supervisor_pid = (self.stage/'supervisor.identity').read_text().split()[0]
+        self.assertEqual(parent_pid, sid)
+        self.assertEqual(3, len({parent_pid, worker_pid, supervisor_pid}))
+        self.assertIn('THERMAL_TRIAL=PASS_OBSERVER_SUPERVISOR_ONLY_NO_PHYSICAL_RETURN',out.read_text())
+
     def test_worker_exit_is_independently_detected(self):
         r=self.run_trial('monitor-exit-after-two',ticks=4)
         self.assertEqual(0,r.returncode,r.stdout+r.stderr)
