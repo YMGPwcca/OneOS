@@ -38,6 +38,24 @@ WeWaffles, and builds its guest images with
 
 ## Status
 
+### OneiOS on Galaxy S26 Ultra — root-only lab experiment, 2026-11-20
+
+**Separate from this app's supported Android-system switches.** The exact
+SM-S948B/m3q/SM8850 root-only OneiOS Framework experiment physically
+stopped Android Framework, booted iOS 27.0.1, posted its first guest frame
+and kept hosted XNU running for about **600.6 s**. Actual Adreno/KGSL
+graphics traffic was seen; the user reported **severe lag and heat**.
+Following reboot, Android reported the named OneOS return boot reason,
+but the exact deadline requester, independent hardware watchdog and
+fully unassisted return remain **unverified** (temporary root disappeared).
+
+**The OneOS app's SM8850 OneiOS switch is still blocked.** The standalone
+root-only research path uses separate, strict firmware and
+risk-acknowledgement gates and is **not production-ready**.
+See [physical evidence and safeguards](docs/SM8850_ONEIOS_FULL_RUN_STATUS.md).
+Do not interpret this as enabling iOS in the app, as 60 FPS proof, or as
+thermal/recovery certification.
+
 App version 0.4.93. Galaxy Z Fold, S, Z Flip, A, F and M phones with Snapdragon,
 Exynos or MediaTek chips, on One UI 9 (and, for OxygenOS 16 only, on One UI 8);
 root is required (tested with KernelSU; Magisk and APatch are
