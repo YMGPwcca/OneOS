@@ -1,5 +1,9 @@
 # Play services and the Play Store in ColorOS guests
 
+**OneOS · Android guest engineering**
+
+[← Docs hub](README.md) · [Project home](../README.md) · [Device catalog](devices.md)
+
 Since 0.4.16, every ColorOS set on every phone gets One UI's own Play services
 and Play Store app files (`switcher/assets/guest_google.sh`). Pull request #1
 did this first for the Z Fold8 with the Find N6 set.
