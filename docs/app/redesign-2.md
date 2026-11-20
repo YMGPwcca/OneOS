@@ -1,5 +1,9 @@
 # App redesign 2: the shared look (full edition)
 
+**OneOS · App design & maintenance**
+
+[← Docs hub](../README.md) · [Project home](../../README.md) · [Device catalog](../devices.md)
+
 The building blocks for the redesigned screens. The spec is the mockup
 (`oneos-notes/2026-10-24/design-canvas/project/*.dc.html`, 1 CSS px = 1 dp).
 Everything is in `app-android/app/src/full`, so OneOS Probe keeps the stock One
