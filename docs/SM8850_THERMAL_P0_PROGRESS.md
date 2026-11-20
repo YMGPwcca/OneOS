@@ -317,3 +317,15 @@ python3 scripts/phone/sm8850-thermal-manifest.py --build \
 ```
 
 This is the sensor manifest **foundation** for a future independently supervised root monitor, not that monitor itself. P0.2 recovery, watchdog and the 600-second takeover remain BLOCKED.
+
+
+## 2026-11-21 operator 139/139 CI + 28-node boot manifest
+
+- The operator ran exact OneOS commit `efe371475b92f5d7e27abfbb8f1b2983bfb16ca6` on CachyOS. **139/139 offline tests PASS** with `ONEOS_P0_OFFLINE_139=PASS`; explicit offline manifest builder accepted complete 28-zone CPU/GPU/DDR survey JSON, source boot ID `a6007f1e-4fc3-4e99-82dd-267ccb249656`, SHA256 `6d327fd8aedf33101317cbb8b6cb19b00fd175f322f59a3acd8ff0a073910ee8`. File `out/sm8850/thermal-manifests/boot-manifest-20261120T191606Z-1d8c3f53.json`. This is evidence validation only, not live admission.
+
+## New source groundwork: real root monitor / sibling heartbeat supervisor (read-only One UI trial)
+
+- A **finite** root shell worker now reads all currently mapped CPU/GPU/DDR sensors plus BAT/LRP/AP and emits atomic telemetry/heartbeat. A **separate sibling PID** checks worker process birth, heartbeat freshness, exact boot/run binding and monitor disappearance.
+- Host runner `scripts/phone/sm8850-live-thermal-trial.py` re-inventories **current-boot** zones before every test, builds a non-authorizing type/path manifest in memory, SHA-checks a disposable root script under `/data/local/tmp`, runs a normal finite sample followed by a **safe self-exit fault injection** and requires the sibling supervisor to report `WOULD_REQUEST_RETURN_NOT_EXECUTED`. Stage is cleaned after the trial. Audit mode has zero ADB calls.
+- 9 new fixture tests + 6 new mock-ADB tests passed in assistant Linux (15/15); the **operator has NOT yet run the combined 154-case local suite or real live root smoke on the S26**. The strict runner expects **154**.
+- The live test does NOT launch an iOS guest, stop Framework, write `return.request`, call reboot, open watchdog or modify CPU/GPU clocks. It does NOT survive Framework stop by proof and does NOT establish firmware trip thresholds, separate supervisor-of-supervisor, reboot-only return or P0 acceptance. **600-second Framework takeover stays BLOCKED**.
