@@ -126,7 +126,7 @@ def observe(adb, serial, *, max_seconds=240, clock=time.monotonic, sleep=time.sl
     # Source-backed historical correlation is deliberately non-authorizing.
     try:
         evidence = inspector(adb, serial)
-    except (MAPPER.Blocked, PROVENANCE.Blocked, OSError):
+    except (MAPPER.Blocked, PROVENANCE.Blocked, PROVENANCE.MAPPER.Blocked, OSError):
         evidence = None
     report = evaluate(before, next_boot, events, evidence)
     report["observation_duration_seconds"] = round(clock()-started, 3)
