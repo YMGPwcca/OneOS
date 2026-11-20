@@ -1,5 +1,9 @@
 # App redesign: Home, the Switch sheet and Welcome back
 
+**OneOS · App design & maintenance**
+
+[← Docs hub](../README.md) · [Project home](../../README.md) · [Device catalog](../devices.md)
+
 The spec is the mockup: `Main.dc.html`, `HomeInner.dc.html`, `SwitchSheet.dc.html` and `WelcomeBack.dc.html` in `oneos-notes/2026-10-24/design-canvas`. These screens use the shared pieces in `redesign-2.md`. Everything here is in `app-android/app/src/full`, so OneOS Probe keeps its old Home.
 
 ## Layout
