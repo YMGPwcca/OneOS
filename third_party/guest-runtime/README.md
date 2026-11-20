@@ -1,5 +1,9 @@
 # Guest runtime sources
 
+**OneOS · Project reference**
+
+[← OneOS documentation](../../docs/README.md) · [Project home](../../README.md)
+
 The bundled injection files are modified NeoZygisk, GPL-3.0, based on
 [`c4caec94c950da36bedfbe20e84a849d269175ef`](https://github.com/JingMatrix/NeoZygisk/tree/c4caec94c950da36bedfbe20e84a849d269175ef).
 The complete local changes are in `neozygisk.patch`. Apply with `git apply --unidiff-zero` to
