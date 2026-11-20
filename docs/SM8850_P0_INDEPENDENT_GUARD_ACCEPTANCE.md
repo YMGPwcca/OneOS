@@ -46,3 +46,29 @@
 - A new explicit offline manifest builder validates that 28-zone JSON evidence, binds discovered paths to the source boot ID and fingerprints content without claiming a signature. New 16 regression tests (139 proposed total) are pending CachyOS.
 - **Still required for P0.2-A admission:** independently recheck current-boot sensor-type mappings and all required zones from the actual root monitor, prove sensor accessibility after Framework stop without depending on Android HAL/system_server, and bound missing sensor/read errors. Complete inventory with One UI up does not satisfy these conditions.
 - P0.2-B through P0.2-E remain open; the unconditional source 600s run block is unchanged.
+
+
+## 2026-11-21: finite live One UI root monitor + separate supervisor smoke
+
+The operator's last accepted baseline is **139/139 offline tests PASS** at OneOS commit `efe371475b92f5d7e27abfbb8f1b2983bfb16ca6`. The offline manifest builder accepted all **28 real CPU/GPU/DDR thermal zone** records from the physical One UI survey, returned source boot ID `a6007f1e-4fc3-4e99-82dd-267ccb249656`, and wrote a fingerprinted **non-authorizing** JSON. It did not run a production guard or authorize takeover.
+
+**Now implemented for separate physical validation:**
+
+- `switcher/assets/oneios_sm8850_thermal_trial.sh`: a **FINITE, opt-in, read-only** root process trial. It runs a sampling worker and a sibling supervisor as **two separate process IDs**, uses `boot ID / shadow generation / random launch token / worker PID / process birth ticks / heartbeat sequence / monotonic age`, reads all selected genuine CPU/GPU/DDR sensors by exact type-bound paths plus BAT/LRP/board AP, and emits peak temperatures. It rejects missing sensors, type changes, a stale boot, bad heartbeat, monitor death, PID reuse, or heartbeat timeout. All records are limited to a fresh private `/data/local/tmp` stage and written using same-directory atomic rename.
+- `scripts/phone/sm8850-live-thermal-trial.py`: default audit makes **zero ADB calls**. The operator must use explicit `--run-readonly`; it re-inventories the real stock One UI zones, validates an exact current-boot manifest in memory, verifies SHA256 of the staged source and manifest, and runs **two finite scenarios**: 3 normal samples; then a controlled worker self-exit after 2 samples, which the sibling supervisor must detect. A monitored worker exit is not a real Android/guest kill and requires no reboot. Cleanup targets only its own randomized stage and fails closed if it cannot verify stage removal.
+- `tests/test_sm8850_thermal_live_trial.py` (9 fixture tests) and `tests/test_sm8850_thermal_live_host.py` (6 no-device host tests) are new. They **PASS on assistant Linux fixtures/mocks**, but remain **PENDING operator CachyOS** on the exact new GitHub revision. Runner now requires **154 total**. No physical live trial has yet been performed.
+
+### Explicit limitation: this is **not P0.2-C/D/E acceptance**
+
+The worker and supervisor are siblings within one root `su` diagnostic session, not yet independently owned/surviving OneOS's Framework-stop cgroup/namespace transfer. The supervisor only prints `WOULD_REQUEST_RETURN_NOT_EXECUTED` on failure; **there is no return.request write, no watchdog manipulation and no reboot**. Firmware-calibrated critical limits are intentionally not fabricated. A third-level fail-safe for supervisor death and a verified unassisted reboot into One UI remain unproven. These must be implemented, tested under bounded short recovery conditions, and independently audited before removing the unconditional 600-second source gate.
+
+Operator smoke command after exact source revision and complete local CI:
+
+```bash
+python3 scripts/phone/sm8850-live-thermal-trial.py  # audit only, no ADB
+python3 scripts/phone/sm8850-live-thermal-trial.py --run-readonly \
+  --adb "$HOME/Android/Sdk/platform-tools/adb" \
+  --output "$HOME/projects/OneiOS/out/sm8850/live-thermal-trial"
+```
+
+**Do not stage the old switcher or run a full iOS takeover to execute this diagnostic.**
