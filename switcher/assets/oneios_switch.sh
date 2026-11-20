@@ -2179,7 +2179,7 @@ if [ "$FRAMEWORK_REBOOT" = 1 ]; then
     if [ "$FW_MODE" = run ]; then
         echo "FULL iOS guest, 8 vCPUs, GPU auto/3D and touch: independent 600s mandatory reboot-return deadline after Framework stop."
     elif [ "$FW_MODE" = probe ]; then
-        echo "SHORT 90s 8-vCPU iOS guest probe: root CPU/GPU/DDR and Samsung thermal observer monitored by independent reboot-only return helpers."
+        echo "SHORT 8-vCPU iOS guest probe: reboot-return requested at verified Framework-stop tick +90s, NOT 90s of guest execution; thermal guard may abort earlier."
         echo "Legacy watchdog a:82 and normal One UI boot are NOT independently qualified. Explicit-risk experiment."
     else
         echo "Framework-only smoke: independent 20s deadline requests reboot after Framework stop."
