@@ -253,3 +253,11 @@ The only two explicit modes are `--fixture-root /tmp/DIR ZONE_INDEX BOOT_UUID` (
 **Tests:** `tests/test_sm8850_thermal_pinned_reader.py` adds **13** offline cases. The exact source/test GitHub blobs match the versions executed in assistant-side Linux with **13/13 PASS**, plus `sh -n` PASS. The strict branch runner now expects **94** cases total. **Operator's CachyOS has not yet run these new 13**, so current confirmed user CI remains **81/81**; do not claim 94/94 before the operator tests it.
 
 The CPU candidate is not a substitute for **hottest genuine CPU/GPU/DDR junction** monitoring. The next safety-design step is a verified per-boot allowlist of all essential junction sensors, firmware-calibrated policy, independent root supervisor, real bounded recovery and independently verified return. Full 600-second takeover remains blocked.
+
+
+## 2026-11-21 operator confirmation: 94/94 local offline PASS
+
+- At exact OneOS commit `934988c9b493cf37d18dd72a1e4f09e1cd6928de`, CachyOS fetched and unpacked the branch, ran the strict local CI runner and reported **`Ran 94 tests ... OK`**, `ONEOS_P0_OFFLINE_94=PASS`, and `ONEOS_FOUR_SENSOR_CI=PASS`.
+- The new 13 `test_sm8850_thermal_pinned_reader.py` cases ALL PASS on the operator's own host, in addition to previous 81. This validates the fixture-mode four-sensor prototype and source syntax on Linux, NOT an actual four-sensor run on the phone.
+- No live four-sensor sample was collected in that command. The last physical CPU mapping remains `cpu-0-5-1` -> `thermal_zone16/temp` on a prior verified boot, with 30.0/30.0/29.6 C. A numeric zone index must be freshly rediscovered and checked per boot.
+- The physical 3-node BAT/LRP/board sampler and offline policy are evidenced separately. Independent post-Framework sensor access, full SoC hottest-junction coverage, vendor-calibrated thresholds, root monitor/supervisor lifecycle, recovery and unassisted reboot are still **NOT QUALIFIED**; full 600-second takeover remains BLOCKED.
