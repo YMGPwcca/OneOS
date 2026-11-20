@@ -6,7 +6,7 @@ set -Eeuo pipefail
 ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 SCRIPT="$ROOT/switcher/assets"
 TESTS="$ROOT/tests"
-EXPECTED_TESTS=123
+EXPECTED_TESTS=139
 
 for name in \
   oneios_switch.sh \
@@ -47,6 +47,12 @@ test -f "$ROOT/scripts/phone/sm8850-thermal-junction-inventory.py" || {
 }
 python3 -m py_compile "$ROOT/scripts/phone/sm8850-thermal-junction-inventory.py" || exit 3
 python3 "$ROOT/scripts/phone/sm8850-thermal-junction-inventory.py" || exit 3
+test -f "$ROOT/scripts/phone/sm8850-thermal-manifest.py" || {
+  echo "P0_LOCAL=FAIL_MISSING_BOOT_MANIFEST_BUILDER" >&2
+  exit 3
+}
+python3 -m py_compile "$ROOT/scripts/phone/sm8850-thermal-manifest.py" || exit 3
+python3 "$ROOT/scripts/phone/sm8850-thermal-manifest.py" || exit 3
 
 LOG="$(mktemp /tmp/oneos-p0-thermal-tests.XXXXXX)"
 trap 'rm -f "$LOG"' EXIT
@@ -67,5 +73,5 @@ grep -xq 'OK' "$LOG" || {
   echo "P0_LOCAL=FAIL_MISSING_TEST_OK" >&2
   exit 5
 }
-echo "ONEOS_P0_OFFLINE_123=PASS"
+echo "ONEOS_P0_OFFLINE_139=PASS"
 echo "P0_SAFETY_STATUS=OFFLINE_SIMULATION_ONLY_NO_PHYSICAL_GUARD"
