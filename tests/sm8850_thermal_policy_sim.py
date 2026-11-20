@@ -33,13 +33,13 @@ class Limits:
         for name in ("lrp", "battery", "board_ap"):
             warn = getattr(self, f"{name}_warn")
             critical = getattr(self, f"{name}_critical")
-            if not (100 <= warn < critical <= 1200):
+            if type(warn) is not int or type(critical) is not int or not (100 <= warn < critical <= 1200):
                 raise ValueError(f"invalid {name} thresholds")
-        if not (0 < self.hysteresis <= 100):
+        if type(self.hysteresis) is not int or not (0 < self.hysteresis <= 100):
             raise ValueError("invalid hysteresis")
-        if not (0 < self.warning_dwell_ms <= 120000):
+        if type(self.warning_dwell_ms) is not int or not (0 < self.warning_dwell_ms <= 120000):
             raise ValueError("invalid warning dwell")
-        if not (0 < self.max_sample_age_ms <= 30000):
+        if type(self.max_sample_age_ms) is not int or not (0 < self.max_sample_age_ms <= 30000):
             raise ValueError("invalid age bound")
 
 
@@ -72,7 +72,7 @@ class Monitor:
             return self._terminal(State.FAIL_CLOSED, "stale boot or run generation")
         if not watcher_alive:
             return self._terminal(State.FAIL_CLOSED, "independent return watcher missing")
-        if not isinstance(now_ms, int) or now_ms < 0:
+        if type(now_ms) is not int or now_ms < 0:
             return self._terminal(State.FAIL_CLOSED, "invalid monotonic clock")
         if self.last_now_ms is not None and now_ms < self.last_now_ms:
             return self._terminal(State.FAIL_CLOSED, "monotonic time reversed")
@@ -80,10 +80,10 @@ class Monitor:
         if not isinstance(sample, dict):
             return self._terminal(State.FAIL_CLOSED, "missing sample")
         sampled_ms = sample.get("sampled_ms")
-        if (not isinstance(sampled_ms, int) or sampled_ms < 0 or sampled_ms > now_ms
+        if (type(sampled_ms) is not int or sampled_ms < 0 or sampled_ms > now_ms
                 or now_ms - sampled_ms > self.limits.max_sample_age_ms):
             return self._terminal(State.FAIL_CLOSED, "stale, future or invalid sample time")
-        if self.last_sample_ms is not None and sampled_ms < self.last_sample_ms:
+        if self.last_sample_ms is not None and sampled_ms <= self.last_sample_ms:
             return self._terminal(State.FAIL_CLOSED, "replayed sample time")
         self.last_sample_ms = sampled_ms
         fields = ("lrp", "battery", "board_ap")
