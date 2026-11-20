@@ -86,7 +86,8 @@ def parse_sample(text, expected_boot, expected_path):
     values = {}
     for key in ("battery_deci_c", "lrp_deci_c", "board_ap_deci_c", "cpu_deci_c"):
         value = fields[key]
-        if not DECIMAL.fullmatch(value) or int(value) > 1200:
+        max_deci = 1500 if key == "cpu_deci_c" else 1200
+        if not DECIMAL.fullmatch(value) or int(value) > max_deci:
             raise Refused("invalid " + key)
         values[key] = int(value)
     raw = fields["cpu_milli_c"]
