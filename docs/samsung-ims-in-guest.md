@@ -1,5 +1,9 @@
 # Samsung's IMS stack in the guest (VoLTE, VoWiFi, SMS over IMS)
 
+**OneOS · Android guest engineering**
+
+[← Docs hub](README.md) · [Project home](../README.md) · [Device catalog](devices.md)
+
 Status (2026-10-29): staged and bound by the scripts behind `ONEOS_GUEST_SEC_IMS=1`.
 The guest-side package-manager change it needs (below) is written
 (`switcher/patches/guest_sec_ims_signature.py`), checked offline (apktool
