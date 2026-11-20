@@ -1,5 +1,9 @@
 # Boot and return handoff
 
+**OneOS · Android guest engineering**
+
+[← Docs hub](README.md) · [Project home](../README.md) · [Device catalog](devices.md)
+
 Settings → Experimental → **Verbose boot**, beside VoLTE and camera fix,
 controls live status on both entry into a guest and return to One UI. It is off
 by default. `LaunchJob` passes a strict boolean to the root launcher, which writes
