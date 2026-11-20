@@ -1,5 +1,9 @@
 # The guest's own screen lock
 
+**OneOS · Android guest engineering**
+
+[← Docs hub](README.md) · [Project home](../README.md) · [Device catalog](devices.md)
+
 A guest system shares the phone's gatekeeper, weaver and keystore daemon with One UI, so its
 framework refuses to set a screen lock: a lock set there would be enrolled for user 0 on the
 phone itself (`switcher/patches/guest_no_gatekeeper.py`, `guest_no_weaver.py`). Until now a guest
