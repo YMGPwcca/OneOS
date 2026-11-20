@@ -290,7 +290,7 @@ def run(adb_path,serial,output_dir):
     )
     try:
         print("SHORT_PROBE_REQUESTING_REAL_IOS_GUEST",flush=True)
-        print("SHORT_PROBE_BUDGET=90S_MAX_FROM_VERIFIED_FRAMEWORK_STOP_NOT_GUEST_EXEC",flush=True)
+        print("SHORT_PROBE_TIMEBASE=REBOOT_REQUEST_DEADLINE_90S_AFTER_FRAMEWORK_STOP",flush=True)
         try:
             remote_root(adb_path,serial,launch,timeout=12)
         except (Refused,INVENTORY.mapper.Blocked) as exc:
