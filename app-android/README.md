@@ -1,5 +1,9 @@
 # OneOS app (Android)
 
+**OneOS · Android app reference**
+
+[← OneOS documentation](../docs/README.md) · [Project home](../README.md)
+
 > **Renamed after 0.3.6:** the stage is `/data/local/tmp/oneos` (was `/data/local/tmp/lineage_stage`), its set-aside copies `oneos.old-<epoch>` / `oneos.trash-<epoch>` (were `lineage_stage.old-*` / `.trash-*`), and the session scripts `oneos_switch.sh`, `guest_prepare.sh`, `guest_start.sh` (were `switch_to_lineage.sh`, `master_prepare.sh`, `master_inner.sh`). The app's root script and `scripts/deploy-phone.sh` rename an old stage and its copies when they are idle.
 
 The OneOS phone app, application id and package `com.fahadali.oneos`: Kotlin,
