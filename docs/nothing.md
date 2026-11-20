@@ -1,5 +1,9 @@
 # Nothing OS guest: building it, and the three guards that refused
 
+**OneOS · Android guest engineering**
+
+[← Docs hub](README.md) · [Project home](../README.md) · [Device catalog](devices.md)
+
 Nothing OS 5.0 as a OneOS guest (0.4.33). Built here from Nothing's own
 firmware for the A024 (Metroid), `Metroid_C5.0-260924-2115`, build
 `AQ3A.250924.001`, Android 17 / SDK 37. The firmware came from
