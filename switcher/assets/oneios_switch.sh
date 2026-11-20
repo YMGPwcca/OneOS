@@ -1979,6 +1979,17 @@ set -- $(stat -f -c '%a %S' /data 2>/dev/null)
 # The app's experimental tick (root's switch verb passes it on).
 [ "$APP" != 1 ] || [ "${ONEIOS_ACK_EXPERIMENTAL:-0}" = 1 ] || refuse "the experimental tick was not given"
 
+# Reject a previously claimed APFS Data clone during check-only as well
+# as session launch. A stale clone must NEVER make preflight look green.
+# A fresh clone must come from the separate root-owned seed rearm process,
+# which archives the old data + marker instead of unlinking the marker.
+if [ "$FRAMEWORK" = 1 ] && [ "$FW_MODE" = probe ]; then
+    [ ! -L "$STAGE/data.consumed" ] && [ ! -e "$STAGE/data.consumed" ] ||
+        framework_block "APFS_DATA_CLONE=CONSUMED; rearm from verified original seed and preserve old snapshot; do NOT remove data.consumed"
+    [ ! -e "$STAGE/image.ready.rearm-pending" ] &&
+        [ ! -L "$STAGE/image.ready.rearm-pending" ] ||
+        framework_block "APFS_DATA_REARM=INCOMPLETE; preserve evidence and repair stage before probe"
+fi
 echo "Preflight passed (runtime $R_VERSION, xnuhost $R_XNUHOST, image iOS $I_VERSION $I_BUILD format $I_FORMAT, busybox $BB, SELinux $(getenforce 2>/dev/null))"
 if [ "$MODE" = --check ] || [ "$MODE" = --framework-check ]; then
     if [ "$FRAMEWORK" = 1 ] && [ "$FW_MODE" = run ]; then
