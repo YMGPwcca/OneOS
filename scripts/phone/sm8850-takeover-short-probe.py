@@ -224,6 +224,17 @@ def run(adb_path,serial,output_dir):
     if "report" not in witness_result:
         raise Refused("no independently observed healthy new One UI boot: "+
                       witness_result.get("error","host witness timeout"))
+    # A healthy postboot alone does not demonstrate that xnuhost started.
+    # Preserve source launch evidence separately from reboot observations.
+    launch_log=remote_root(adb_path,serial,
+                           f"tail -n 110 {STAGE}/logs/probe-{token}.log",timeout=12)
+    artifact["switch_launch_log_tail"]=launch_log[-12500:]
+    artifact["framework_stop_confirmed_in_log"]=(
+        "Framework stopped, app groups drained" in launch_log)
+    artifact["xnuhost_launch_marker_observed"]=(
+        "=== ONEIOS SESSION LAUNCHED ===" in launch_log)
+    artifact["thermal_guard_armed_marker_observed"]=(
+        "P0_SHORT_PROBE_THERMAL=ARMED_ROOT_SENSOR_GUARD_NOT_PRODUCTION_CERTIFIED" in launch_log)
     artifact["witness"]=witness_result["report"]
     artifact["recovery_certified"]=False
     artifact["unassisted_return_proven"]=False
@@ -235,7 +246,10 @@ def run(adb_path,serial,output_dir):
         json.dump(artifact,f,indent=2,ensure_ascii=False)
         f.write("\n")
     out.chmod(0o600)
-    print("SHORT_PROBE=NEW_NORMAL_ONEUI_BOOT_OBSERVED_AFTER_REAL_GUEST_ATTEMPT")
+    print("SHORT_PROBE=NEW_NORMAL_ONEUI_BOOT_OBSERVED_AFTER_PROBE_REQUEST")
+    print("THERMAL_GUARD_ARMED="+str(artifact["thermal_guard_armed_marker_observed"]).upper())
+    print("FRAMEWORK_STOP_MARKER="+str(artifact["framework_stop_confirmed_in_log"]).upper())
+    print("XNUHOST_LAUNCH_MARKER="+str(artifact["xnuhost_launch_marker_observed"]).upper())
     print("HISTORICAL_RETURN_CORRELATED="+str(
         artifact["witness"]["historical_return_record_correlated_to_pre_smoke_boot"]).upper())
     print("UNASSISTED_RETURN=OPERATOR_ATTESTATION_REQUIRED")
