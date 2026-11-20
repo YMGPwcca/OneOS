@@ -1,5 +1,9 @@
 # App redesign 2: Choose a system and Setting up (full edition)
 
+**OneOS · App design & maintenance**
+
+[← Docs hub](../README.md) · [Project home](../../README.md) · [Device catalog](../devices.md)
+
 The spec is `SystemPicker.dc.html` and `SettingUp.dc.html` in the mockup
 (`oneos-notes/2026-10-24/design-canvas/project/`). The shared look is in
 `redesign-2.md`. Both screens use a plain One UI bar (back button, no
