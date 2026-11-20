@@ -34,7 +34,7 @@ verified by another destructive full run.
 
 ## What OneOS explicitly does — and does not do — in this experiment
 
-- The physical SM8850 profile uses a **mandatory reboot to One UI**, not the S24-style in-place return. It keeps the existing device-side deadline, stop watcher, legacy watchdog feeder and recovery fallbacks, but the legacy watchdog node/driver and timeout remain **UNVERIFIED_REBOOT_ONLY**.
+- The physical SM8850 profile uses a **mandatory reboot to One UI**, not an in-place Android Framework handback. It keeps the existing device-side deadline, stop watcher, legacy watchdog feeder and recovery fallbacks, but the legacy watchdog node/driver and timeout remain **UNVERIFIED_REBOOT_ONLY**.
 - `--framework-session run` keeps the exact current **8 vCPU / 4 GiB / GPU auto / SHM display / 1080x2340 @ 60 / 600s** configuration; `GPU auto` is not a guarantee of 3D in every subsequent run.
 - Its `xnuhost` command is `--mode bench` with `--set bridges=0` to preserve exclusive-touch safety. **OneiOS's thermal bridge and normal CPU placement bridge are therefore inactive**. Linux kernel/firmware thermal limits are still active. OneOS does **not** yet carry a separate scoped thermal guard for the bench path, so another long full-run should not be called thermally accepted.
 - The allowed CPU mask `0-7` is an admission check, **not eight distinct CPU affinities**. A guest framebuffer post is **not measured animation FPS**.
