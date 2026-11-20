@@ -1366,7 +1366,9 @@ case "$MODE" in
             # Do not claim full-core execution unless the guest's *inherited*
             # CPU mask actually includes CPUs 0-7. No governor or cpufreq writes.
             host_online=$(cat /sys/devices/system/cpu/online 2>/dev/null)
-            host_allowed=$(awk '/^Cpus_allowed_list:/ {print $2}' /proc/$/status)
+            # The awk child inherits this shell's cpuset and affinity. Reading
+            # /proc/self/status avoids PID expansion issues in Android mksh.
+            host_allowed=$(awk '/^Cpus_allowed_list:/ {print $2}' /proc/self/status)
             [ "$host_online" = 0-7 ] && [ "$host_allowed" = 0-7 ] ||
                 die_inner "all 8 SM8850 host cores not accessible (online=$host_online allowed=$host_allowed)"
             echo "ONEIOS_TAKEOVER_CPU=8 host_online=$host_online host_allowed=$host_allowed"
