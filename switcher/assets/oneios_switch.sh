@@ -2349,6 +2349,11 @@ if [ "$FRAMEWORK" = 1 ]; then
         # launch. The independent framework-deadline guard stays active
         # even if xnuhost hangs or USB disconnects.
         fw_seconds=600
+    fi
+    if [ "$FW_MODE" = run ] || [ "$FW_MODE" = probe ]; then
+        # Both paths launch the SAME real 8-vCPU guest. The 90s profile
+        # must apply the same guest memory / map-count prerequisites,
+        # with the original sysctl saved for reboot-only return.
         [ "$(awk '/^MemAvailable:/ {print $2}' "$P/meminfo")" -ge 5500000 ] ||
             fw_recover "available memory is below the benchmark minimum"
         framework_configure || fw_recover "could not set and verify vm.max_map_count"
