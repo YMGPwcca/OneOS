@@ -84,7 +84,10 @@ FRAMEWORK_REBOOT=0
 case "$MODE:$2" in
     --framework-audit-reboot:*|--framework-check:reboot-smoke|--framework-session:reboot-smoke)
         FRAMEWORK_REBOOT=1 ;;
-    --feed:*)
+    --feed:*|--watch:*|--keys:*|--keys-poll:*|--framework-deadline:*|--stop-loop:*|--watchdog-health:*|--watchdog-supervise:*)
+        # These are independent children of the already armed session.
+        # The marker is written before they start; all must use the same
+        # first-keepalive grace window (especially the early watcher).
         [ "$FRAMEWORK" != 1 ] ||
             [ "$(cat "$CTL/framework.return" 2>/dev/null)" != reboot ] || FRAMEWORK_REBOOT=1 ;;
 esac
