@@ -149,7 +149,7 @@ case "$MODE" in
                     *) reason=missing_or_invalid_sensor
                        detail= ;;
                 esac
-                atom thermal.guard.fault "$BOOT $GEN $ $BIRTH $reason ${detail}" || :
+                atom thermal.guard.fault "$BOOT $GEN $$ $BIRTH $reason ${detail}" || :
                 echo "P0_THERMAL_GUARD=FAIL_CLOSED $reason ${detail}"
                 exit 4
             fi
