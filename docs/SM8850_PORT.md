@@ -1,6 +1,6 @@
 # OneiOS on Galaxy S26 Ultra (SM8850 / m3q)
 
-Status: **hardware diagnostics only**. This fork does **not** enable an iOS session or guarantee One UI 9.0 recovery.
+Status (2026-11-20): **physical iOS 27.0.1 guest boot and first frame OBSERVED through the separately authorized root-only Framework experiment**; `xnuhost` ran ~600.6 s with real KGSL activity. **OneOS app switching stays BLOCKED** for this device. The user reported severe lag/heat; independent watchdog, thermal safety and unassisted reboot-return remain **NOT VERIFIED**. Read [the full current evidence ledger](SM8850_ONEIOS_FULL_RUN_STATUS.md).
 
 ## Verified target (2026-11-16)
 
@@ -18,15 +18,27 @@ Status: **hardware diagnostics only**. This fork does **not** enable an iOS sess
 - OneiosSystem.canSwitchOn allows only s-ultra-8650 (S24 Ultra). This is intentionally separate from offeredOn.
 - The experimental acknowledgement cannot override the SM8850 BLOCK gate.
 - The UI flow cannot offer SWITCH when switchAllowed=false; OneiosJob separately checks OneiosSystem.gate before running scripts.
-- The root oneios_switch.sh model/device/SoC gate remains unchanged. It will refuse an SM8850 switch even if the app is modified.
-- Android host hardware tests do not prove full iOS Metal/SpringBoard operation or recovery.
+- The normal `oneios_switch.sh session/--check` path remains scoped to the S24 profile and refuses SM8850. **Separate, root-owned, firmware-exact** `--framework-check run` / `--framework-session run` experimental entrypoints exist for SM8850 and require their own full-risk acknowledgment. This is not an Android app allowlist change.
+- The 2026-11-20 guest ready and first-frame markers establish that a hosted iOS session drew to the panel; they do **not** prove fully working Metal/Vulkan, smooth SpringBoard UI, thermal safety or a complete unassisted return.
 
-## Next milestones
+## Next milestones (2026-11-20; live guest has been observed)
 
-1. Build the Android app and run Kotlin/JUnit tests; verify S24 functionality remains unchanged.
-2. Run selected display, touch, haptics, audio and vendor HAL diagnostics while One UI remains running. Avoid modifying wireless state without a verified restore procedure.
-3. Investigate CPU scheduling/thermal behavior and validate the companion OneiOS CPU regression fixture.
-4. Implement and validate One UI 9.0 recovery, ADB continuity and rollback independently before considering an SM8850 session allowlist.
-5. Only after recovery validation, evaluate hosted XNU, image set, Metal and SpringBoard.
+1. **P0:** independent thermal telemetry/guard for the actual
+   `bench/bridges=0` root-only session; retain Samsung kernel limits, no
+   broad `bridges=1` or global governor edits.
+2. **P0:** read-only analysis of the archived `return.outcome`, watcher and
+   feeder logs after root is available; qualify actual watchdog ownership,
+   600-second requester, and **unassisted** One UI reboot separately.
+3. **P1:** investigate Spotlight and host trap/futex overhead, and only
+   consider an opt-in host-affinity A/B after local tests; the mask 0–7
+   is not proof of eight distinct per-vCPU cores.
+4. **P2:** correlate actual 3D KGSL fences with posted buffer gaps; do not
+   equate a first frame or `posts/s` with sustained 60 FPS.
+5. **P3:** run local CachyOS builds/tests before further controlled,
+   short device verification; do not change the OneOS Android app
+   safety allowlist on the basis of this experimental session.
+
+For the complete timeline, measured data, exact commands and acceptance
+limits see [SM8850_ONEIOS_FULL_RUN_STATUS.md](SM8850_ONEIOS_FULL_RUN_STATUS.md).
 
 Companion: https://github.com/YMGPwcca/OneiOS/tree/feat/oneios-sm8850-m3q
