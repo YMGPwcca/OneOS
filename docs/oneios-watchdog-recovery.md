@@ -1,5 +1,36 @@
 # OneiOS watchdog recovery
 
+## New SM8850 physical evidence (2026-11-20)
+
+**The original preflight-only SM8850 limitations below are historical, not
+proof that an iOS guest was never booted.** The explicit root-only legacy
+watchdog profile has now stopped Android Framework, booted hosted iOS 27.0.1
+and shown the guest's first frame. The captured `xnuhost` process ran
+~600.6 s; after it stopped, the Android boot reason was
+`reboot,oneios-sm8850-reboot-return`. A prior first full-run attempt
+failed in the inner mount namespace and requested an immediate
+`switch-failed` reboot; later F2FS/BusyBox isolated mount testing passed
+and that launch bug was repaired.
+
+**This evidence does NOT identify the SM8850 watchdog driver/timeout, prove
+its first-ping or handback properties, prove the exact deadline requester,
+or exclude a human/manual return step.** Following the latest real full
+run, DirtyFrag's ephemeral root was lost, so the unprivileged ADB receipt
+could not read the root-owned `return.outcome`. Keep
+`WATCHDOG_QUALIFICATION=UNVERIFIED_REBOOT_ONLY` and
+`UNASSISTED_RETURN_TO_ONEUI=NOT_VERIFIED`.
+Do not replace the device-side deadline, lower thermal guard, relax the
+root app restrictions or open watchdog nodes just to claim qualification.
+
+The exact root-only SM8850 mode is **separate** from the normal S24
+switch path and OneOS Android **app/UI/job**, which remain blocked for
+SM8850. The full run uses `xnuhost --mode bench --set bridges=0`, so its
+OneiOS thermal bridge is **inactive** while the Linux kernel/firmware
+thermal protection persists. The user reported considerable heat.
+See [the 2026-11-20 experiment ledger](SM8850_ONEIOS_FULL_RUN_STATUS.md).
+
+
+
 ## SM-S948B source provenance
 
 The target is Samsung Galaxy S26 Ultra **SM-S948B / m3q / SM8850**, One UI 9.0
