@@ -1,5 +1,9 @@
 # Credits
 
+**OneOS · Project reference**
+
+[← OneOS documentation](docs/README.md) · [Project home](README.md)
+
 OneOS is built on other people's work. This file lists it, with the terms it
 comes under. OneOS's own code is licensed under the Apache License 2.0 (`LICENSE`, `NOTICE`).
 
