@@ -29,7 +29,7 @@ if [ "$MODE" = --audit-only ]; then
     echo "Operations: exact ADB identity check, isolated /data/local/tmp staging,"
     echo "SHA-256 verification, three root read-only samples, cleanup."
     echo "Reader: BAT, LRP, BOARD_AP; never sysfs traversal or writes."
-    echo "Guest/Framework/watchdog/governors: NO ACCESS"
+    echo "Guest/Framework control/watchdog/governors: NO ACTION"
     echo "To explicitly collect: --run-readonly"
     exit 0
 fi
@@ -106,8 +106,10 @@ for name in "${FILES[@]}"; do
 done
 
 echo "===== THREE ROOT READ-ONLY SAMPLES (ONE UI STILL RUNNING) ====="
-timeout 30 "$ADB" -s "$SERIAL" shell su -c \
-    "/system/bin/sh $REMOTE/oneios_sm8850_thermal_shadow.sh --live-oneui-readonly 3" \
+# One complete remote command keeps the KernelSU su -c argument intact.
+# -T disables PTY/CRLF transformations that would corrupt strict receipts.
+timeout 30 "$ADB" -s "$SERIAL" shell -T \
+    "su -c '/system/bin/sh $REMOTE/oneios_sm8850_thermal_shadow.sh --live-oneui-readonly 3'" \
     2>&1 | tee "$LOG"
 
 for tick in 1 2 3; do
