@@ -105,9 +105,9 @@ def run_trial(adb, serial, source=SHELL):
                 remote=f'{stage}/{name}'
                 invoke(adb,serial,'push',str(file),remote,timeout=15)
                 expected=hashlib.sha256(file.read_bytes()).hexdigest()
-                digest=invoke(adb,serial,'shell','sha256sum',remote).split()[0]
-                if expected!=digest:
-                    raise Refused('stage SHA mismatch for '+name)
+                digest_fields=invoke(adb,serial,'shell','sha256sum',remote).split()
+                if not digest_fields or expected!=digest_fields[0]:
+                    raise Refused('stage SHA mismatch or empty hash for '+name)
             for fault,ticks,marker in (
                 ('normal',3,'THERMAL_TRIAL=PASS_OBSERVER_SUPERVISOR_ONLY_NO_PHYSICAL_RETURN'),
                 ('monitor-exit-after-two',4,'THERMAL_TRIAL=EXPECTED_MONITOR_DEATH_DETECTED_NO_PHYSICAL_RETURN'),
