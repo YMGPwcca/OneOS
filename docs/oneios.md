@@ -1,13 +1,17 @@
 # iOS 27 (OneiOS)
 
-> **SM8850 fork safety override (2026-11-18).** This fork's `feat/oneios-sm8850-m3q`
-> branch exposes OneiOS hardware diagnostics on Galaxy S26 Ultra
-> (SM-S948*/m3q/SM8850), but **does not authorize an iOS switch** there.
-> `OneiosSystem.canSwitchOn`, the app flow and `oneios_switch.sh` all
-> refuse an unverified device. Upstream's broader "not this phone"
-> acknowledgement is not permission to bypass recovery gates. The S24 Ultra
-> remains the only switch-allowlisted profile until independent SM8850
-> recovery acceptance is documented in `docs/SM8850_PORT.md`.
+> **SM8850 status update (2026-11-20).** On this fork's
+> `feat/sm8850-reboot-smoke` branch, the *separate*, exact-firmware,
+> root-owned Framework experiment successfully stopped One UI Framework,
+> ran iOS 27.0.1 for ~600.6 s and posted the guest's first frame on
+> Galaxy S26 Ultra SM-S948B/m3q/SM8850. There was genuine KGSL activity,
+> but the UI was laggy, the device became very hot, and **unassisted return,
+> independent watchdog qualification and thermal safety are NOT verified**.
+> The **OneOS app** (`OneiosSystem.canSwitchOn`, app flow and job gate)
+> remains **BLOCKED** for SM8850; a root-only lab experiment is not an app
+> switch allowlist. The normal S24 root entrypoint is still restricted.
+> See [SM8850 physical evidence](SM8850_ONEIOS_FULL_RUN_STATUS.md) and
+> [app/root scope](SM8850_PORT.md) for the distinction.
 >
 
 A system kind of its own in this fork (`akshaynexus/OneOS`, branch `oneios`): Apple's iOS 27 as a OneOS-style
@@ -20,7 +24,7 @@ restart. If that ever does nothing, **Power + Volume Down held until the phone r
 OneiOS is https://github.com/akshaynexus/OneiOS. Its plan is `docs/plan.md` there; the contract between this fork
 and its runtime is `oneos/interface.md` there ("session ABI 1"). This page is the fork's side.
 
-**On the phone so far** (the S24 Ultra, 2026-11-11, 0.4.76 to 0.4.79, runtime 0.1.6): the preflight, the zygote
+**Historical S24 Ultra-only observations** (2026-11-11, 0.4.76 to 0.4.79, runtime 0.1.6; they are not a description of SM8850's 2026-11-20 run): the preflight, the zygote
 stop, the watchdog feeder and the in-place return ran, twice to One UI in 45 s. **xnuhost has never started
 there**, and one return stood still with a black screen; both causes are found and fixed in 0.4.81 ("What the
 first runs on the phone found", below). Everything after xnuhost's start is still unit tests only.
