@@ -82,6 +82,22 @@ def line_manifest(snapshot):
 def prepare(adb_path,serial):
     sha(SWITCH); sha(GUARD)
     before=INVENTORY.mapper.identity(adb_path,serial)
+    # Guard the one-shot clone BEFORE uploading or changing any staged
+    # switch/monitor source. Preflight-only validation used to miss this.
+    clone_state=remote_root(adb_path,serial,(
+        f"if test -e {STAGE}/data.consumed || test -L {STAGE}/data.consumed; "
+        "then echo CONSUMED; "
+        f"elif test -e {STAGE}/image.ready.rearm-pending || "
+        f"test -L {STAGE}/image.ready.rearm-pending; "
+        "then echo REARM_INCOMPLETE; else echo UNUSED; fi"
+    ),timeout=10)
+    if clone_state=="CONSUMED":
+        raise Refused("APFS_DATA_CLONE=CONSUMED: rearm from the verified untouched "
+                      "source in OneiOS; preserve consumed snapshot+marker. "
+                      "Do not delete data.consumed or rerun --run-90s yet.")
+    if clone_state!="UNUSED":
+        raise Refused("APFS_DATA_CLONE="+clone_state+
+                      ": stage requires manual integrity recovery before takeover.")
     snapshot=INVENTORY.collect(adb_path,serial)
     manifest,boot,zones=line_manifest(snapshot)
     if before!=INVENTORY.mapper.identity(adb_path,serial) or boot!=before["boot_id"]:
