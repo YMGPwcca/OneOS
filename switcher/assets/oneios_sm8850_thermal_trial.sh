@@ -177,9 +177,9 @@ worker() {
 supervisor() {
     target=$1
     [ "$target" -gt 1 ] 2>/dev/null || blocked invalid_monitored_pid
-    supervisor_birth=$(birth_ticks "$")
+    supervisor_birth=$(birth_ticks "$$")
     [ -n "$supervisor_birth" ] || blocked supervisor_birth_unavailable
-    atomic supervisor.identity "$ $supervisor_birth" || blocked supervisor_identity_write
+    atomic supervisor.identity "$$ $supervisor_birth" || blocked supervisor_identity_write
     BIRTH=$(birth_ticks "$target")
     [ -n "$BIRTH" ] || blocked monitor_disappeared_before_start
     last_seq=0; last_change=$(uptime_ms); attempts=0
@@ -250,10 +250,10 @@ esac
 # Finite smoke only; two SIBLING root processes, outside xnuhost.
 # The setsid parent record proves the trial persisted after its ADB
 # launch command ended. It does not prove survival of Framework stop.
-parent_birth=$(birth_ticks "$")
-parent_sid=$(sed 's/^.*) //' "/proc/$/stat" 2>/dev/null | awk '$4 ~ /^[0-9]+$/ {print $4; exit}')
+parent_birth=$(birth_ticks "$$")
+parent_sid=$(sed 's/^.*) //' "/proc/$$/stat" 2>/dev/null | awk '$4 ~ /^[0-9]+$/ {print $4; exit}')
 [ -n "$parent_birth" ] && [ -n "$parent_sid" ] || blocked parent_identity_unavailable
-atomic trial.identity "$ $parent_birth $parent_sid" || blocked trial_identity_write
+atomic trial.identity "$$ $parent_birth $parent_sid" || blocked trial_identity_write
 if [ "$MODE" = --fixture-root ]; then
     sh "$SELF" --fixture-root "$ROOT" "$STAGE" "$TICKS" "$FAULT" __worker &
     MONPID=$!
