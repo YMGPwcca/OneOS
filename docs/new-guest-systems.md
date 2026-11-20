@@ -1,5 +1,9 @@
 # Adding another guest system
 
+**OneOS · Android guest engineering**
+
+[← Docs hub](README.md) · [Project home](../README.md) · [Device catalog](devices.md)
+
 What two ports (ColorOS 17 from the Find N6 and Find X9 Ultra, then Pixel 11
 Fold) showed about bringing up a new system: what any image gets for free,
 what has to be pinned per build, and what depends on the OS family.
