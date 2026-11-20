@@ -156,8 +156,10 @@ def prepare(adb_path,serial):
 def preflight(adb_path,serial):
     cmd=f"/system/bin/sh {STAGE}/oneios_switch.sh --framework-check probe"
     output=remote_root(adb_path,serial,cmd,timeout=90)
-    if "PREFLIGHT OK" not in output or "P0_FULL_600S_TAKEOVER=BLOCKED" in output:
-        raise Refused("short probe preflight did not pass: "+output[-800:])
+    if ("PREFLIGHT OK" not in output or
+        "P0_THERMAL_GUARD=READ_ONLY_CURRENT_BOOT_READY_NOT_CERTIFIED" not in output or
+        "P0_FULL_600S_TAKEOVER=BLOCKED" in output):
+        raise Refused("short probe thermal admission did not pass: "+output[-1000:])
     return output
 
 def run(adb_path,serial,output_dir):
