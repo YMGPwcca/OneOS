@@ -1,5 +1,9 @@
 # The guest zygote's sockets
 
+**OneOS · Android guest engineering**
+
+[← Docs hub](README.md) · [Project home](../README.md) · [Device catalog](devices.md)
+
 The guest's `/dev` is a bind of One UI's, so `/dev/socket` is shared. The
 guest's `zygote_exec` (`switcher/native/zygote_launcher.c`) creates
 `/dev/socket/zygote` and `/dev/socket/usap_pool_primary`. One UI's init uses
