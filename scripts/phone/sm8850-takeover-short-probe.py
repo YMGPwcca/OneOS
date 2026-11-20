@@ -226,8 +226,15 @@ def run(adb_path,serial,output_dir):
                       witness_result.get("error","host witness timeout"))
     # A healthy postboot alone does not demonstrate that xnuhost started.
     # Preserve source launch evidence separately from reboot observations.
-    launch_log=remote_root(adb_path,serial,
-                           f"tail -n 110 {STAGE}/logs/probe-{token}.log",timeout=12)
+    # DirtyFrag/root availability may change after an actual reboot. Host
+    # witness of healthy One UI is still valid even if postboot su is gone.
+    try:
+        launch_log=remote_root(adb_path,serial,
+                               f"tail -n 110 {STAGE}/logs/probe-{token}.log",timeout=12)
+        artifact["postboot_root_log_accessible"]=True
+    except (Refused,INVENTORY.mapper.Blocked):
+        launch_log=""
+        artifact["postboot_root_log_accessible"]=False
     artifact["switch_launch_log_tail"]=launch_log[-12500:]
     artifact["framework_stop_confirmed_in_log"]=(
         "Framework stopped, app groups drained" in launch_log)
