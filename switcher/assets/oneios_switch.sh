@@ -1949,8 +1949,22 @@ set -- $(stat -f -c '%a %S' /data 2>/dev/null)
 
 echo "Preflight passed (runtime $R_VERSION, xnuhost $R_XNUHOST, image iOS $I_VERSION $I_BUILD format $I_FORMAT, busybox $BB, SELinux $(getenforce 2>/dev/null))"
 if [ "$MODE" = --check ] || [ "$MODE" = --framework-check ]; then
+    if [ "$FRAMEWORK" = 1 ] && [ "$FW_MODE" = run ]; then
+        # Check-only remains useful for passive diagnostics and APFS staging;
+        # it is not permission to stop Framework or launch a hot iOS guest.
+        echo "P0_FULL_600S_TAKEOVER=BLOCKED_UNQUALIFIED_THERMAL_GUARD"
+        echo "P0_RECOVERY=UNASSISTED_REBOOT_AND_WATCHDOG_NOT_CERTIFIED"
+    fi
     echo "PREFLIGHT OK"
     exit 0
+fi
+if [ "$FRAMEWORK" = 1 ] && [ "$FW_MODE" = run ]; then
+    # Source-level P0 admission lock. There is intentionally no env/file/ACK
+    # bypass: neither a fixture test nor a preflight pass qualifies a
+    # production thermal guard or an unassisted reboot. Applies before the
+    # one-shot APFS Data clone can be consumed and before Framework stops.
+    # This does not retrofit the already staged on-phone copy of this script.
+    framework_block "P0_FULL_600S_TAKEOVER=BLOCKED_UNQUALIFIED_THERMAL_GUARD; independent root-side guard and unassisted reboot-return are NOT certified"
 fi
 if [ "$FRAMEWORK" = 1 ] && [ "$FW_MODE" = run ]; then
     # Consume this independently cloned APFS Data BEFORE the first possible
