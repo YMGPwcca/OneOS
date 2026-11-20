@@ -21,6 +21,7 @@ import secrets
 import subprocess
 import sys
 import tempfile
+import time
 
 HERE=Path(__file__).resolve().parent
 ROOT=HERE.parent.parent
@@ -70,14 +71,15 @@ def remote_clean(adb, serial, stage):
     if not re.fullmatch(r'/data/local/tmp/oneos-p0-live-[a-f0-9]{16}',stage):
         raise Refused('unsafe cleanup stage path')
     names=('oneios_sm8850_thermal_trial.sh','manifest.v1','identity.v1',
-           'monitor.identity','monitor.snapshot','monitor.heartbeat','monitor.done','monitor.fault')
+           'monitor.identity','monitor.snapshot','monitor.heartbeat','monitor.done','monitor.fault',
+           'supervisor.identity','trial.identity','trial.out','trial.parent')
     files=' '.join(stage+'/'+name for name in names)
     # Temporary writes have suffix .tmp.<pid>; remove only manifest-defined
     # tmp artifacts in this private staging directory.
     command=f"su -c 'rm -f {files} {stage}/monitor.*.tmp.* && rmdir {stage}'"
     invoke(adb,serial,'shell','-T',command,timeout=20)
 
-def run_trial(adb, serial, source=SHELL):
+def run_trial(adb, serial, source=SHELL, detached=False):
     source_sha=source_hash(source)
     before=INVENTORY.mapper.identity(adb,serial)
     survey=INVENTORY.collect(adb,serial)
@@ -127,31 +129,72 @@ def run_trial(adb, serial, source=SHELL):
             if invoke(adb,serial,'shell','-T',
                       "su -c 'stat -c %u "+stage+"'")!='0':
                 raise Refused('root staging directory ownership check failed')
-            for fault,ticks,marker in (
-                ('normal',3,'THERMAL_TRIAL=PASS_OBSERVER_SUPERVISOR_ONLY_NO_PHYSICAL_RETURN'),
-                ('monitor-exit-after-two',4,'THERMAL_TRIAL=EXPECTED_MONITOR_DEATH_DETECTED_NO_PHYSICAL_RETURN'),
-            ):
-                # The two scenarios need distinct stages to avoid stale
-                # monitor.done, fault and heartbeat metadata from a prior run.
-                # Remove own control outputs before each scenario only.
-                if results:
-                    invoke(adb,serial,'shell','-T',
-                           "su -c 'rm -f "+' '.join(stage+'/'+n for n in
-                           ('monitor.identity','monitor.snapshot','monitor.heartbeat','monitor.done','monitor.fault'))+"'",
-                           timeout=12)
-                cmd=f"su -c '/system/bin/sh {stage}/oneios_sm8850_thermal_trial.sh --live-oneui-readonly {stage} {ticks} {fault}'"
-                output=invoke(adb,serial,'shell','-T',cmd,timeout=90)
-                if marker not in output:
-                    raise Refused('expected observer/supervisor result absent: '+fault)
-                if fault == 'normal':
-                    if ('MONITOR=FINITE_SMOKE_DONE samples=3 physical_return=NO' not in output or
-                        'SUPERVISOR=MONITOR_COMPLETED_SEPARATE_PID' not in output):
-                        raise Refused('normal monitor/supervisor proof absent')
+            if detached:
+                # Launch a bounded root-only trial in a NEW session with
+                # stdin/out/err disconnected from its original adb shell.
+                # Reconnect separately to read the completion receipts.
+                cmd=(f"su -c 'command -v setsid >/dev/null 2>&1 || exit 10; "
+                     f"setsid /system/bin/sh {stage}/oneios_sm8850_thermal_trial.sh "
+                     f"--live-oneui-readonly {stage} 4 normal >{stage}/trial.out "
+                     f"2>&1 </dev/null & echo $! >{stage}/trial.parent'")
+                invoke(adb,serial,'shell','-T',cmd,timeout=12)
+                accepted='THERMAL_TRIAL=PASS_OBSERVER_SUPERVISOR_ONLY_NO_PHYSICAL_RETURN'
+                output=''
+                for _ in range(35):
+                    result=INVENTORY.mapper.adb_call(adb,serial,
+                        ('shell','-T',f"su -c 'cat {stage}/trial.out'"),timeout=7)
+                    if result.returncode == 0:
+                        output=result.stdout.strip()
+                        if accepted in output:
+                            break
+                        if 'THERMAL_TRIAL=BLOCKED_' in output:
+                            raise Refused('detached worker reported failure')
+                    time.sleep(1)
                 else:
-                    if ('MONITOR=INJECTED_EXIT_NO_REBOOT' not in output or
-                        'SUPERVISOR=WOULD_REQUEST_RETURN_NOT_EXECUTED reason=monitor_dead' not in output):
-                        raise Refused('monitor death did not trigger supervisor alert')
-                results.append({'scenario':fault,'stdout':output,'evidence':marker})
+                    raise Refused('detached root trial has no bounded completion receipt')
+                if ('MONITOR=FINITE_SMOKE_DONE samples=4 physical_return=NO' not in output
+                    or 'SUPERVISOR=MONITOR_COMPLETED_SEPARATE_PID samples=4 physical_return=NO' not in output):
+                    raise Refused('detached worker/supervisor receipt absent')
+                def receipt(name):
+                    return invoke(adb,serial,'shell','-T',
+                        f"su -c 'cat {stage}/{name}'").split()
+                parent=receipt('trial.identity')
+                monitor=receipt('monitor.identity')
+                supervisor=receipt('supervisor.identity')
+                if (len(parent)!=3 or len(monitor)!=2 or len(supervisor)!=2 or
+                    not all(part.isdecimal() for part in parent+monitor+supervisor) or
+                    parent[0]!=parent[2] or  # setsid: new leader SID == PID
+                    len({parent[0],monitor[0],supervisor[0]})!=3):
+                    raise Refused('detached session or distinct PID evidence invalid')
+                results=[{'scenario':'detached-normal','stdout':output,
+                          'evidence':accepted,'trial_pid':parent[0],
+                          'worker_pid':monitor[0],'supervisor_pid':supervisor[0]}]
+            else:
+                for fault,ticks,marker in (
+                    ('normal',3,'THERMAL_TRIAL=PASS_OBSERVER_SUPERVISOR_ONLY_NO_PHYSICAL_RETURN'),
+                    ('monitor-exit-after-two',4,'THERMAL_TRIAL=EXPECTED_MONITOR_DEATH_DETECTED_NO_PHYSICAL_RETURN'),
+                ):
+                    # The two scenarios need distinct stages to avoid stale
+                    # monitor.done, fault and heartbeat metadata from a prior run.
+                    # Remove own control outputs before each scenario only.
+                    if results:
+                        invoke(adb,serial,'shell','-T',
+                               "su -c 'rm -f "+' '.join(stage+'/'+n for n in
+                               ('monitor.identity','monitor.snapshot','monitor.heartbeat','monitor.done','monitor.fault'))+"'",
+                               timeout=12)
+                    cmd=f"su -c '/system/bin/sh {stage}/oneios_sm8850_thermal_trial.sh --live-oneui-readonly {stage} {ticks} {fault}'"
+                    output=invoke(adb,serial,'shell','-T',cmd,timeout=90)
+                    if marker not in output:
+                        raise Refused('expected observer/supervisor result absent: '+fault)
+                    if fault == 'normal':
+                        if ('MONITOR=FINITE_SMOKE_DONE samples=3 physical_return=NO' not in output or
+                            'SUPERVISOR=MONITOR_COMPLETED_SEPARATE_PID' not in output):
+                            raise Refused('normal monitor/supervisor proof absent')
+                    else:
+                        if ('MONITOR=INJECTED_EXIT_NO_REBOOT' not in output or
+                            'SUPERVISOR=WOULD_REQUEST_RETURN_NOT_EXECUTED reason=monitor_dead' not in output):
+                            raise Refused('monitor death did not trigger supervisor alert')
+                    results.append({'scenario':fault,'stdout':output,'evidence':marker})
             if INVENTORY.mapper.identity(adb,serial)!=before:
                 raise Refused('Android identity changed after live trial')
         finally:
@@ -164,6 +207,7 @@ def run_trial(adb, serial, source=SHELL):
             'device':before,'zone_count':zones,'source_sha256':source_sha,
             'sensor_group_peaks':survey['hottest_by_group'],'runs':results,
             'monitor_and_supervisor_are_sibling_processes':True,
+            'launcher_adb_command_detach_tested':detached,
             'independent_after_framework_stop_proven':False,
             'supervisor_death_watchdog_proven':False,
             'vendor_thermal_limits_qualified':False,
@@ -173,17 +217,19 @@ def run_trial(adb, serial, source=SHELL):
 
 def main(argv=None):
     p=argparse.ArgumentParser(description=__doc__)
-    p.add_argument('--run-readonly',action='store_true')
+    mode=p.add_mutually_exclusive_group()
+    mode.add_argument('--run-readonly',action='store_true')
+    mode.add_argument('--run-detached-readonly',action='store_true')
     p.add_argument('--adb',default=str(Path.home()/'Android/Sdk/platform-tools/adb'))
     p.add_argument('--output',type=Path,default=Path('out/sm8850/live-thermal-trial'))
     args=p.parse_args(argv)
-    if not args.run_readonly:
+    if not args.run_readonly and not args.run_detached_readonly:
         print('LIVE_THERMAL=AUDIT_ONLY_NO_ADB; real root monitor and sibling heartbeat supervisor')
         print('3 normal snapshots + safe monitor-exit fault; no return/reboot/watchdog/Framework stop')
         return 0
     try:
         serial=INVENTORY.mapper.serial_for(args.adb)
-        report=run_trial(args.adb,serial)
+        report=run_trial(args.adb,serial,detached=args.run_detached_readonly)
         args.output.mkdir(parents=True,exist_ok=True,mode=0o700)
         file=args.output/('root-thermal-smoke-'+datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')+'-'+secrets.token_hex(3)+'.json')
         with file.open('x',encoding='utf-8') as fh:
