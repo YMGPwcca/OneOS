@@ -1,5 +1,9 @@
 # OneOS SESL9 interface
 
+**OneOS · App design & maintenance**
+
+[← Docs hub](../README.md) · [Project home](../../README.md) · [Device catalog](../devices.md)
+
 The redesign lives on `codex/oneos-sesl9-redesign`, based on upstream OneOS 0.4.36 (`b5bcc47`, version code 53), matching the supplied `OneOS-0.4.36-fold.apk`. Older local Fold8 experiments remain in named recovery stashes rather than replacing the newer backend.
 
 ## Design and components
