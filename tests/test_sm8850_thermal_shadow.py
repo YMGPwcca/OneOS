@@ -166,6 +166,15 @@ class SourceAdmissionGateTests(unittest.TestCase):
                         source.index('if ! stop_android_framework; then'))
         self.assertIn('if [ "$FRAMEWORK" = 1 ] && [ "$FW_MODE" = run ]; then\n'
                       '    # Source-level P0 admission lock.', source)
+        # A genuine, time-limited guest experiment may be opt-in, but it must
+        # not weaken the 600-second source refusal or omit its root monitor.
+        self.assertIn("--framework-session:probe", source)
+        self.assertIn("I_ACCEPT_SM8850_SHORT_TAKEOVER_90S_RISK", source)
+        self.assertIn('fw_seconds=90', source)
+        self.assertIn('framework_thermal_guard_healthy()', source)
+        self.assertIn('P0_SHORT_PROBE_THERMAL=ARMED_ROOT_SENSOR_GUARD_NOT_PRODUCTION_CERTIFIED', source)
+        self.assertIn('oneios_sm8850_thermal_takeover_guard.sh', source)
+        self.assertIn('if [ "$FRAMEWORK" = 1 ] && { [ "$FW_MODE" = run ] || [ "$FW_MODE" = probe ]; }; then', source)
 
     def test_check_only_continues_to_allow_passive_preflight(self):
         source = SWITCH.read_text()
