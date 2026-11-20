@@ -37,6 +37,40 @@ sh -n /tmp/oneos-p0-thermal-sim/switcher/assets/oneios_sm8850_thermal_reader.sh
 
 The script's default invocation does **nothing** and refuses. The only live mode is an explicitly requested single read when One UI is up: **it is not a protective background monitor**. No new physical test is required to accept the offline work.
 
+## Fixture-only end-to-end validation (additional 2026-11-21 work)
+
+The original **14/14 offline regression tests passed on the operator's CachyOS** checkout at `~/projects/OneiOS/app`. That was a real user-reported local execution, not a live thermal guard.
+
+This branch now also includes:
+- `tests/sm8850_thermal_e2e_dryrun.py` — connects the **actual three-node shell reader** to the pure fail-closed policy model, only from explicitly provided host fixture files. Requires exact synthetic boot ID, watchdog generation, launch token and watcher-health fixture. It checks them before and after each reading and refuses duplicate/malformed reader output, root/symlink escapes, expired or reversed sample intervals and sensor/read timeouts. Every event explicitly declares `live_thermal_guard=false` and `physical_return_issued=false`; the only proposed action is `WOULD_REQUEST_RETURN_NOT_EXECUTED`. Terminal simulations return nonzero (4).
+- `tests/test_sm8850_thermal_e2e.py` — **19 additional end-to-end regression tests**, using real shell reader invocations with fake sysfs, injected errors, synthetic watcher death, critical latching and strict output admission.
+- Validation on assistant-side local Linux: **14/14 original + 19/19 new tests PASS**. The **new 19 tests still require CachyOS confirmation**. No Android device was contacted by these changes.
+
+All threshold values in these fixtures are fake and NOT firmware-calibrated. The Python harness requires a host Python interpreter, is not deployed as an Android process and does not guarantee live monitoring, unassisted return, independent survival after `xnuhost` death, or kernel-level throttling.
+
+### Local CachyOS command (existing checkout remains unchanged)
+
+```bash
+(
+  set -euo pipefail
+  REPO="$HOME/projects/OneiOS/app"
+  git -C "$REPO" fetch origin \
+    refs/heads/feat/sm8850-p0-thermal-reader-sim:refs/remotes/origin/feat/sm8850-p0-thermal-reader-sim
+  TEST_DIR=$(mktemp -d /tmp/oneos-sm8850-p0-e2e.XXXXXX)
+  git -C "$REPO" archive origin/feat/sm8850-p0-thermal-reader-sim \
+    switcher/assets/oneios_sm8850_thermal_reader.sh \
+    tests/sm8850_thermal_policy_sim.py \
+    tests/test_sm8850_thermal_guard_p0.py \
+    tests/sm8850_thermal_e2e_dryrun.py \
+    tests/test_sm8850_thermal_e2e.py | tar -xf - -C "$TEST_DIR"
+  python3 "$TEST_DIR/tests/test_sm8850_thermal_guard_p0.py" -v
+  python3 "$TEST_DIR/tests/test_sm8850_thermal_e2e.py" -v
+  echo "THERMAL_P0_OFFLINE_E2E=PASS"
+)
+```
+
+The harness must **never** be pointed to a physical root or provided real operator tokens in place of its synthetic fixture inputs. It does not open ADB, write a `return.request`, control watchdogs or reboot.
+
 ## Mandatory gaps before P0 acceptance and any 600-second run
 
 1. Validate targeted kernel reader availability **while One UI Framework is absent**, in an authorized short recovery-qualified trial; previous reads were on intact Android only.
