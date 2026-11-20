@@ -126,6 +126,13 @@ def run_trial(adb, serial, source=SHELL, detached=False):
                            "su -c 'stat -c %u "+remote+"'")
                 if uid!='0':
                     raise Refused('root ownership verification failed: '+name)
+                # Re-hash after ownership transfer in the root-owned stage.
+                # Pre-chown ADB validation alone permits a replacement race.
+                root_digest=invoke(adb,serial,'shell','-T',
+                    "su -c 'sha256sum "+remote+"'").split()
+                local_source=next(path for path, source_name in sources if source_name==name)
+                if not root_digest or root_digest[0]!=hashlib.sha256(local_source.read_bytes()).hexdigest():
+                    raise Refused('root-owned staged SHA-256 changed: '+name)
             if invoke(adb,serial,'shell','-T',
                       "su -c 'stat -c %u "+stage+"'")!='0':
                 raise Refused('root staging directory ownership check failed')
