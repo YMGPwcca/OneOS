@@ -108,6 +108,25 @@ def run_trial(adb, serial, source=SHELL):
                 digest_fields=invoke(adb,serial,'shell','sha256sum',remote).split()
                 if not digest_fields or expected!=digest_fields[0]:
                     raise Refused('stage SHA mismatch or empty hash for '+name)
+            # Shell owns the directory only while staging. Transfer ownership
+            # to root before ANY monitor starts; otherwise uid=shell could
+            # replace a live heartbeat/manifest and spoof supervisor health.
+            # Avoid recursive chown: only these four exact, nonce-bound paths.
+            paths=' '.join([stage]+[stage+'/'+name for _,name in sources])
+            invoke(adb,serial,'shell','-T',
+                   "su -c 'chown 0:0 "+paths+
+                   " && chmod 700 "+stage+' '+stage+'/oneios_sm8850_thermal_trial.sh'+
+                   " && chmod 600 "+stage+'/manifest.v1 '+stage+"/identity.v1'",
+                   timeout=12)
+            for _,name in sources:
+                remote=f'{stage}/{name}'
+                uid=invoke(adb,serial,'shell','-T',
+                           "su -c 'stat -c %u "+remote+"'")
+                if uid!='0':
+                    raise Refused('root ownership verification failed: '+name)
+            if invoke(adb,serial,'shell','-T',
+                      "su -c 'stat -c %u "+stage+"'")!='0':
+                raise Refused('root staging directory ownership check failed')
             for fault,ticks,marker in (
                 ('normal',3,'THERMAL_TRIAL=PASS_OBSERVER_SUPERVISOR_ONLY_NO_PHYSICAL_RETURN'),
                 ('monitor-exit-after-two',4,'THERMAL_TRIAL=EXPECTED_MONITOR_DEATH_DETECTED_NO_PHYSICAL_RETURN'),
