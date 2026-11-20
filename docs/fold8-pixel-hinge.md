@@ -1,5 +1,9 @@
 # Pixel fold transitions on Galaxy Z Fold8
 
+**OneOS · Android guest engineering**
+
+[← Docs hub](README.md) · [Project home](../README.md) · [Device catalog](devices.md)
+
 The `f8` + `pixel11fold-yogi` pair uses its own `pixel-f8` package set. The
 Fold8 Ultra keeps `pixel-f8u`. The new set retains the Pixel base guard files
 and adds the patched SystemUI, the existing system-UID angle reader and an
