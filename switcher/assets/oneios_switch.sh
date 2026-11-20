@@ -2368,7 +2368,7 @@ if [ "$FRAMEWORK" = 1 ]; then
         fw_recover "could not arm the phase deadline"
     echo "Framework stopped, app groups drained and Android input absent at uptime $fw_tick. Deadline: $((fw_tick + fw_seconds))"
     if [ "$FW_MODE" = probe ]; then
-        echo "P0_SHORT_PROBE_BUDGET=90S_FROM_VERIFIED_FRAMEWORK_STOP_NOT_90S_OF_XNUHOST_EXEC"
+        echo "P0_SHORT_PROBE_DEADLINE=REQUEST_REBOOT_AT_FRAMEWORK_STOP_PLUS_90S_NOT_GUEST_RUNTIME_90S"
     fi
     if [ "$FRAMEWORK_REBOOT" = 1 ]; then
         printf '%s\n' "$WD_GEN" > "$CTL/framework.takeover-confirmed" ||
@@ -2450,7 +2450,7 @@ if [ "$FRAMEWORK" = 1 ] && [ "$FW_MODE" = probe ]; then
         remaining=$((framework_cap - guest_observed_tick))
         [ "$setup_elapsed" -ge 0 ] || setup_elapsed=0
         [ "$remaining" -ge 0 ] || remaining=0
-        echo "P0_SHORT_PROBE_TIMING=framework_stop_tick:$fw_tick guest_pid_observed_tick:$guest_observed_tick setup_elapsed_seconds:$setup_elapsed remaining_framework_budget_seconds:$remaining"
+        echo "P0_SHORT_PROBE_TIMING=framework_stop_tick:$fw_tick guest_pid_observed_tick:$guest_observed_tick setup_elapsed_seconds:$setup_elapsed remaining_to_reboot_request_seconds:$remaining"
     else
         echo "P0_SHORT_PROBE_TIMING=UNKNOWN_MONOTONIC_READ_FAILED"
     fi
