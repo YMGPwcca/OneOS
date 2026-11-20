@@ -1,5 +1,9 @@
 # Device patch channels and contributor guide
 
+**OneOS · Android guest engineering**
+
+[← Docs hub](README.md) · [Project home](../README.md) · [Device catalog](devices.md)
+
 The ColorOS pre-boot page on Galaxy Z Fold8 has a patch channel choice. Stable
 uses the APK-pinned upstream payload list. Experimental loads a small manifest
 from `thatjoshguy67/OneOS-files`, release `fold8-experimental`, named
