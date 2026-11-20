@@ -38,6 +38,8 @@ read_all() {
     [ -f "$FILE" ] && [ ! -L "$FILE" ] || return 1
     idx_seen=" "; count=0; cpu_count=0; gpu_count=0; ddr_count=0
     CPU_MAX=0; GPU_MAX=0; DDR_MAX=0
+    CPU_MAX_ZONE=none; GPU_MAX_ZONE=none; DDR_MAX_ZONE=none
+    SOFT_FAULT_DETAIL=
     {
         IFS=' ' read -r version boot claimed extra || return 1
         [ "$version" = v1 ] && [ "$boot" = "$HEADER_BOOT" ] &&
@@ -58,11 +60,17 @@ read_all() {
             [ "$(cat "$tfile" 2>/dev/null)" = "$typ" ] || return 1
             case "$grp" in
                 cpu) cpu_count=$((cpu_count+1))
-                     [ "$raw" -le "$CPU_MAX" ] || CPU_MAX=$raw ;;
+                     if [ "$raw" -gt "$CPU_MAX" ]; then
+                         CPU_MAX=$raw; CPU_MAX_ZONE=$typ@$idx
+                     fi ;;
                 gpu) gpu_count=$((gpu_count+1))
-                     [ "$raw" -le "$GPU_MAX" ] || GPU_MAX=$raw ;;
+                     if [ "$raw" -gt "$GPU_MAX" ]; then
+                         GPU_MAX=$raw; GPU_MAX_ZONE=$typ@$idx
+                     fi ;;
                 ddr) ddr_count=$((ddr_count+1))
-                     [ "$raw" -le "$DDR_MAX" ] || DDR_MAX=$raw ;;
+                     if [ "$raw" -gt "$DDR_MAX" ]; then
+                         DDR_MAX=$raw; DDR_MAX_ZONE=$typ@$idx
+                     fi ;;
             esac
             count=$((count+1))
             [ "$count" -le 96 ] || return 1
@@ -77,10 +85,21 @@ read_all() {
         is_uint "$val" && [ "$val" -gt 0 ] && [ "$val" -le 1200 ] || return 1
     done
     [ "$(cat /proc/sys/kernel/random/boot_id 2>/dev/null)" = "$HEADER_BOOT" ] || return 1
-    # EARLY EXPERIMENT ABORT, not a hardware critical threshold. Return sooner.
-    [ "$CPU_MAX" -lt 55000 ] && [ "$GPU_MAX" -lt 55000 ] &&
-    [ "$DDR_MAX" -lt 55000 ] && [ "$BAT" -lt 380 ] &&
-    [ "$LRP" -lt 420 ] && [ "$AP" -lt 420 ] || return 2
+    # EARLY EXPERIMENT ABORT, not a hardware critical threshold.
+    # Preserve the exact exceeded group and real-zone peak with fixed units.
+    # These diagnostic tokens are appended to the existing fault record and
+    # must NEVER delay or override the original fail-closed return behavior.
+    crossed=
+    [ "$CPU_MAX" -lt 55000 ] || crossed="${crossed}cpu,"
+    [ "$GPU_MAX" -lt 55000 ] || crossed="${crossed}gpu,"
+    [ "$DDR_MAX" -lt 55000 ] || crossed="${crossed}ddr,"
+    [ "$BAT" -lt 380 ] || crossed="${crossed}bat,"
+    [ "$LRP" -lt 420 ] || crossed="${crossed}lrp,"
+    [ "$AP" -lt 420 ] || crossed="${crossed}board_ap,"
+    if [ -n "$crossed" ]; then
+        SOFT_FAULT_DETAIL="crossed=${crossed%,} cpu_mC=$CPU_MAX cpu_zone=$CPU_MAX_ZONE gpu_mC=$GPU_MAX gpu_zone=$GPU_MAX_ZONE ddr_mC=$DDR_MAX ddr_zone=$DDR_MAX_ZONE bat_dC=$BAT lrp_dC=$LRP board_ap_dC=$AP"
+        return 2
+    fi
     return 0
 }
 atom() {
@@ -125,11 +144,13 @@ case "$MODE" in
             else
                 rc=$?
                 case "$rc" in
-                    2) reason=soft_temperature_abort ;;
-                    *) reason=missing_or_invalid_sensor ;;
+                    2) reason=soft_temperature_abort
+                       detail=$SOFT_FAULT_DETAIL ;;
+                    *) reason=missing_or_invalid_sensor
+                       detail= ;;
                 esac
-                atom thermal.guard.fault "$BOOT $GEN $$ $BIRTH $reason" || :
-                echo "P0_THERMAL_GUARD=FAIL_CLOSED $reason"
+                atom thermal.guard.fault "$BOOT $GEN $ $BIRTH $reason ${detail}" || :
+                echo "P0_THERMAL_GUARD=FAIL_CLOSED $reason ${detail}"
                 exit 4
             fi
             seq=$((seq+1))
