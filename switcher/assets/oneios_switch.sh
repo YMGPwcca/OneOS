@@ -1294,19 +1294,48 @@ case "$MODE" in
         BB=/data/control/busybox
         at "running busybox from the stage"
         "$BB" true 2>/dev/null || die_inner "busybox does not run from the stage ($BB)"
-        # Read-only in here: the runtime and the image (as staged), and what
-        # the way back runs and reads (its scripts, its control folder).
-        for d in runtime image control bin oneios_switch.sh oneios_return.sh; do
-            [ -e "/data/$d" ] || continue
-            at "making /data/$d read-only"
-            "$BB" mount --bind "/data/$d" "/data/$d" && "$BB" mount -o remount,bind,ro "/data/$d" ||
-                die_inner "could not make /data/$d read-only"
+        # Android BusyBox can remount bind-mounted DIRECTORIES read-only,
+        # but not self-bind-mounted FILES: mount -o remount,bind,ro on
+        # /data/oneios_switch.sh failed with "can't find ... in /proc/mounts"
+        # on real SM-S948B, before xnuhost could be exec'd (2026-11-20).
+        #
+        # Make the entire stage root read-only instead, which also protects
+        # both shell scripts, runtime.conf, image.conf and all trust sidecars.
+        # Separate writable Data/session bind mounts FIRST: their per-mount
+        # flags remain writable after the parent /data bind is remounted ro.
+        # Android's original /data stays untouched in init's namespace.
+        at "preparing writable Data and session islands"
+        [ -d /data/data ] && [ -d /data/session/tmp ] ||
+            die_inner "staged Data/session writable islands are missing"
+        for d in data session; do
+            "$BB" mount --bind "/data/$d" "/data/$d" ||
+                die_inner "could not isolate writable /data/$d mount"
         done
+        at "making entire staged /data read-only"
+        "$BB" mount -o remount,bind,ro /data ||
+            die_inner "could not remount staged /data read-only"
+        # Actual negative write probes, not access(2)/test -w: host root
+        # could otherwise appear writable even on a protected mount.
+        at "checking staged root and control are read-only"
+        if true 2>/dev/null > /data/.oneios-stage-write-check; then
+            rm -f /data/.oneios-stage-write-check
+            die_inner "the staged /data root is writable in the session namespace"
+        fi
         at "checking that /data/control is read-only"
         if true 2>/dev/null > /data/control/.w; then
             rm -f /data/control/.w
             die_inner "the way back's control folder is writable in the session's namespace"
         fi
+        # Fail BEFORE reporting a guest PID if remounting the parent also
+        # accidentally made the two intended write areas read-only.
+        at "checking writable guest Data/session islands"
+        for check in /data/data /data/session/tmp; do
+            probe="$check/.oneios-write-check.$"
+            if ! (set -C; true 2>/dev/null > "$probe"); then
+                die_inner "guest writable island is read-only: $check"
+            fi
+            rm -f "$probe" || die_inner "could not remove guest write probe: $check"
+        done
         # The guard this session rests on: One UI's data is not reachable here.
         at "checking that One UI's /data is not visible"
         [ ! -e /data/system ] && [ ! -e /data/misc ] && [ ! -e /data/user ] && [ -f /data/runtime.conf ] ||
