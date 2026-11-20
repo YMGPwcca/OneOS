@@ -1311,8 +1311,12 @@ case "$MODE" in
             "$BB" mount --bind "/data/$d" "/data/$d" ||
                 die_inner "could not isolate writable /data/$d mount"
         done
+        # BusyBox mount with only a TARGET does an /proc/mounts lookup,
+        # which failed even for a fresh directory bind on the S26 Ultra.
+        # Explicit SOURCE+TARGET bypasses that lookup; the on-device
+        # preflight uses the same two-operand syntax before any Framework stop.
         at "making entire staged /data read-only"
-        "$BB" mount -o remount,bind,ro /data ||
+        "$BB" mount -o remount,bind,ro /data /data ||
             die_inner "could not remount staged /data read-only"
         # Actual negative write probes, not access(2)/test -w: host root
         # could otherwise appear writable even on a protected mount.
