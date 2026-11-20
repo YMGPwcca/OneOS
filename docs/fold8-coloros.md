@@ -1,5 +1,9 @@
 # Fold8 ColorOS port
 
+**OneOS · Android guest engineering**
+
+[← Docs hub](README.md) · [Project home](../README.md) · [Device catalog](devices.md)
+
 Contributed by thatjoshguy67 (pull request #1) and ported into OneOS 0.4.14.
 It brings the fixes he tested on SM-F971B / h8q / SM8850 with the Find N6
 ColorOS 17 image (`coloros17-findn6`, PLP120_17.0.0.109(CN01)) to the `f8`
