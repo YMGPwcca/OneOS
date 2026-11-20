@@ -123,7 +123,7 @@ New `switcher/assets/oneios_sm8850_thermal_health.sh` defines the **future** ret
 
 It rechecks current boot/run, rejects missing or symlink-escaping fixture files, mismatched/reused monitor PID, missing or zombie proc state, malformed/multiline heartbeat, future/stale samples, bad status and changed identity during inspection. The only possible outputs are `THERMAL_HEALTH=FRESH_FIXTURE_ONLY` or `FAIL_CLOSED_FIXTURE_ONLY` **without a physical action**. It never opens `/dev/watchdog*`, calls the returner or runs outside host fixtures; it does **not** publish or supervise actual heartbeat files on the phone. This explicitly tests the **contract**, not a live independent watchdog.
 
-`tests/test_sm8850_thermal_health.py` adds **17 offline cases** (healthy, stale/future, missing/forged boot, generation, launch, PID birth reuse, process death/zombie, malformed heartbeat, symlink escape, bad TTL and disabled live mode). These 17 are **pending CachyOS verification**, in addition to the user's prior verified 50/50.
+`tests/test_sm8850_thermal_health.py` adds **17 offline cases** (healthy, stale/future, missing/forged boot, generation, launch, PID birth reuse, process death/zombie, malformed heartbeat, symlink escape, bad TTL and disabled live mode). All 17 **PASS on operator's CachyOS** at exact commit `d8759313e90da0f2af849b7150bc9aede36dcbf2`, bringing the combined verified offline suite to **67/67 PASS**.
 
 The next P0 work remains: a real, independently run and supervised root-side monitor that continuously publishes this heartbeat outside the guest namespace/cgroup, firmware-source-qualified sensor/threshold policy including a genuine SoC junction, and an independently proven mandatory reboot-only recovery path. No bypass to the 600-second source gate exists in this branch.
 
@@ -161,7 +161,7 @@ bash "$SCRATCH/tests/run_sm8850_thermal_local.sh"
 '
 ```
 
-**Current verification:** previous 50/50 cases PASS on CachyOS at `5185a642ab7c7d29aa0f2d758fd04ac7b2f3af15`; seven representative heartbeat checks passed in assistant-side Linux, but the entire new 17-case heartbeat suite and 67-case combined runner are **pending operator CachyOS confirmation**. This is not a claim of live physical guard qualification.
+**Current verification:** previous 50/50 cases PASS on CachyOS at `5185a642ab7c7d29aa0f2d758fd04ac7b2f3af15`; the 17 heartbeat checks and the 67-case combined runner **all PASS on operator's CachyOS** at `d8759313e90da0f2af849b7150bc9aede36dcbf2`. This is not a claim of live physical guard qualification.
 
 
 ## Mandatory gaps before P0 acceptance and any 600-second run
@@ -180,3 +180,7 @@ Related OneiOS draft: https://github.com/YMGPwcca/OneiOS/pull/8
 ## Operator local milestone — 2026-11-21
 
 At exact OneOS revision `5185a642ab7c7d29aa0f2d758fd04ac7b2f3af15`, the operator ran syntax checks, 14 original reader/policy tests, 19 reader-to-policy E2E tests and 17 shadow/safety-gate tests successfully: **50/50 local PASS**. Full log showed no test exceptions. This establishes **offline test acceptance only**, not functioning in-phone recovery, guard death handling, firmware-qualified thresholds or sensor access after framework shutdown. These tests were run without a new physical iOS takeover.
+
+## Operator milestone — full 67/67 PASS (2026-11-21)
+
+The operator reran the exact OneOS revision `d8759313e90da0f2af849b7150bc9aede36dcbf2` in a fresh extracted archive on CachyOS: `bash tests/run_sm8850_thermal_local.sh` executed 67 cases (14 reader/policy + 19 E2E + 17 shadow/source gate + 17 heartbeat) with `Ran 67 tests ... OK`, and emitted `ONEOS_P0_OFFLINE_67=PASS` and `P0_SAFETY_STATUS=OFFLINE_SIMULATION_ONLY_NO_PHYSICAL_GUARD`. This is the **local offline acceptance checkpoint** for that exact commit only. There was **no** new physical Android Framework stop, iOS guest run, watchdog operation or live thermal guard installed by this command.
