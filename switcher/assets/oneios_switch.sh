@@ -1948,6 +1948,12 @@ if [ "$FRAMEWORK" = 1 ]; then
         root_only "$CAP_SCRIPT" && [ -x "$CAP_SCRIPT" ] &&
             $SH "$CAP_SCRIPT" --check ||
             framework_block "P0_CPU_CAP=BLOCKED no verified writable SM8850 cpufreq policy or staged root worker"
+        if [ "$FW_TEMP_LOG_ONLY" = 1 ]; then
+            TELEMETRY_SCRIPT="$STAGE/oneios_sm8850_telemetry.sh"
+            root_only "$TELEMETRY_SCRIPT" && [ -x "$TELEMETRY_SCRIPT" ] &&
+                $SH "$TELEMETRY_SCRIPT" --audit ||
+                framework_block "P0_TELEMETRY=BLOCKED no root-owned 15-second telemetry sampler"
+        fi
     fi
     if [ "$FW_MODE" = run ] || [ "$FW_MODE" = probe ]; then
         [ "$(cat "$STAGE/image.ready" 2>/dev/null)" = sm8850-ios27-3d-8cpu-600s ] ||
@@ -2464,6 +2470,22 @@ if [ "$FRAMEWORK" = 1 ]; then
     if [ "$FRAMEWORK_REBOOT" = 1 ]; then
         printf '%s\n' "$WD_GEN" > "$CTL/framework.takeover-confirmed" ||
             fw_recover "could not record verified Framework stop"
+    fi
+    if [ "$FW_TEMP_LOG_ONLY" = 1 ]; then
+        # Independent, read-only host sampler: all sysfs thermal zones, CPU
+        # cpufreq policies and KGSL frequencies. It writes under the root
+        # stage and duplicates records to the already-streamed host log.
+        # No sampler PID is allowed to alter the watchdog or thermal policy.
+        "$BB" setsid $SH "$TELEMETRY_SCRIPT" --run "$CTL" "$WD_GEN" "$FW_LAUNCH" 600 \
+            8>&- </dev/null >>"$STAGE/logs/probe-$FW_LAUNCH.log" 2>&1 &
+        tel_wait=0
+        until grep -Fq 'P0_TELEMETRY_START' "$STAGE/logs/telemetry-$FW_LAUNCH.log" 2>/dev/null; do
+            [ "$tel_wait" -lt 30 ] ||
+                fw_recover "read-only host telemetry could not start; no guest launched"
+            sleep 0.2
+            tel_wait=$((tel_wait + 1))
+        done
+        echo "P0_TELEMETRY=ARMED_15S_SPRINGBOARD_BASELINE_FINAL_AT_590"
     fi
     if [ "$FW_MODE" = smoke ]; then
         echo running > "$CTL/state" || fw_recover "could not record smoke state"
