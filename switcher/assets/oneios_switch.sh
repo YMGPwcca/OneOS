@@ -1413,13 +1413,14 @@ case "$MODE" in
             echo "ONEIOS_BENCH_THERMAL_BRIDGE=INACTIVE"
             echo "ONEIOS_CPU_PLACEMENT_BRIDGE=INACTIVE"
             echo "ONEIOS_GPU_3D=RUNTIME_KGSL_PROOF_REQUIRED"
+            echo "ONEIOS_GPU_3D_MODE=REQUIRED_FAIL_CLOSED_NO_2D_FALLBACK"
             ulimit -c 0
             exec "/data/runtime/$R_XNUHOST" --session-abi 1 --mode bench \
                 --runtime /data/runtime --image /data/image --data /data/data --session /data/session \
                 --cpus 8 --ram 4G --set ram-giveback=0 --set ram-prefault=1 --set ram-lock=1 \
                 --set ram-huge=0 --set host-mem-log=5 --set bridges=0 --set wifi=off \
                 --set bluetooth=virtual --set haptics=off --set encoder=off --set return-graceful-ms=0 \
-                --gpu auto --display shm --set touch-exclusive=1 --width 1080 --height 2340 --hz 60 \
+                --gpu 3d --display shm --set touch-exclusive=1 --width 1080 --height 2340 --hz 60 \
                 --boot-args 'debug=0x14e serial=3 -v kt_fixed_zones=120 -no_slto_panic ml-timeout-lock-panic-scale=40 tlto_us=0 armcpu-self-ipi=1 armcpu-spi-ipi=1 use_contiguous_hint=0 interrupt-masked-debug-mode=0 sched_preemption_disable_debug_mode=0 wdt=-1 sheng-smp=1 oneios-data-wait=3000'
             die_inner "could not exec the GPU-3D benchmark runtime"
         fi
