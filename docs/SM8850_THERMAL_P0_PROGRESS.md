@@ -447,3 +447,16 @@ This is a **source and simulator regression**, not a physical thermal or recover
 Follow-up to the direct-parent affinity port: `oneios_sm8850_thermal_takeover_guard.sh` now reads, **only on every fifth successful heartbeat**, root-owned session `control/xnuhost.pid`, the live process's `/proc/<pid>/stat` counters (post-comm fields 12 user ticks, 13 system ticks, 20 birth ticks), and aggregate `/proc/stat` CPU ticks. It emits `P0_XNUHOST_LOAD=READ_ONLY` with boot/generation/monotonic uptime/PID/birth identity alongside `P0_THERMAL_SAMPLE=OK`. The cumulative counters support **offline CPU-load deltas**; a single counter is **not** CPU% or proof of a userland process's energy use. Missing or recycled PIDs yield no guest-load sample and **never mask a thermal fault**. Fault emission still precedes normal telemetry. No `renice`, scheduling, frequency, cgroup, thermal-trip, watchdog or reboot changes occur in the monitor.
 
 The OneOS source regression now checks the per-session CPU tick fields, bounded sample rate and read-only exclusion list. An external observed CPU peak of **101.1 C** in the prior separate CPU90 attempt remains a STOP signal; **this telemetry is not active evidence until a new, separately authorized safe session is recorded.** The conservative normal CPU55 profile remains unchanged. A local-first, NO-ADB combined CI runner is available from [OneiOS `scripts/ci-sm8850-parent-port-local.sh`](https://github.com/YMGPwcca/OneiOS/blob/feat/oneios-sm8850-m3q/scripts/ci-sm8850-parent-port-local.sh); it pins sources from both forks and only runs host tests, with no stage/rearm/Framework calls. Its results have **not** been observed yet.
+
+
+### 2026-11-21 reported CachyOS host-only CI PASS for pinned OneiOS and OneOS parent port
+
+The user supplied the following actual console receipt after fetching the revised OneiOS CI runner (the first version incorrectly required `.git` to be a directory and refused a local checkout; the repaired runner uses `git rev-parse --is-inside-work-tree`):
+```text
+SM8850_PARENT_PORT_LOCAL_CI=PASS_HOST_ONLY
+HOST_CI_LOG=/home/pwcca/projects/OneiOS/out/sm8850/parent-port-ci/20261121T085047Z/host-ci.log
+```
+
+OneiOS runner at fix commit `b283242536b502bf637017196720df742edca376` verifies/pins source snapshots from **OneiOS `bf5cd08f34f87804b3124fa09061cb3add5343d2`** and **OneOS `0b5e2a7bf4507a262b459e4f14b5424cdbb000c1`**, then runs host-side `runtime/bridges test`, `runtime/bridges/thermal test`, `runtime/xnuhost test` and `python3 -m unittest discover -s tests -p 'test_sm8850_thermal_shadow.py' -v`. The combined script emitted PASS; this is **operator-reported CI**, not independent inspection of the full `host-ci.log` or phone qualification. The runner uses `git archive` and host tests; **no ADB, APFS rearm, Framework stop or reboot**.
+
+**P0 status unchanged:** the 55 C CPU conservative abort, independent guard, closed 600s source admission gate and OneOS recovery safeguards remain. **Next** is native Android ARM64 build and artifact validation on CachyOS before any separately authorized phone stage. The historic physical CPU **101.1 C** on CPU90 experiment remains a known hot-run failure; thermal limits, physical safety and recovery are not certified by CI.
