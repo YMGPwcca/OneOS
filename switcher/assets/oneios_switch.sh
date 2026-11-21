@@ -1898,8 +1898,9 @@ if [ "$FRAMEWORK" = 1 ]; then
         GUARD_MANIFEST="$STAGE/thermal.guard.manifest"
         root_only "$GUARD_SCRIPT" && root_only "$GUARD_MANIFEST" &&
             [ -x "$GUARD_SCRIPT" ] &&
+            $SH "$GUARD_SCRIPT" --pid-birth-selftest &&
             $SH "$GUARD_SCRIPT" --check "$GUARD_MANIFEST" ||
-            framework_block "probe thermal sensor set unavailable, invalid, or beyond early-abort cutoffs"
+            framework_block "probe thermal sensor/PID identity unavailable, invalid, or beyond early-abort cutoffs"
     fi
     if [ "$FW_MODE" = run ] || [ "$FW_MODE" = probe ]; then
         [ "$(cat "$STAGE/image.ready" 2>/dev/null)" = sm8850-ios27-3d-8cpu-600s ] ||
