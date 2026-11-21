@@ -172,6 +172,7 @@ val switcherNotShipped = setOf(
     "oneios_sm8850_thermal_reader.sh",
     "oneios_sm8850_thermal_shadow.sh",
     "oneios_sm8850_thermal_takeover_guard.sh",
+    "oneios_sm8850_thermal_cap.sh",
     "oneios_sm8850_thermal_trial.sh",
 )
 // The iOS 27 (OneiOS) session scripts (docs/oneios.md): shipped as assets/oneios/<name>, pinned in
