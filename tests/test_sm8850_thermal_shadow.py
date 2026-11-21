@@ -226,6 +226,8 @@ class SourceAdmissionGateTests(unittest.TestCase):
         section = source[source.index('echo "ONEIOS_TAKEOVER_CPU=8'):source.index('die_inner "could not exec the GPU-3D benchmark runtime"')]
         self.assertIn('--set cpu-pin=1 --set cpu-affinity-bench=1', section)
         self.assertIn('--set bridges=0 --set wifi=off', section)
+        self.assertIn('--set gpu-level=deadline --set gpu-priority=1 --set setway-skip=1', section)
+        self.assertIn('--set spin-host=0 --set spin-task=0', section)
         self.assertIn('ONEIOS_BENCH_THERMAL_BRIDGE=INACTIVE_ROOT_GUARD_ACTIVE', section)
         self.assertIn('ONEIOS_CPU_PLACEMENT=BENCH_AFFINITY_ONLY_8VCPU_SOURCE_ENABLED_NOT_PHYSICALLY_VERIFIED', section)
         self.assertNotIn('--set bridges=1', section)
