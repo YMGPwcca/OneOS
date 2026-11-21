@@ -114,3 +114,27 @@ Operator executed the isolated experiment wrapper from OneOS branch head `eeff8f
 - No fresh thermal peak, iOS display frame, deadline expiry, returner signature or watchdog qualification was supplied in this operator console output. Preserve the raw root/host evidence privately; do not rearm, rerun or increase the experimental CPU 90 C abort threshold solely to fill these evidence gaps.
 
 **Disposition:** `P0_THERMAL_GUARD_ARMED=OBSERVED_REAL_PHONE`; `P0_FRAMEWORK_STOP=OBSERVED_LOG_MARKER`; `P0_XNUHOST_LAUNCH=OBSERVED_LOG_MARKER`; `P0_NEW_ONEUI_BOOT=HOST_OBSERVED`; `P0_UNASSISTED_RETURN=OPERATOR_REPORTED_NOT_INDEPENDENTLY_CERTIFIED`; `P0_ACTUAL_GUEST_DURATION=UNVERIFIED`; `P0_ORIGINAL_RETURN_REQUESTER=UNVERIFIED`; `P0_ACCEPTANCE=BLOCKED`. This is **substantial forward progress**, but not 300-second runtime or P0 safety certification; normal P0 CPU 55 C branch and 600s full-run admission lock remain unchanged.
+
+
+## 2026-11-21 post-run forensics: **new CPU 101.1 C thermal fault** after Framework stop and xnuhost launch
+
+Operator supplied original host-captured switch stream, appended thermal stream and reboot-witness JSON from `live-300s-20261121T075940Z-SzjtNA`. These observations **supersede the preceding summary's missing thermal-cause information**; the original returner PID/action is still not independently attributable.
+
+**Confirmed chronology from the current-session switch log (device wall-clock/uptime):**
+
+- 15:01:30 baseline; 15:01:31 root thermal guard arming; `P0_SHORT_PROBE_THERMAL=ARMED_ROOT_SENSOR_GUARD_NOT_PRODUCTION_CERTIFIED`. Three initial missing-`thermal.guard.heartbeat` reads were transient before positive arm receipt; not a guard-arm failure.
+- 15:01:32 Framework stop request and `Watchdog: FRAMEWORK_OWNS -> TRANSFER_PENDING (legacy a:82)`. Magic-close of `/dev/watchdog` refused with `EBUSY` and bounded feeder retry; the legacy watchdog remains unqualified. Completion receipt: `Framework stopped, app groups drained and Android input absent at uptime 26346. Deadline: 26646` — an explicit **+300s return-request deadline**, not an achieved 300-second guest run. Android's `zygote` stopped; `system_server` gone.
+- 15:01:45 xnuhost launch PID `18718` and display helper PID `18835`; `P0_SHORT_PROBE_TIMING=framework_stop_tick:26346 guest_pid_observed_tick:26346 ... remaining_to_reboot_request_seconds:300`. `=== ONEIOS SESSION LAUNCHED ===` marker recorded. No guest READY, first frame or high-FPS evidence in this switch log.
+
+**New physical current-run thermal observation, after its distinct CPU90 profile line:**
+```text
+P0_THERMAL_PROFILE=CPU_90C_HIGH_RISK_NOT_VENDOR_CERTIFIED_GPU_DDR_55C_BAT_38C_LRP_AP_42C
+P0_THERMAL_GUARD=FAIL_CLOSED soft_temperature_abort crossed=cpu cpu_mC=101100 cpu_zone=cpu-1-1-1@27 gpu_mC=51300 gpu_zone=gpuss-7@43 ddr_mC=54400 ddr_zone=ddr@47 bat_dC=294 lrp_dC=323 board_ap_dC=382
+```
+CPU zone 27 reported **101.1 C**, exceeding the **90 C experimental early abort by 11.1 C**. Concurrent GPU **51.3 C** (threshold 55 C), DDR **54.4 C** (55 C), battery **29.4 C** (38 C), Samsung LRP **32.3 C** (42 C) and board AP **38.2 C** (42 C) were below their respective experiment thresholds. This is an actual mapped CPU thermal-zone sample, **not** a measured external surface/battery or proof of sustained temperature. The earlier **75.2 C CPU at 55 C cutoff** and the separate `no_pid_birth` lines in append-only `thermal-guard.log` belong to **previous attempts** and must not be counted as new faults. The thermal monitor visibly detected the current CPU overrun after guest launch.
+
+**Independent host reboot witness:** `before_boot_id=fd4647cf-85f1-407a-918d-caca56570f08`, `after_boot_id=9d240969-56b8-4adc-b3fd-5f13e6c867df`; host saw ADB `OFFLINE` at t=48.473 s and `NEW_BOOT_NORMAL_ONEUI` at t=70.541 s from its initial witness, about **22.068 s between those two host events**. Host itself did not issue reboot, stop Framework or touch watchdog. New `current_bootreason=reboot,oneios-sm8850-reboot-return` supports a OneOS-named reboot context, but `current_outcome=null`, `control_state=null`, `historical_return_record_correlated_to_pre_smoke_boot=false`: **exact responsible return process and independently verified unassisted recovery remain unproven**. The actual guest execution interval cannot be inferred exactly from witness-relative seconds without the root session timeline.
+
+**Finding:** `P0_NEW_CPU_THERMAL_FAULT=CPU_101P1C_ZONE27_OBSERVED`; `P0_THERMAL_THRESHOLD_CPU90_EXCEEDED=YES`; `P0_THERMAL_GUARD_DETECTED_FAULT=YES`; `P0_NEW_ONEUI_BOOT=HOST_VERIFIED`; `P0_300S_GUEST_RUNTIME=NOT_ACHIEVED`; `P0_ORIGINAL_REBOOT_REQUESTER=UNKNOWN`; `P0_ACCEPTANCE=BLOCKED`.
+
+**Safety disposition:** Do **not** raise the CPU cutoff above 90 C or re-run this hot physical profile. A 90 C early check did not constrain observed CPU peak to 90 C; the sampled point reached 101.1 C. Investigate guest CPU demand/host scheduling, loop/spin or inefficient work and restore a conservative thermal policy before any new hot execution. Do not claim vendor-critical thermal safety, independent watchdog qualification or recovery certification. Keep the exact original host switch/thermal/witness evidence archived.
