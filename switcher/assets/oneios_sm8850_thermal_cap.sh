@@ -1,11 +1,11 @@
 #!/system/bin/sh
-# SM8850 OneiOS: independent CPU frequency cap for the short Framework probe.
+# SM8850 OneiOS: throttle-first CPU ceiling for short Framework probe (target <80 C).
 # Adapted from fahadalijaved/OneOS oneos_heat_cap, NOT its SKIN=45/47/50
 # thresholds. This worker reads the already-verified root thermal heartbeat.
 #
 # The cap only LOWERS scaling_max_freq. It never releases SSRM/KernelSU limits,
 # touches thermal trips, changes GPU clocks, or raises clocks during a session.
-# The original root thermal guard and reboot-return still decide emergency abort.
+# Never return on reaching 80 C: raise throttling instead; root guard owns last-resort runaway/invalid sensors.
 # Runtime physical behavior and watchdog recovery are NOT yet qualified.
 set -u
 LC_ALL=C
@@ -32,39 +32,52 @@ fault() {
     echo "P0_CPU_CAP=FAIL_CLOSED $*"
     exit 4
 }
-# Input: previous level, CPU/GPU/DDR milliC, battery/LRP/boardAP deciC.
-# Output: one of 1:80, 2:65, 3:50. A new session starts at level 1 (80%).
-# Conservative source-only candidate: these are NOT hardware-certified values.
-# Levels are monotonic during a session; no clock is raised until phone reboot.
+# Input: previous level, CPU/GPU/DDR milli-C, battery/LRP/boardAP deci-C.
+# Output: level:percent. This is a THROTTLE-FIRST candidate, not validated
+# SM8850 thermal calibration. At 80 C, throttle harder; DO NOT auto-return.
+# An independent emergency root guard still owns sensor loss, runaway heat
+# and recovery. Caps are monotonic within one session (no mid-run reboost).
 policy() {
     [ "$#" = 7 ] || return 3
     prev=$1; cpu=$2; gpu=$3; ddr=$4; bat=$5; lrp=$6; ap=$7
     for n in "$prev" "$cpu" "$gpu" "$ddr" "$bat" "$lrp" "$ap"; do
         uint "$n" || return 3
     done
-    [ "$prev" -le 3 ] || return 3
+    [ "$prev" -le 6 ] || return 3
     [ "$cpu" -gt 0 ] && [ "$cpu" -le 200000 ] &&
         [ "$gpu" -gt 0 ] && [ "$gpu" -le 200000 ] &&
         [ "$ddr" -gt 0 ] && [ "$ddr" -le 200000 ] || return 3
     for n in "$bat" "$lrp" "$ap"; do
         [ "$n" -gt 0 ] && [ "$n" -le 1200 ] || return 3
     done
-    # Emergency still belongs to the independent guard: never treat a CPU
-    # reduction as permission to continue beyond any of these abort cutoffs.
-    if [ "$cpu" -ge 55000 ] || [ "$gpu" -ge 55000 ] ||
-       [ "$ddr" -ge 55000 ] || [ "$bat" -ge 380 ] ||
-       [ "$lrp" -ge 420 ] || [ "$ap" -ge 420 ]; then
+    # Last-resort safety, not normal thermal management. We cannot guarantee
+    # <80 C using frequency caps alone: a runaway still has to reboot-return.
+    if [ "$cpu" -ge 90000 ] || [ "$gpu" -ge 95000 ] ||
+       [ "$ddr" -ge 95000 ] || [ "$bat" -ge 480 ] ||
+       [ "$lrp" -ge 500 ] || [ "$ap" -ge 700 ]; then
         return 2
     fi
     level=1
-    if [ "$cpu" -ge 42000 ] || [ "$gpu" -ge 43000 ] ||
-       [ "$ddr" -ge 43000 ] || [ "$bat" -ge 330 ] ||
-       [ "$lrp" -ge 350 ] || [ "$ap" -ge 350 ]; then level=2; fi
-    if [ "$cpu" -ge 48000 ] || [ "$gpu" -ge 49000 ] ||
-       [ "$ddr" -ge 49000 ] || [ "$bat" -ge 360 ] ||
-       [ "$lrp" -ge 390 ] || [ "$ap" -ge 390 ]; then level=3; fi
+    if [ "$cpu" -ge 55000 ] || [ "$gpu" -ge 60000 ] ||
+       [ "$ddr" -ge 60000 ] || [ "$bat" -ge 340 ] ||
+       [ "$lrp" -ge 370 ] || [ "$ap" -ge 450 ]; then level=2; fi
+    if [ "$cpu" -ge 65000 ] || [ "$gpu" -ge 70000 ] ||
+       [ "$ddr" -ge 70000 ] || [ "$bat" -ge 370 ] ||
+       [ "$lrp" -ge 400 ] || [ "$ap" -ge 500 ]; then level=3; fi
+    if [ "$cpu" -ge 72000 ] || [ "$gpu" -ge 75000 ] ||
+       [ "$ddr" -ge 75000 ] || [ "$bat" -ge 400 ] ||
+       [ "$lrp" -ge 430 ] || [ "$ap" -ge 550 ]; then level=4; fi
+    if [ "$cpu" -ge 77000 ] || [ "$gpu" -ge 80000 ] ||
+       [ "$ddr" -ge 80000 ] || [ "$bat" -ge 420 ] ||
+       [ "$lrp" -ge 450 ] || [ "$ap" -ge 600 ]; then level=5; fi
+    if [ "$cpu" -ge 80000 ] || [ "$gpu" -ge 85000 ] ||
+       [ "$ddr" -ge 85000 ] || [ "$bat" -ge 440 ] ||
+       [ "$lrp" -ge 470 ] || [ "$ap" -ge 650 ]; then level=6; fi
     [ "$prev" -le "$level" ] || level=$prev
-    case "$level" in 1) pct=80 ;; 2) pct=65 ;; 3) pct=50 ;; *) return 3 ;; esac
+    case "$level" in
+        1) pct=60 ;; 2) pct=40 ;; 3) pct=28 ;;
+        4) pct=18 ;; 5) pct=12 ;; 6) pct=8 ;; *) return 3 ;;
+    esac
     printf '%s:%s\n' "$level" "$pct"
 }
 # Scan the host's policies. No generic cpufreq_max_limit "-1" writes:
@@ -76,26 +89,30 @@ policies() {
         [ -d "$pol" ] || continue
         case "${pol##*/}" in policy[0-9]*) ;; *) return 1 ;; esac
         hw=$(cat "$pol/cpuinfo_max_freq" 2>/dev/null) || return 1
+        mn=$(cat "$pol/cpuinfo_min_freq" 2>/dev/null) || return 1
         cur=$(cat "$pol/scaling_max_freq" 2>/dev/null) || return 1
-        uint "$hw" && uint "$cur" && [ "$hw" -ge 200000 ] &&
-          [ "$hw" -le 6000000 ] && [ "$cur" -ge 100000 ] &&
-          [ "$cur" -le "$hw" ] && [ -w "$pol/scaling_max_freq" ] || return 1
+        uint "$hw" && uint "$mn" && uint "$cur" &&
+          [ "$hw" -ge 200000 ] && [ "$hw" -le 6000000 ] &&
+          [ "$mn" -ge 100000 ] && [ "$mn" -le "$hw" ] &&
+          [ "$cur" -ge "$mn" ] && [ "$cur" -le "$hw" ] &&
+          [ -w "$pol/scaling_max_freq" ] || return 1
         policies_found=$((policies_found+1))
         [ "$policies_found" -le 8 ] || return 1
     done
     [ "$policies_found" -ge 2 ]
 }
-# Desired cap computed from hardware maximum; actual target is NEVER greater
-# than the CURRENT cap, so no external lower cap is undone.
+# Desired cap computed from hardware maximum and clipped to cpuinfo_min_freq;
+# target never raises an existing tighter cap. Real readback must not exceed it.
 apply_cap() {
     root=$1 pct=$2
     policies "$root" || return 1
     for pol in "$root"/sys/devices/system/cpu/cpufreq/policy*; do
         [ -d "$pol" ] || continue
         hw=$(cat "$pol/cpuinfo_max_freq" 2>/dev/null) || return 1
+        mn=$(cat "$pol/cpuinfo_min_freq" 2>/dev/null) || return 1
         cur=$(cat "$pol/scaling_max_freq" 2>/dev/null) || return 1
         target=$((hw / 100 * pct))
-        [ "$target" -ge 100000 ] || return 1
+        [ "$target" -ge "$mn" ] || target=$mn
         if [ "$cur" -gt "$target" ]; then
             printf '%s\n' "$target" > "$pol/scaling_max_freq" || return 1
             got=$(cat "$pol/scaling_max_freq" 2>/dev/null) || return 1
@@ -115,7 +132,7 @@ case "$MODE" in
         [ "$(id -u)" != 0 ] || die fixture_must_be_unprivileged
         case "$2" in /tmp/oneios-cpu-cap-test.*) ;; *) die fixture_path ;; esac
         [ -d "$2" ] && [ ! -L "$2" ] || die fixture_root
-        case "$3" in 80|65|50) ;; *) die invalid_fixture_percent ;; esac
+        case "$3" in 60|40|28|18|12|8) ;; *) die invalid_fixture_percent ;; esac
         apply_cap "$2" "$3" || die fixture_policy_failed
         echo "P0_CPU_CAP=FIXTURE_APPLIED pct=$3"
         exit 0 ;;
