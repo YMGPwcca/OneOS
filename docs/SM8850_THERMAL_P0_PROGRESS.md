@@ -1,7 +1,7 @@
 # SM8850 P0 thermal guard groundwork — evidence and offline contract
 
 **OneOS | SM-S948B / m3q / SM8850 | firmware S948BXXS4BZIG**
-**Current status (2026-11-21): experimental root-side takeover thermal guard is integrated and its armed marker was physically observed during an early-return 300s-request probe. Exact abort/return reason and guest launch are still unverified. The 600s full takeover remains BLOCKED.**
+**Current status (2026-11-21): real 300s-request probe captured an exact root guard `soft_temperature_abort`: `cpu-0-2-1@10=75.2 C`, above the conservative 55 C trial cutoff. A different normal One UI boot followed, but the exact reboot caller and guest execution are unverified. The 600s full takeover remains BLOCKED.**
 
 The early sections below preserve historical reader/simulator milestones; they do **not** describe the latest integrated guard. For the current live-probe evidence and private log boundaries, see [the guarded short-probe ledger](SM8850_SHORT_GUARDED_IOS_PROBE.md). Do not treat armed marker or normal One UI reboot as production thermal/recovery certification.
 
@@ -408,3 +408,15 @@ The operator physically confirmed **154/154 offline P0 tests PASS** on exact One
 - `docs/SM8850_SHORT_GUARDED_IOS_PROBE.md` documents the single command, actual phone reboot risks, emergency hardware restart, and data clone preconditions.
 - **Important validation distinction:** the previously confirmed 159/159 CachyOS and live 28-zone detached trial/9+10 target tests were for earlier source. This new takeover integration has **NOT** been executed on the operator's CachyOS or S26; all physical results from the new probe are **pending**. Existing 178-case CI runner now syntax-checks the two new files without adding more test methods; it continues to require the original 178 cases.
 - This is **experimental opt-in enablement**, not closure of P0 production acceptance: real Framework stop + rebinding risks remain, vendor watchdog and unassisted physical recovery not yet independently certified. But unlike the 600s branch, the short iOS probe is source-enabled and may be exercised at the owner's explicit request.
+
+## 2026-11-21: first captured exact CPU culprit during physical 300s-request attempt
+
+From the operator's preserved host thermal stream (`live-300s-20261121T004007Z-0ceEtu`), **not** from a simulator: `P0_THERMAL_GUARD=FAIL_CLOSED soft_temperature_abort crossed=cpu cpu_mC=75200 cpu_zone=cpu-0-2-1@10 gpu_mC=46300 gpu_zone=gpuss-7@43 ddr_mC=48600 ddr_zone=ddr@47 bat_dC=279 lrp_dC=306 board_ap_dC=346`.
+
+- CPU peak **75.2 C** vs experimental abort **55 C**; only `cpu` appears in `crossed`. GPU **46.3 C**, DDR **48.6 C**, BAT **27.9 C**, LRP **30.6 C**, board AP **34.6 C** did not cross their respective 55/55/38/42/42 C cutoffs.
+- This verifies that the *root-side guard* executed on the actual firmware, sampled and identified a precise CPU thermal-zone value, and logged its fail-closed thermal fault. It **does not independently authenticate sensor calibration**, prove continuous 75.2 C temperature, establish user-facing skin temperature or certify safe return within a bound.
+- The companion preboot switch log proves the root-owned code reached the instruction after `stop_android_framework()` returned success and reported watchdog magic-close `EBUSY`. It did **not** reach the complete Framework-stop/deadline marker or a confirmed `xnuhost` launch. There is no proof the +300s deadline was armed, much less reached.
+- A different healthy One UI boot was observed by the external host at t=72.615s after t=50.567s ADB offline. The operator reports no manual restart but the original returner could not be authenticated after root loss. **Thermal fault correlated with later reboot**; the exact reboot initiator and watchdog handoff are still unproven.
+- Keep the experimental 55 C abort and all fail-closed sensor paths unchanged until separate firmware/sensor provenance review; **do not increase thresholds to push iOS runtime**. Do not rearm the one-shot APFS clone or rerun the 300s/600s guest for this diagnosis. Preserve original thermal and switch streams as private evidence.
+
+Full evidence reasoning and source revisions: [guarded 90/300-second physical ledger](SM8850_SHORT_GUARDED_IOS_PROBE.md). The CPU zone identified here belongs to the **new 300s attempt**, not the older 90s abort whose culprit remains unknown. `P0_PHYSICAL_SENSOR_THRESHOLD_ABORT=OBSERVED`; `P0_UNASSISTED_RECOVERY=NOT_CERTIFIED`.
