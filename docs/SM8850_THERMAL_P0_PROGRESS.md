@@ -1,7 +1,9 @@
 # SM8850 P0 thermal guard groundwork — evidence and offline contract
 
 **OneOS | SM-S948B / m3q / SM8850 | firmware S948BXXS4BZIG**
-**Status: reader prototype and policy simulator only. NOT a running guard. Full takeover remains BLOCKED.**
+**Current status (2026-11-21): experimental root-side takeover thermal guard is integrated and its armed marker was physically observed during an early-return 300s-request probe. Exact abort/return reason and guest launch are still unverified. The 600s full takeover remains BLOCKED.**
+
+The early sections below preserve historical reader/simulator milestones; they do **not** describe the latest integrated guard. For the current live-probe evidence and private log boundaries, see [the guarded short-probe ledger](SM8850_SHORT_GUARDED_IOS_PROBE.md). Do not treat armed marker or normal One UI reboot as production thermal/recovery certification.
 
 ## Operator-verified physical evidence (2026-11-20)
 
