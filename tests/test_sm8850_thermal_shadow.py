@@ -179,6 +179,8 @@ class SourceAdmissionGateTests(unittest.TestCase):
         self.assertIn('--run-300s', host)
         self.assertIn('duration_seconds+250', host)
         self.assertIn('300 if a.run_300s else 90', host)
+        self.assertIn('Cannot arm root thermal monitor; One UI left running.', host)
+        self.assertIn('guard arm failed before Framework stop', host)
         # The 90-second experimental limit is an independent reboot
         # request deadline measured from verified Framework stop, not a
         # timer started by host ADB, guest exec or the first iOS frame.
