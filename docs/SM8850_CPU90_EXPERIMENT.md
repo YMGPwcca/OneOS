@@ -80,3 +80,23 @@ P0_THERMAL_PID_BIRTH=PASS_READ_ONLY
 `P0_THERMAL_ARMED_FOR_REAL_SESSION=NOT_RETESTED`
 `P0_APFS_CLONE=CONSUMED_PRIOR_ATTEMPT`
 `P0_ACCEPTANCE=BLOCKED`
+
+## 2026-11-21: current-boot thermal manifest check PASS on physical S26 Ultra
+
+Immediately after the real-phone PID-birth selftest PASS, the operator executed the same corrected guard source (`55b7f0f895981171dfc155ff729797051c38d2bd`) in **read-only** mode through root `/system/bin/sh -s -- --check /data/adb/oneios-m3q-framework/thermal.guard.manifest`. Exact reported receipt:
+
+```text
+P0_THERMAL_GUARD=READ_ONLY_CURRENT_BOOT_READY_NOT_CERTIFIED
+```
+
+**Interpretation limited to what source `--check` actually enforces:** the manifest was a non-symlink root-owned file; the recorded boot ID matched this boot before and after sensor sampling; mapped zone indices/types/CPU-GPU-DDR coverage and count were validated; each mapped CPU/GPU/DDR zone could be read with valid units; Samsung battery/LRP/board AP readers returned well-formed values; and the current readings did not cross the experimental guard cutoffs. The prior host manifest survey showed 28 selected zones; the single output line does not independently restate the count or publish per-zone measurements.
+
+**Not established:** independent `--run` lifecycle/PID birth under takeover cgroup/namespace, continuous heartbeat, fail-closed reboot causality, watchdog ownership, exact 300-second deadline, iOS guest runtime, vendor-approved CPU 90 C cutoff or unassisted recovery. The prior failed experiment's one-shot `data.consumed` remains in force; this test did not rearm, stop Framework or reboot.
+
+`P0_THERMAL_PID_BIRTH=PASS_PHYSICAL_READ_ONLY`
+`P0_THERMAL_CURRENT_BOOT_CHECK=PASS_PHYSICAL_READ_ONLY`
+`P0_INDEPENDENT_GUARD_LIFECYCLE=NOT_TESTED`
+`P0_RETURNER_WATCHDOG_QUALIFICATION=BLOCKED`
+`P0_ACCEPTANCE=BLOCKED`
+
+**Next engineering gate:** verify continuous monitoring and heartbeat generation with a safely isolated, non-disruptive trial while One UI remains running, and independently review the legacy watchdog/return path before any further hot/long takeover. The conservative 55 C P0 branch and 600s lock remain unchanged.
