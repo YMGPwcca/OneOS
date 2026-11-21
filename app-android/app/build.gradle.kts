@@ -162,7 +162,18 @@ val sessionScripts: Map<String, File> = linkedMapOf(
     // 0.4.66: One UI 8.5's table, staged as host_installd.txt for SDK 36 (Android 16) images.
     "host_installd_a16.txt" to File(repoRoot, "switcher/patches/host_installd_a16.txt"),
 )
-val switcherNotShipped = setOf("oneos_tunnel.sh", "7zz")
+// SM8850 P0 experimental thermal/Framework guards live in source control but
+// MUST NOT be shipped in the generic OneOS APK's GSI/session asset set.
+// They are deployed only by the separately reviewed physical-test workflow.
+val switcherNotShipped = setOf(
+    "oneos_tunnel.sh", "7zz",
+    "oneios_sm8850_thermal_health.sh",
+    "oneios_sm8850_thermal_pinned_reader.sh",
+    "oneios_sm8850_thermal_reader.sh",
+    "oneios_sm8850_thermal_shadow.sh",
+    "oneios_sm8850_thermal_takeover_guard.sh",
+    "oneios_sm8850_thermal_trial.sh",
+)
 // The iOS 27 (OneiOS) session scripts (docs/oneios.md): shipped as assets/oneios/<name>, pinned in
 // BuildConfig, and staged by their own root script (src/full/assets/root/oneios_root.sh) into their
 // own stage. They are not part of any package set, so they stay out of scripts.sha256.
