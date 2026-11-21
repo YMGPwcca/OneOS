@@ -618,7 +618,7 @@ framework_thermal_cap_healthy() {
         [ "$cp_status" = OK ] || return 1
     for v in "$cp_seq" "$cp_tick" "$cp_level" "$cp_pct"; do watchdog_uint "$v" || return 1; done
     [ "$cp_seq" -gt 0 ] || return 1
-    case "$cp_level:$cp_pct" in 1:80|2:65|3:50) ;; *) return 1 ;; esac
+    case "$cp_level:$cp_pct" in 1:60|2:40|3:28|4:18|5:12|6:8) ;; *) return 1 ;; esac
     cp_now=$(watchdog_now) || return 1
     [ "$cp_tick" -le "$cp_now" ] && [ $((cp_now - cp_tick)) -le 4 ]
 }
