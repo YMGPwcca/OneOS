@@ -170,11 +170,20 @@ class SourceAdmissionGateTests(unittest.TestCase):
         # not weaken the 600-second source refusal or omit its root monitor.
         self.assertIn("--framework-session:probe", source)
         self.assertIn("I_ACCEPT_SM8850_SHORT_TAKEOVER_90S_RISK", source)
+        self.assertIn("I_ACCEPT_SM8850_SHORT_TAKEOVER_300S_RISK", source)
         self.assertIn('fw_seconds=90', source)
+        self.assertIn('fw_seconds=300', source)
+        self.assertIn('FW_PROBE_SECONDS=300', source)
+        host = (ROOT / "scripts/phone/sm8850-takeover-short-probe.py").read_text()
+        self.assertIn('--run-90s', host)
+        self.assertIn('--run-300s', host)
+        self.assertIn('duration_seconds+250', host)
+        self.assertIn('300 if a.run_300s else 90', host)
         # The 90-second experimental limit is an independent reboot
         # request deadline measured from verified Framework stop, not a
         # timer started by host ADB, guest exec or the first iOS frame.
         self.assertIn('P0_SHORT_PROBE_DEADLINE=REQUEST_REBOOT_AT_FRAMEWORK_STOP_PLUS_90S_NOT_GUEST_RUNTIME_90S', source)
+        self.assertIn('P0_SHORT_PROBE_DEADLINE=REQUEST_REBOOT_AT_FRAMEWORK_STOP_PLUS_300S_NOT_GUEST_RUNTIME_300S', source)
         self.assertIn('ONEIOS_GUEST_EXEC_ATTEMPT_TICK=', source)
         self.assertIn('P0_SHORT_PROBE_TIMING=framework_stop_tick:', source)
         self.assertIn('remaining_to_reboot_request_seconds:', source)

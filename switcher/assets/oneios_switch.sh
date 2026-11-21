@@ -1767,6 +1767,7 @@ if [ "$FRAMEWORK" = 1 ]; then
         *) framework_block "use the explicit SM8850 experimental Framework profile" ;;
     esac
     FW_MODE=$2
+    FW_PROBE_SECONDS=90
     [ "$FW_MODE" != reboot-smoke ] || FW_MODE=smoke
     [ "$APP" = 0 ] && framework_identity || framework_block "experimental profile requires SM-S948B/m3q/SM8850 firmware S948BXXS4BZIG with SELinux enforcing"
     if [ "$MODE" = --framework-session ]; then
@@ -1775,8 +1776,12 @@ if [ "$FRAMEWORK" = 1 ]; then
             [ "$5" = I_ACCEPT_LEGACY_WATCHDOG_FULL_600S_RISK ] ||
                 framework_block "600-second legacy-watchdog guest requires separate explicit risk acknowledgement"
         elif [ "$FW_MODE" = probe ]; then
-            [ "$5" = I_ACCEPT_SM8850_SHORT_TAKEOVER_90S_RISK ] ||
-                framework_block "explicit risk acknowledgement required for bounded 90s guest probe"
+            # Exact explicit profile token; not an environment override.
+            case "$5" in
+                I_ACCEPT_SM8850_SHORT_TAKEOVER_90S_RISK) FW_PROBE_SECONDS=90 ;;
+                I_ACCEPT_SM8850_SHORT_TAKEOVER_300S_RISK) FW_PROBE_SECONDS=300 ;;
+                *) framework_block "explicit 90s/300s short-probe risk acknowledgement required" ;;
+            esac
         fi
         FW_LAUNCH=$4
         case "$FW_LAUNCH" in ''|*[!a-f0-9]*) framework_block "invalid experiment log identifier" ;; esac
@@ -2179,7 +2184,7 @@ if [ "$FRAMEWORK_REBOOT" = 1 ]; then
     if [ "$FW_MODE" = run ]; then
         echo "FULL iOS guest, 8 vCPUs, GPU auto/3D and touch: independent 600s mandatory reboot-return deadline after Framework stop."
     elif [ "$FW_MODE" = probe ]; then
-        echo "SHORT 8-vCPU iOS guest probe: reboot-return requested at verified Framework-stop tick +90s, NOT 90s of guest execution; thermal guard may abort earlier."
+        echo "SHORT 8-vCPU iOS guest probe: reboot-return requested at verified Framework-stop tick +${FW_PROBE_SECONDS}s, NOT ${FW_PROBE_SECONDS}s of guest execution; thermal guard may abort earlier."
         echo "Legacy watchdog a:82 and normal One UI boot are NOT independently qualified. Explicit-risk experiment."
     else
         echo "Framework-only smoke: independent 20s deadline requests reboot after Framework stop."
@@ -2349,6 +2354,9 @@ if [ "$FRAMEWORK" = 1 ]; then
     fw_seconds=10
     [ "$FRAMEWORK_REBOOT" != 1 ] || fw_seconds=20
     [ "$FW_MODE" != probe ] || fw_seconds=90
+    if [ "$FW_MODE" = probe ] && [ "$FW_PROBE_SECONDS" = 300 ]; then
+        fw_seconds=300
+    fi
     if [ "$FW_MODE" = run ]; then
         # Exactly ten minutes from verified Framework stop, not from ADB
         # launch. The independent framework-deadline guard stays active
@@ -2368,7 +2376,11 @@ if [ "$FRAMEWORK" = 1 ]; then
         fw_recover "could not arm the phase deadline"
     echo "Framework stopped, app groups drained and Android input absent at uptime $fw_tick. Deadline: $((fw_tick + fw_seconds))"
     if [ "$FW_MODE" = probe ]; then
-        echo "P0_SHORT_PROBE_DEADLINE=REQUEST_REBOOT_AT_FRAMEWORK_STOP_PLUS_90S_NOT_GUEST_RUNTIME_90S"
+        if [ "$fw_seconds" = 90 ]; then
+            echo "P0_SHORT_PROBE_DEADLINE=REQUEST_REBOOT_AT_FRAMEWORK_STOP_PLUS_90S_NOT_GUEST_RUNTIME_90S"
+        else
+            echo "P0_SHORT_PROBE_DEADLINE=REQUEST_REBOOT_AT_FRAMEWORK_STOP_PLUS_300S_NOT_GUEST_RUNTIME_300S"
+        fi
     fi
     if [ "$FRAMEWORK_REBOOT" = 1 ]; then
         printf '%s\n' "$WD_GEN" > "$CTL/framework.takeover-confirmed" ||

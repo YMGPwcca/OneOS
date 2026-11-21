@@ -1,4 +1,4 @@
-# SM8850 real short iOS takeover probe — 90-second Framework-stop return deadline (opt-in)
+# SM8850 real short iOS takeover probe — 90/300-second Framework-stop return deadline (opt-in)
 
 **Status:** integrated into the OneOS `oneios_switch.sh` takeover path on the P0 draft branch; physical 90s probe **OBSERVED**, early thermal abort, guest-ready unverified; diagnostic guard update not yet deployed. This is **not** production-certified P0 and does **not** unlock the 600-second `run` profile.
 
@@ -15,6 +15,8 @@ python3 scripts/phone/sm8850-takeover-short-probe.py --run-90s \
   --adb "$HOME/Android/Sdk/platform-tools/adb" \
   --output "$HOME/projects/OneiOS/out/sm8850/short-ios-probe"
 ```
+
+The draft source also offers `--run-300s`. This is an **extended, explicit-risk** option, not an accepted thermal/recovery profile. It changes only the mandatory reboot-REQUEST deadline to 300 seconds after verified Framework stop, **not** to 300 seconds of iOS execution or a guaranteed end-to-end 300-second reboot. No physical 300-second result is claimed. The original `--run-90s` mode remains available; both retain the same experimental early-abort sensor checks and the 600-second source lock.
 
 Default `sm8850-takeover-short-probe.py` is a **zero-ADB audit**. Optional `--prepare-probe` uploads trusted code and a newly surveyed boot-bound manifest but does **not** stop Framework. **Only `--run-90s` initiates the disruptive takeover**. It runs exactly one `--framework-session probe` using the explicit risk acknowledgment `I_ACCEPT_SM8850_SHORT_TAKEOVER_90S_RISK`.
 

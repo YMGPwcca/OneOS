@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""OneOS SM8850 single-entry SHORT real iOS takeover probe (90s maximum).
+"""OneOS SM8850 bounded real iOS takeover probe (90s/300s profiles).
 
 AUDIT by default; --prepare-probe stages verified switch + root thermal
 guard + current-boot CPU/GPU/DDR manifest without stopping One UI.
-Explicit --run-90s: same preparation, mandatory original OneOS passive
-preflight, then starts real xnuhost in a bounded 90s Framework session.
+Explicit --run-90s/--run-300s: same preparation, mandatory original
+OneOS passive preflight, then starts real xnuhost behind a bounded
+Framework-stop reboot-request deadline (NOT guest runtime).
 The existing framework-deadline and watcher own mandatory reboot-only
 return; this host process never invokes reboot, watchdog, governor writes
 or Android Framework stop directly. Host witness independently watches
@@ -34,6 +35,7 @@ STAGE = "/data/adb/oneios-m3q-framework"
 SWITCH = ROOT/"switcher/assets/oneios_switch.sh"
 GUARD = ROOT/"switcher/assets/oneios_sm8850_thermal_takeover_guard.sh"
 RISK = "I_ACCEPT_SM8850_SHORT_TAKEOVER_90S_RISK"
+RISK_300 = "I_ACCEPT_SM8850_SHORT_TAKEOVER_300S_RISK"
 ACK = "I_ACCEPT_SM8850_FRAMEWORK_TAKEOVER"
 
 def load(path,name):
@@ -94,7 +96,7 @@ def prepare(adb_path,serial):
     if clone_state=="CONSUMED":
         raise Refused("APFS_DATA_CLONE=CONSUMED: rearm from the verified untouched "
                       "source in OneiOS; preserve consumed snapshot+marker. "
-                      "Do not delete data.consumed or rerun --run-90s yet.")
+                      "Do not delete data.consumed or rerun either probe mode yet.")
     if clone_state!="UNUSED":
         raise Refused("APFS_DATA_CLONE="+clone_state+
                       ": stage requires manual integrity recovery before takeover.")
@@ -240,8 +242,12 @@ def end_preboot_host_log_stream(proc,sink):
     sink.close()
 
 
-def run(adb_path,serial,output_dir):
+def run(adb_path,serial,output_dir,duration_seconds=90):
+    if duration_seconds not in (90,300):
+        raise Refused("unsupported probe deadline")
+    risk=RISK if duration_seconds==90 else RISK_300
     artifact=prepare(adb_path,serial)
+    artifact["reboot_request_deadline_after_framework_stop_seconds"]=duration_seconds
     print("SHORT_PROBE_PREPARED zones="+str(artifact["zones"]),flush=True)
     check=preflight(adb_path,serial)
     artifact["preflight_passed"]=True
@@ -263,7 +269,7 @@ def run(adb_path,serial,output_dir):
     def witness_thread():
         try:
             witness_result["report"]=WITNESS.observe(
-                adb_path,serial,max_seconds=300,identity=initial_identity)
+                adb_path,serial,max_seconds=max(300,duration_seconds+250),identity=initial_identity)
         except Exception as e:
             witness_result["error"]=str(e)
     watcher=threading.Thread(target=witness_thread,daemon=True)
@@ -285,12 +291,12 @@ def run(adb_path,serial,output_dir):
         "if test -x \"$p\"; then bb=\"$p\"; break; fi; done; "
         "test -n \"$bb\"; "
         f"\"$bb\" setsid /system/bin/sh {STAGE}/oneios_switch.sh "
-        f"--framework-session probe {ACK} {token} {RISK} "
+        f"--framework-session probe {ACK} {token} {risk} "
         f"</dev/null >{STAGE}/logs/probe-{token}.log 2>&1 &"
     )
     try:
         print("SHORT_PROBE_REQUESTING_REAL_IOS_GUEST",flush=True)
-        print("SHORT_PROBE_TIMEBASE=REBOOT_REQUEST_DEADLINE_90S_AFTER_FRAMEWORK_STOP",flush=True)
+        print(f"SHORT_PROBE_TIMEBASE=REBOOT_REQUEST_DEADLINE_{duration_seconds}S_AFTER_FRAMEWORK_STOP",flush=True)
         try:
             remote_root(adb_path,serial,launch,timeout=12)
         except (Refused,INVENTORY.mapper.Blocked) as exc:
@@ -317,7 +323,7 @@ def run(adb_path,serial,output_dir):
                 "=== ONEIOS SESSION LAUNCHED ===" in text
             )
     
-        deadline=time.monotonic()+305
+        deadline=time.monotonic()+max(305,duration_seconds+250)
         while watcher.is_alive() and time.monotonic()<deadline:
             watcher.join(timeout=2)
             # If switch rejected preflight before stopping Framework, stop early.
@@ -396,12 +402,13 @@ def main(argv=None):
     actions=p.add_mutually_exclusive_group()
     actions.add_argument("--prepare-probe",action="store_true")
     actions.add_argument("--run-90s",action="store_true")
+    actions.add_argument("--run-300s",action="store_true")
     p.add_argument("--adb",default=str(Path.home()/"Android/Sdk/platform-tools/adb"))
     p.add_argument("--output",type=Path,default=Path("out/sm8850/short-ios-probe"))
     a=p.parse_args(argv)
-    if not a.prepare_probe and not a.run_90s:
+    if not a.prepare_probe and not a.run_90s and not a.run_300s:
         print("SHORT_PROBE=AUDIT_NO_ADB. --prepare-probe stages guarded source without Framework stop.")
-        print("Explicit --run-90s requests a real iOS guest with at most 90 seconds AFTER verified Framework stop; preparation/guest launch consume part of that budget.")
+        print("Explicit --run-90s or --run-300s requests a real iOS guest with a reboot-request deadline that many seconds AFTER verified Framework stop; not that many seconds of guest execution.")
         print("Hardware watchdog/thermal critical limits and unassisted return are not yet certified.")
         return 0
     try:
@@ -411,7 +418,7 @@ def main(argv=None):
             print("SHORT_PROBE_PREPARED_SOURCE_ONLY zones="+str(result["zones"]))
             print("PREFLIGHT=NOT_RUN; FRAMEWORK=NOT_STOPPED")
         else:
-            return run(a.adb,serial,a.output)
+            return run(a.adb,serial,a.output,300 if a.run_300s else 90)
     except (Refused,INVENTORY.mapper.Blocked,MANIFEST.Refused,
             WITNESS.MAPPER.Blocked,OSError,ValueError,subprocess.SubprocessError) as exc:
         print("SHORT_PROBE=BLOCKED_OR_UNVERIFIED "+str(exc),file=sys.stderr)
