@@ -208,6 +208,20 @@ class SourceAdmissionGateTests(unittest.TestCase):
         self.assertIn('CPU_MAX_ZONE=$typ@$idx', thermal_guard)
         self.assertIn('atom thermal.guard.fault "$BOOT $GEN $$ $BIRTH $reason ${detail}"', thermal_guard)
         self.assertNotIn('atom thermal.guard.fault "$BOOT $GEN $ $BIRTH', thermal_guard)
+        # Real on-device failure: bare '$' in birth($) reads /proc/$/stat,
+        # making the guard exit before it can publish a PID birth identity.
+        self.assertIn('        BIRTH=$(birth $$)', thermal_guard)
+        self.assertNotIn('        BIRTH=$(birth $)\\n', thermal_guard)
+        self.assertIn('        SELF_BIRTH=$(birth $$)', thermal_guard)
+        self.assertIn('$SH "$GUARD_SCRIPT" --pid-birth-selftest', source)
+        self.assertLess(
+            source.index('$SH "$GUARD_SCRIPT" --pid-birth-selftest'),
+            source.index('echo "APFS_DATA_CLONE=CONSUMED_ONE_SHOT_BEFORE_FRAMEWORK_STOP"'))
+        check = subprocess.run(
+            ["sh", str(ROOT / "switcher/assets/oneios_sm8850_thermal_takeover_guard.sh"),
+             "--pid-birth-selftest"], capture_output=True, text=True, timeout=8)
+        self.assertEqual(0, check.returncode, check.stdout + check.stderr)
+        self.assertIn("P0_THERMAL_PID_BIRTH=PASS_READ_ONLY", check.stdout)
         self.assertIn('if [ "$FRAMEWORK" = 1 ] && { [ "$FW_MODE" = run ] || [ "$FW_MODE" = probe ]; }; then', source)
 
     def test_check_only_continues_to_allow_passive_preflight(self):
