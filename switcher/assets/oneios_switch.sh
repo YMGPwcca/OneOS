@@ -547,6 +547,11 @@ framework_deadline() {
             why="framework watcher lost"
         elif [ "$(cat "$CTL/framework.mode" 2>/dev/null)" = probe ] && ! framework_thermal_guard_healthy; then
             why="root thermal monitor lost, stale, or requested early return"
+        elif [ "$(cat "$CTL/framework.mode" 2>/dev/null)" = probe ] &&
+             [ "$(cat "$CTL/state" 2>/dev/null)" = running ] &&
+             { [ "$(cat "$CTL/thermal.cap.required" 2>/dev/null)" != "$WD_GEN" ] ||
+               ! framework_thermal_cap_healthy; }; then
+            why="SM8850 independent CPU frequency cap missing or stale"
         elif [ "$tick" -ge "$limit" ]; then
             expired=1
             why="framework deadline reached at $tick (deadline $limit)"
@@ -599,9 +604,32 @@ framework_thermal_guard_healthy() {
     th_now=$(watchdog_now) || return 1
     [ "$th_tick" -le "$th_now" ] && [ $((th_now - th_tick)) -le 6 ]
 }
+# The independent CPU cap is supplementary to (never a replacement for) the
+# original root emergency thermal monitor. It is mandatory for an SM8850
+# Framework probe once its worker has been armed after Framework stop.
+framework_thermal_cap_healthy() {
+    [ ! -e "$CTL/thermal.cap.fault" ] || return 1
+    framework_pid_alive "$CTL/thermal.cap.pid" || return 1
+    read -r cp_ver cp_boot cp_gen cp_pid cp_birth cp_seq cp_tick cp_status cp_level cp_pct cp_extra < "$CTL/thermal.cap.heartbeat" || return 1
+    [ -z "$cp_extra" ] && [ "$cp_ver" = v1 ] &&
+        [ "$cp_boot" = "$(cat "$CTL/boot" 2>/dev/null)" ] &&
+        [ "$cp_gen" = "$(watchdog_generation)" ] &&
+        [ "$cp_pid $cp_birth" = "$(cat "$CTL/thermal.cap.pid" 2>/dev/null)" ] &&
+        [ "$cp_status" = OK ] || return 1
+    for v in "$cp_seq" "$cp_tick" "$cp_level" "$cp_pct"; do watchdog_uint "$v" || return 1; done
+    [ "$cp_seq" -gt 0 ] || return 1
+    case "$cp_level:$cp_pct" in 1:80|2:65|3:50) ;; *) return 1 ;; esac
+    cp_now=$(watchdog_now) || return 1
+    [ "$cp_tick" -le "$cp_now" ] && [ $((cp_now - cp_tick)) -le 4 ]
+}
 framework_recovery_ready() {
     framework_pid_alive "$CTL/framework.guard" && framework_pid_alive "$CTL/framework.watcher" || return 1
     [ "$(cat "$CTL/framework.mode" 2>/dev/null)" != probe ] || framework_thermal_guard_healthy || return 1
+    if [ "$(cat "$CTL/framework.mode" 2>/dev/null)" = probe ] &&
+       [ "$(cat "$CTL/state" 2>/dev/null)" = running ]; then
+        [ "$(cat "$CTL/thermal.cap.required" 2>/dev/null)" = "$(watchdog_generation)" ] &&
+            framework_thermal_cap_healthy || return 1
+    fi
     [ "$(grep -c . "$CTL/keys/pids" 2>/dev/null)" = 3 ] || return 1
     for reader in $(cat "$CTL/keys/pids"); do
         framework_pid_alive "$CTL/keys/reader.$reader" || return 1
@@ -1906,6 +1934,13 @@ if [ "$FRAMEWORK" = 1 ]; then
             [ -x "$GUARD_SCRIPT" ] &&
             $SH "$GUARD_SCRIPT" --check "$GUARD_MANIFEST" ||
             framework_block "probe thermal sensor set unavailable, invalid, or beyond early-abort cutoffs"
+        # Real clock caps are separate from the emergency guard. Source must
+        # refuse BEFORE Framework stop when sysfs policies/ownership are not
+        # available; never silently launch a hot guest uncapped.
+        CAP_SCRIPT="$STAGE/oneios_sm8850_thermal_cap.sh"
+        root_only "$CAP_SCRIPT" && [ -x "$CAP_SCRIPT" ] &&
+            $SH "$CAP_SCRIPT" --check ||
+            framework_block "P0_CPU_CAP=BLOCKED no verified writable SM8850 cpufreq policy or staged root worker"
     fi
     if [ "$FW_MODE" = run ] || [ "$FW_MODE" = probe ]; then
         [ "$(cat "$STAGE/image.ready" 2>/dev/null)" = sm8850-ios27-3d-8cpu-600s ] ||
@@ -2356,6 +2391,23 @@ if [ "$FRAMEWORK" = 1 ]; then
     [ "$(timeout 3 service check inputflinger)" = 'Service inputflinger: not found' ] &&
         [ "$(timeout 3 service check input)" = 'Service input: not found' ] ||
         fw_recover "Android input services did not stop with system_server"
+    if [ "$FW_MODE" = probe ]; then
+        # Cap from the independently sampled guard, after Framework is down
+        # but BEFORE a single guest instruction is executed. All return
+        # helpers and the independent thermal cutoff are already armed.
+        "$BB" setsid $SH "$CAP_SCRIPT" --run "$CTL" "$WD_GEN" \
+            8>&- </dev/null >>"$STAGE/thermal-cap.log" 2>&1 &
+        cap_wait=0
+        until framework_thermal_cap_healthy; do
+            [ "$cap_wait" -lt 30 ] ||
+                fw_recover "SM8850 independent CPU cap did not arm; no guest was started"
+            sleep 0.2
+            cap_wait=$((cap_wait+1))
+        done
+        printf '%s\n' "$WD_GEN" > "$CTL/thermal.cap.required" ||
+            fw_recover "could not bind the CPU cap to this Framework generation"
+        echo "P0_CPU_CAP=ARMED_BEFORE_XNUHOST_NOT_HARDWARE_CERTIFIED"
+    fi
     grep -E '^(MemAvailable|SwapFree):' "$P/meminfo"
     fw_seconds=10
     [ "$FRAMEWORK_REBOOT" != 1 ] || fw_seconds=20
