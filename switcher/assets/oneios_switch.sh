@@ -1802,10 +1802,6 @@ if [ "$FRAMEWORK" = 1 ]; then
     esac
     FW_MODE=$2
     FW_PROBE_SECONDS=90
-    # This flag affects ONLY additional script-level temperature aborts.
-    # It must not disable the kernel/firmware thermal, the 600s deadline,
-    # non-temperature recovery faults or original watchdog.
-    FW_TEMP_LOG_ONLY=0
     [ "$FW_MODE" != reboot-smoke ] || FW_MODE=smoke
     [ "$APP" = 0 ] && framework_identity || framework_block "experimental profile requires SM-S948B/m3q/SM8850 firmware S948BXXS4BZIG with SELinux enforcing"
     if [ "$MODE" = --framework-session ]; then
@@ -1818,10 +1814,7 @@ if [ "$FRAMEWORK" = 1 ]; then
             case "$5" in
                 I_ACCEPT_SM8850_SHORT_TAKEOVER_90S_RISK) FW_PROBE_SECONDS=90 ;;
                 I_ACCEPT_SM8850_SHORT_TAKEOVER_300S_RISK) FW_PROBE_SECONDS=300 ;;
-                I_ACCEPT_SM8850_MONITOR_ONLY_600S_RISK)
-                    FW_PROBE_SECONDS=600
-                    FW_TEMP_LOG_ONLY=1 ;;
-                *) framework_block "explicit 90s/300s guard-on or monitor-only 600s probe acknowledgement required" ;;
+                *) framework_block "explicit 90s/300s short-probe risk acknowledgement required" ;;
             esac
         fi
         FW_LAUNCH=$4
@@ -1948,12 +1941,6 @@ if [ "$FRAMEWORK" = 1 ]; then
         root_only "$CAP_SCRIPT" && [ -x "$CAP_SCRIPT" ] &&
             $SH "$CAP_SCRIPT" --check ||
             framework_block "P0_CPU_CAP=BLOCKED no verified writable SM8850 cpufreq policy or staged root worker"
-        if [ "$FW_TEMP_LOG_ONLY" = 1 ]; then
-            TELEMETRY_SCRIPT="$STAGE/oneios_sm8850_telemetry.sh"
-            root_only "$TELEMETRY_SCRIPT" && [ -x "$TELEMETRY_SCRIPT" ] &&
-                $SH "$TELEMETRY_SCRIPT" --audit ||
-                framework_block "P0_TELEMETRY=BLOCKED no root-owned 15-second telemetry sampler"
-        fi
     fi
     if [ "$FW_MODE" = run ] || [ "$FW_MODE" = probe ]; then
         [ "$(cat "$STAGE/image.ready" 2>/dev/null)" = sm8850-ios27-3d-8cpu-600s ] ||
@@ -2163,14 +2150,8 @@ fi
 if [ "$FRAMEWORK" = 1 ] && [ "$FW_MODE" = probe ]; then
     # Root-owned monitor is armed BEFORE any Framework stop. Independent
     # deadline and watcher each supervise it and use the existing returner.
-    if [ "$FW_TEMP_LOG_ONLY" = 1 ]; then
-        echo "P0_THERMAL_POLICY=SCRIPT_TEMPERATURE_LOG_ONLY_STOCK_HARDWARE_UNCHANGED"
-        "$BB" setsid $SH "$GUARD_SCRIPT" --run "$CTL" "$GUARD_MANIFEST" "$WD_GEN" temperature-log-only \
-            8>&- </dev/null >>"$STAGE/thermal-guard.log" 2>&1 &
-    else
-        "$BB" setsid $SH "$GUARD_SCRIPT" --run "$CTL" "$GUARD_MANIFEST" "$WD_GEN" \
-            8>&- </dev/null >>"$STAGE/thermal-guard.log" 2>&1 &
-    fi
+    "$BB" setsid $SH "$GUARD_SCRIPT" --run "$CTL" "$GUARD_MANIFEST" "$WD_GEN" \
+        8>&- </dev/null >>"$STAGE/thermal-guard.log" 2>&1 &
     attempt=0
     until framework_thermal_guard_healthy; do
         [ "$attempt" -lt 30 ] || {
@@ -2414,13 +2395,8 @@ if [ "$FRAMEWORK" = 1 ]; then
         # Cap from the independently sampled guard, after Framework is down
         # but BEFORE a single guest instruction is executed. All return
         # helpers and the independent thermal cutoff are already armed.
-        if [ "$FW_TEMP_LOG_ONLY" = 1 ]; then
-            "$BB" setsid $SH "$CAP_SCRIPT" --run "$CTL" "$WD_GEN" temperature-log-only \
-                8>&- </dev/null >>"$STAGE/thermal-cap.log" 2>&1 &
-        else
-            "$BB" setsid $SH "$CAP_SCRIPT" --run "$CTL" "$WD_GEN" \
-                8>&- </dev/null >>"$STAGE/thermal-cap.log" 2>&1 &
-        fi
+        "$BB" setsid $SH "$CAP_SCRIPT" --run "$CTL" "$WD_GEN" \
+            8>&- </dev/null >>"$STAGE/thermal-cap.log" 2>&1 &
         cap_wait=0
         until framework_thermal_cap_healthy; do
             [ "$cap_wait" -lt 30 ] ||
@@ -2436,8 +2412,8 @@ if [ "$FRAMEWORK" = 1 ]; then
     fw_seconds=10
     [ "$FRAMEWORK_REBOOT" != 1 ] || fw_seconds=20
     [ "$FW_MODE" != probe ] || fw_seconds=90
-    if [ "$FW_MODE" = probe ] && { [ "$FW_PROBE_SECONDS" = 300 ] || [ "$FW_PROBE_SECONDS" = 600 ]; }; then
-        fw_seconds=$FW_PROBE_SECONDS
+    if [ "$FW_MODE" = probe ] && [ "$FW_PROBE_SECONDS" = 300 ]; then
+        fw_seconds=300
     fi
     if [ "$FW_MODE" = run ]; then
         # Exactly ten minutes from verified Framework stop, not from ADB
@@ -2458,34 +2434,15 @@ if [ "$FRAMEWORK" = 1 ]; then
         fw_recover "could not arm the phase deadline"
     echo "Framework stopped, app groups drained and Android input absent at uptime $fw_tick. Deadline: $((fw_tick + fw_seconds))"
     if [ "$FW_MODE" = probe ]; then
-        case "$fw_seconds" in
-            90)
-                echo "P0_SHORT_PROBE_DEADLINE=REQUEST_REBOOT_AT_FRAMEWORK_STOP_PLUS_90S_NOT_GUEST_RUNTIME_90S" ;;
-            300)
-                echo "P0_SHORT_PROBE_DEADLINE=REQUEST_REBOOT_AT_FRAMEWORK_STOP_PLUS_300S_NOT_GUEST_RUNTIME_300S" ;;
-            600)
-                echo "P0_EXPERIMENTAL_TELEMETRY_DEADLINE=REQUEST_REBOOT_AT_FRAMEWORK_STOP_PLUS_600S_NOT_GUEST_RUNTIME_600S" ;;
-        esac
+        if [ "$fw_seconds" = 90 ]; then
+            echo "P0_SHORT_PROBE_DEADLINE=REQUEST_REBOOT_AT_FRAMEWORK_STOP_PLUS_90S_NOT_GUEST_RUNTIME_90S"
+        else
+            echo "P0_SHORT_PROBE_DEADLINE=REQUEST_REBOOT_AT_FRAMEWORK_STOP_PLUS_300S_NOT_GUEST_RUNTIME_300S"
+        fi
     fi
     if [ "$FRAMEWORK_REBOOT" = 1 ]; then
         printf '%s\n' "$WD_GEN" > "$CTL/framework.takeover-confirmed" ||
             fw_recover "could not record verified Framework stop"
-    fi
-    if [ "$FW_TEMP_LOG_ONLY" = 1 ]; then
-        # Independent, read-only host sampler: all sysfs thermal zones, CPU
-        # cpufreq policies and KGSL frequencies. It writes under the root
-        # stage and duplicates records to the already-streamed host log.
-        # No sampler PID is allowed to alter the watchdog or thermal policy.
-        "$BB" setsid $SH "$TELEMETRY_SCRIPT" --run "$CTL" "$WD_GEN" "$FW_LAUNCH" 600 \
-            8>&- </dev/null >>"$STAGE/logs/probe-$FW_LAUNCH.log" 2>&1 &
-        tel_wait=0
-        until grep -Fq 'P0_TELEMETRY_START' "$STAGE/logs/telemetry-$FW_LAUNCH.log" 2>/dev/null; do
-            [ "$tel_wait" -lt 30 ] ||
-                fw_recover "read-only host telemetry could not start; no guest launched"
-            sleep 0.2
-            tel_wait=$((tel_wait + 1))
-        done
-        echo "P0_TELEMETRY=ARMED_15S_SPRINGBOARD_BASELINE_FINAL_AT_590"
     fi
     if [ "$FW_MODE" = smoke ]; then
         echo running > "$CTL/state" || fw_recover "could not record smoke state"
