@@ -49,12 +49,14 @@ policy() {
     for n in "$bat" "$lrp" "$ap"; do
         [ "$n" -gt 0 ] && [ "$n" -le 1200 ] || return 3
     done
-    # Emergency still belongs to the independent guard: never treat a CPU
-    # reduction as permission to continue beyond any of these abort cutoffs.
+    # Default short probe uses the script's emergency guard. Explicit
+    # temperature-log-only extended experiments keep tracking/capping even
+    # beyond the SCRIPT'S software limits. Hardware/kernel thermal controls
+    # are unmodified; sensor integrity failures remain fail-closed.
     if [ "$cpu" -ge 55000 ] || [ "$gpu" -ge 55000 ] ||
        [ "$ddr" -ge 55000 ] || [ "$bat" -ge 380 ] ||
        [ "$lrp" -ge 420 ] || [ "$ap" -ge 420 ]; then
-        return 2
+        [ "${THERMAL_LOG_ONLY:-0}" = 1 ] || return 2
     fi
     level=1
     if [ "$cpu" -ge 42000 ] || [ "$gpu" -ge 43000 ] ||
@@ -110,6 +112,10 @@ case "$MODE" in
     --policy)
         shift
         policy "$@"; exit $? ;;
+    --policy-log-only)
+        shift
+        THERMAL_LOG_ONLY=1
+        policy "$@"; exit $? ;;
     --fixture-step)
         [ "$#" = 3 ] || die fixture_args
         [ "$(id -u)" != 0 ] || die fixture_must_be_unprivileged
@@ -126,9 +132,14 @@ case "$MODE" in
         echo "P0_CPU_CAP=READ_ONLY_POLICY_AVAILABLE_NOT_CERTIFIED"
         exit 0 ;;
     --run)
-        [ "$#" = 3 ] || die args
+        [ "$#" = 3 ] || [ "$#" = 4 ] || die args
         [ "$(id -u)" = 0 ] || die root_required
         CTL=$2 GEN=$3
+        THERMAL_LOG_ONLY=0
+        if [ "$#" = 4 ]; then
+            [ "$4" = temperature-log-only ] || die invalid_thermal_mode
+            THERMAL_LOG_ONLY=1
+        fi
         [ "$CTL" = /data/adb/oneios-m3q-framework/control ] || die control_path
         [ -d "$CTL" ] && [ ! -L "$CTL" ] &&
           [ "$(stat -c %u "$CTL" 2>/dev/null)" = 0 ] || die untrusted_control
