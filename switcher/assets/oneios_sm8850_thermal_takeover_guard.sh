@@ -160,6 +160,12 @@ case "$MODE" in
             }
             atom thermal.guard.heartbeat "v1 $BOOT $GEN $$ $BIRTH $seq $tick OK $CPU_MAX $GPU_MAX $DDR_MAX $BAT $LRP $AP" ||
                 die heartbeat_write_failure
+            # Bounded root-owned thermal telemetry survives xnuhost bridges=0.
+            # Boot/generation distinguish new samples from appended older runs.
+            # Never delay or replace the fail-closed fault branch above.
+            case $((seq % 5)) in
+                1) echo "P0_THERMAL_SAMPLE=OK boot=$BOOT generation=$GEN seq=$seq uptime=$tick cpu_mC=$CPU_MAX cpu_zone=$CPU_MAX_ZONE gpu_mC=$GPU_MAX gpu_zone=$GPU_MAX_ZONE ddr_mC=$DDR_MAX ddr_zone=$DDR_MAX_ZONE bat_dC=$BAT lrp_dC=$LRP board_ap_dC=$AP" ;;
+            esac
             sleep 1
         done
         exit 0 ;;
