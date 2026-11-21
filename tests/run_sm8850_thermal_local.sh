@@ -6,7 +6,7 @@ set -Eeuo pipefail
 ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 SCRIPT="$ROOT/switcher/assets"
 TESTS="$ROOT/tests"
-EXPECTED_TESTS=179
+EXPECTED_TESTS=193
 
 for name in \
   oneios_switch.sh \
@@ -15,7 +15,8 @@ for name in \
   oneios_sm8850_thermal_health.sh \
   oneios_sm8850_thermal_pinned_reader.sh \
   oneios_sm8850_thermal_trial.sh \
-  oneios_sm8850_thermal_takeover_guard.sh; do
+  oneios_sm8850_thermal_takeover_guard.sh \
+  oneios_sm8850_thermal_cap.sh; do
   test -f "$SCRIPT/$name" || {
     echo "P0_LOCAL=FAIL_MISSING_FILE $name" >&2
     exit 3
@@ -99,5 +100,5 @@ grep -xq 'OK' "$LOG" || {
   echo "P0_LOCAL=FAIL_MISSING_TEST_OK" >&2
   exit 5
 }
-echo "ONEOS_P0_OFFLINE_178=PASS"
+echo "ONEOS_P0_OFFLINE_${EXPECTED_TESTS}=PASS"
 echo "P0_SAFETY_STATUS=OFFLINE_SIMULATION_ONLY_NO_PHYSICAL_GUARD"
