@@ -95,6 +95,7 @@ class PackagesTest {
             "oneios_sm8850_thermal_reader.sh",
             "oneios_sm8850_thermal_shadow.sh",
             "oneios_sm8850_thermal_takeover_guard.sh",
+            "oneios_sm8850_thermal_cap.sh",
             "oneios_sm8850_thermal_trial.sh",
         )
         val excluded = thermal + setOf("oneos_tunnel.sh", "7zz")
