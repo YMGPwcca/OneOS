@@ -35,8 +35,10 @@ STAGE = "/data/adb/oneios-m3q-framework"
 SWITCH = ROOT/"switcher/assets/oneios_switch.sh"
 GUARD = ROOT/"switcher/assets/oneios_sm8850_thermal_takeover_guard.sh"
 CAP = ROOT/"switcher/assets/oneios_sm8850_thermal_cap.sh"
+TELEMETRY = ROOT/"switcher/assets/oneios_sm8850_telemetry.sh"
 RISK = "I_ACCEPT_SM8850_SHORT_TAKEOVER_90S_RISK"
 RISK_300 = "I_ACCEPT_SM8850_SHORT_TAKEOVER_300S_RISK"
+RISK_600 = "I_ACCEPT_SM8850_MONITOR_ONLY_600S_RISK"
 ACK = "I_ACCEPT_SM8850_FRAMEWORK_TAKEOVER"
 
 def load(path,name):
@@ -83,7 +85,7 @@ def line_manifest(snapshot):
                       [f"z {z['index']} {z['type']} {z['group']}" for z in rows])+"\n").encode(),boot,len(rows)
 
 def prepare(adb_path,serial):
-    sha(SWITCH); sha(GUARD); sha(CAP)
+    sha(SWITCH); sha(GUARD); sha(CAP); sha(TELEMETRY)
     before=INVENTORY.mapper.identity(adb_path,serial)
     # Guard the one-shot clone BEFORE uploading or changing any staged
     # switch/monitor source. Preflight-only validation used to miss this.
@@ -111,6 +113,7 @@ def prepare(adb_path,serial):
         "oneios_switch.sh": SWITCH,
         "oneios_sm8850_thermal_takeover_guard.sh": GUARD,
         "oneios_sm8850_thermal_cap.sh": CAP,
+        "oneios_sm8850_telemetry.sh": TELEMETRY,
     }
     made=False
     try:
@@ -142,15 +145,17 @@ def prepare(adb_path,serial):
                 f"cp {temp}/oneios_switch.sh {STAGE}/.switch.{nonce}; "
                 f"cp {temp}/oneios_sm8850_thermal_takeover_guard.sh {STAGE}/.guard.{nonce}; "
                 f"cp {temp}/oneios_sm8850_thermal_cap.sh {STAGE}/.cap.{nonce}; "
+                f"cp {temp}/oneios_sm8850_telemetry.sh {STAGE}/.telemetry.{nonce}; "
                 f"cp {temp}/thermal.guard.manifest {STAGE}/.manifest.{nonce}; "
-                f"chown 0:0 {STAGE}/.switch.{nonce} {STAGE}/.guard.{nonce} {STAGE}/.cap.{nonce} {STAGE}/.manifest.{nonce}; "
-                f"chmod 700 {STAGE}/.switch.{nonce} {STAGE}/.guard.{nonce} {STAGE}/.cap.{nonce}; "
+                f"chown 0:0 {STAGE}/.switch.{nonce} {STAGE}/.guard.{nonce} {STAGE}/.cap.{nonce} {STAGE}/.telemetry.{nonce} {STAGE}/.manifest.{nonce}; "
+                f"chmod 700 {STAGE}/.switch.{nonce} {STAGE}/.guard.{nonce} {STAGE}/.cap.{nonce} {STAGE}/.telemetry.{nonce}; "
                 f"chmod 600 {STAGE}/.manifest.{nonce}; "
                 f"mv -f {STAGE}/.switch.{nonce} {STAGE}/oneios_switch.sh; "
                 f"mv -f {STAGE}/.guard.{nonce} {STAGE}/oneios_sm8850_thermal_takeover_guard.sh; "
                 f"mv -f {STAGE}/.cap.{nonce} {STAGE}/oneios_sm8850_thermal_cap.sh; "
+                f"mv -f {STAGE}/.telemetry.{nonce} {STAGE}/oneios_sm8850_telemetry.sh; "
                 f"mv -f {STAGE}/.manifest.{nonce} {STAGE}/thermal.guard.manifest; "
-                f"chmod 700 {STAGE}/oneios_switch.sh {STAGE}/oneios_sm8850_thermal_takeover_guard.sh {STAGE}/oneios_sm8850_thermal_cap.sh; "
+                f"chmod 700 {STAGE}/oneios_switch.sh {STAGE}/oneios_sm8850_thermal_takeover_guard.sh {STAGE}/oneios_sm8850_thermal_cap.sh {STAGE}/oneios_sm8850_telemetry.sh; "
                 f"chmod 600 {STAGE}/thermal.guard.manifest"
             )
             remote_root(adb_path,serial,setup,timeout=25)
@@ -166,7 +171,7 @@ def prepare(adb_path,serial):
             try:
                 remote_root(adb_path,serial,
                     f"rm -f {temp}/oneios_switch.sh {temp}/oneios_sm8850_thermal_takeover_guard.sh "
-                    f"{temp}/oneios_sm8850_thermal_cap.sh "
+                    f"{temp}/oneios_sm8850_thermal_cap.sh {temp}/oneios_sm8850_telemetry.sh "
                     f"{temp}/thermal.guard.manifest; rmdir {temp}",timeout=15)
             except (Refused,INVENTORY.mapper.Blocked):
                 raise Refused("temporary ADB upload cleanup unverified")
@@ -174,6 +179,7 @@ def prepare(adb_path,serial):
             "switch_sha256":hashlib.sha256(SWITCH.read_bytes()).hexdigest(),
             "guard_sha256":hashlib.sha256(GUARD.read_bytes()).hexdigest(),
             "cap_sha256":hashlib.sha256(CAP.read_bytes()).hexdigest(),
+            "telemetry_sha256":hashlib.sha256(TELEMETRY.read_bytes()).hexdigest(),
             "manifest_sha256":hashlib.sha256(manifest).hexdigest(),
             "preflight_passed":False}
 
