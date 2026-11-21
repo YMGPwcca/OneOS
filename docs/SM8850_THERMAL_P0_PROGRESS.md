@@ -420,3 +420,23 @@ From the operator's preserved host thermal stream (`live-300s-20261121T004007Z-0
 - Keep the experimental 55 C abort and all fail-closed sensor paths unchanged until separate firmware/sensor provenance review; **do not increase thresholds to push iOS runtime**. Do not rearm the one-shot APFS clone or rerun the 300s/600s guest for this diagnosis. Preserve original thermal and switch streams as private evidence.
 
 Full evidence reasoning and source revisions: [guarded 90/300-second physical ledger](SM8850_SHORT_GUARDED_IOS_PROBE.md). The CPU zone identified here belongs to the **new 300s attempt**, not the older 90s abort whose culprit remains unknown. `P0_PHYSICAL_SENSOR_THRESHOLD_ABORT=OBSERVED`; `P0_UNASSISTED_RECOVERY=NOT_CERTIFIED`.
+
+
+## 2026-11-21: direct-parent Oryon placement integrated with conservative P0 switch source
+
+The user requested an **implementation**, not more phone probes, following the separate CPU90 physical attempt that reported `cpu_mC=101100` on `cpu-1-1-1@27`, which exceeded the experimental 90 C abort; the host then observed a new normal One UI boot. The CPU90 result belongs to the isolated `exp/sm8850-p0-cpu90c-300s` history, not this CPU55 safety branch.
+
+**Upstream selection:** the parent of YMGPwcca/OneOS is `akshaynexus/OneOS` (its `oneios` session branch), and the parent of YMGPwcca/OneiOS is `akshaynexus/OneiOS` (main source commit `92886287724d3f9aa097dc17157281e585457500`). Do **not** confuse the ancestral `fahadalijaved/OneOS` with this immediate parent. A blanket parent merge would overwrite materially different, SM8850-specific recovery/guard admission behavior, so port only the relevant tested CPU policy.
+
+The companion OneiOS fork now has upstream's Qualcomm Oryon MIDR implementation in `runtime/bridges/cpu/topology.c`, preserving its local haptics and other SM8850 work. Its captured SM8850 fixture now asserts 8 physical Qualcomm P cores with 2 E-class and 6 P-class **guest** vCPUs under the parent plan. For this exact P0 `bridges=0` runtime, we enabled the already-present **`cpu-affinity-bench=1`** and explicit `cpu-pin=1` alongside `--cpus 8` in `switcher/assets/oneios_switch.sh`. This allows guest-scoped vCPU and iOS-task pairing without enabling Bluetooth, camera, thermal HAL or unrelated bridges. The process fails before guest boot when its cpu-affinity bench input constraints fail; **being online or in cpuset 0-7 by itself is not sufficient placement proof**.
+
+The independent root `oneios_sm8850_thermal_takeover_guard.sh` also emits a **session-bound**, five-heartbeat-rate `P0_THERMAL_SAMPLE=OK` line including CPU/GPU/DDR peak zones and BAT/LRP/board-AP temperatures, even while the OneiOS bench leaves bridges off. Fault detection, atomic PID-birth/heartbeat, existing returner and conservative **CPU 55 C / GPU 55 C / DDR 55 C / BAT 38 C / LRP/AP 42 C** experimental cutoffs are **unchanged**. `--framework-session run` full 600s admission remains **unconditionally blocked**.
+
+New static regression assertions in `tests/test_sm8850_thermal_shadow.py` require the isolated bench argv, disabled bridges, per-session bounded telemetry and fail-closed ordering. **Source committed, NOT yet locally built/tested by the operator or exercised on the phone.** Native rebuilt OneiOS binaries must be staged separately before any future acceptance attempt; the already-staged phone binary is not modified by a Git commit. None of these modifications proves that the 101.1 C CPU peak can be safely prevented, calibrates firmware trips or authenticates the reboot requester.
+
+Local-only gate on CachyOS:
+```sh
+cd ~/projects/OneiOS/app
+python3 -m unittest discover -s tests -p 'test_sm8850_thermal_shadow.py' -v
+```
+This is a **source and simulator regression**, not a physical thermal or recovery certification. **No new CPU90/300s phone test is authorized by passing it.**
