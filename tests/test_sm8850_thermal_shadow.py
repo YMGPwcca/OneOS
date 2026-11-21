@@ -193,10 +193,13 @@ class SourceAdmissionGateTests(unittest.TestCase):
         self.assertIn('P0_SHORT_PROBE_THERMAL=ARMED_ROOT_SENSOR_GUARD_NOT_PRODUCTION_CERTIFIED', source)
         self.assertIn('oneios_sm8850_thermal_takeover_guard.sh', source)
         thermal_guard = (ROOT / "switcher/assets/oneios_sm8850_thermal_takeover_guard.sh").read_text()
-        # Physical 90s probe crossed an experimental cutoff after xnuhost
-        # launched. Keep exact soft cutoffs and future fault provenance.
+        # Isolated operator-risk experiment: CPU abort at 90C only.
+        # This is NOT a vendor/firmware qualification or P0 release gate.
+        # Preserve the remaining low cutoffs and existing fail-closed logic.
+        self.assertNotIn('"$CPU_MAX" -lt 55000', thermal_guard)
+        self.assertIn('P0_THERMAL_PROFILE=CPU_90C_HIGH_RISK_NOT_VENDOR_CERTIFIED', thermal_guard)
         for threshold in (
-            '"$CPU_MAX" -lt 55000', '"$GPU_MAX" -lt 55000',
+            '"$CPU_MAX" -lt 90000', '"$GPU_MAX" -lt 55000',
             '"$DDR_MAX" -lt 55000', '"$BAT" -lt 380',
             '"$LRP" -lt 420', '"$AP" -lt 420',
         ):
