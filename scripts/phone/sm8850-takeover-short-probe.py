@@ -208,7 +208,7 @@ def telemetry_comparison(raw_lines):
         name,sep,rest=line.partition(" ")
         if not sep:
             continue
-        fields=dict(re.findall(r"([A-Za-z][A-Za-z_0-9]*)=([^\\s]+)",rest))
+        fields=dict(re.findall(r"([A-Za-z][A-Za-z_0-9]*)=([^\s]+)",rest))
         try:
             seq=int(fields.get("seq","-1"))
         except ValueError:
