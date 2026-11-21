@@ -334,8 +334,11 @@ def run(adb_path,serial,output_dir,duration_seconds=90):
                     live_log_excerpt=log[-16000:]
                 if "PREFLIGHT REFUSED" in log or "PREFLIGHT REFUSED:" in log:
                     raise Refused("switch refused before Framework stop:\n"+log[-1200:])
+                if "Cannot arm root thermal monitor; One UI left running." in log:
+                    raise Refused("guard arm failed before Framework stop:\n"+log[-1600:])
             except (INVENTORY.mapper.Blocked,Refused) as exc:
-                if "switch refused" in str(exc):
+                if ("switch refused" in str(exc) or
+                        "guard arm failed before Framework stop" in str(exc)):
                     raise
     finally:
         end_preboot_host_log_stream(stream_proc,stream_sink)
