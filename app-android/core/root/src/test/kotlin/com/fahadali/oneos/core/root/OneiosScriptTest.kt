@@ -1048,29 +1048,47 @@ class OneiosScriptTest {
     }
 
     @Test
-    fun normalReturnFailsSafeWhenShmemReadbackDoesNotMatch() = failsafe("shmem_enabled") { f ->
+    fun normalReturnFailsSafeWhenShmemReadbackDoesNotMatch() = each { f ->
+        f.phone()
         val node = shmemNode(f, "advise")
-        File(f.control, "base/shmem_enabled").writeText("never\n")
-        // A sysfs file can accept a write yet keep reporting its previous
-        // active mode. Match the fake node by suffix, not the temporary
-        // absolute root spelling, which can vary across shells/worktrees.
-        // The production restore_shmem() fail-closed check is unchanged.
-        val shim = f.file("bin/cat").apply {
+        val baseline = File(f.control, "base/shmem_enabled").apply { writeText("never\n") }
+
+        // Older mksh versions have a built-in cat(1), which takes precedence
+        // over the fake bin/cat on PATH. Mock the shmem-specific external
+        // awk stage instead, so the simulated sysfs reader reports its stale
+        // mode even after the (fake regular file's) write succeeds.
+        // The real oneios_return.sh fail-closed logic remains unchanged.
+        val hits = f.file("behave/shmem-awk-hits")
+        val realAwk = listOf("/usr/bin/awk", "/bin/awk").first { File(it).canExecute() }
+        val shim = f.file("bin/awk").apply {
             writeText(
                 "#!/bin/sh\n" +
                     "case \"\$1\" in\n" +
-                    "  */sys/kernel/mm/transparent_hugepage/shmem_enabled)\n" +
-                    "    printf '%s\\n' 'always within_size [advise] never deny force' ;;\n" +
-                    "  *) exec /bin/cat \"\$@\" ;;\n" +
+                    "  *'NF == 1 && \$1 ~ /^[a-z_]+\$/'*)\n" +
+                    "    printf 'hit\\n' >> '${hits.path}'\n" +
+                    "    printf '%s\\n' advise ;;\n" +
+                    "  *) exec $realAwk \"\$@\" ;;\n" +
                     "esac\n",
             )
             assertTrue(setExecutable(true))
         }
+        // Prove the fake is selected before starting return, and then verify
+        // the real return script called that same fake for BOTH sysfs reads.
         val env = "PATH=${shim.parentFile.path}:${System.getenv("PATH")}"
-        val check = ProcessBuilder("env", env, "cat", node.path).start()
-        val readback = check.inputStream.readBytes().toString(Charsets.UTF_8)
-        assertEquals(readback, 0, check.waitFor())
-        assertTrue("fake sysfs readback not intercepted: $readback", readback.contains("[advise]"))
+        val awkProgram = "NF == 1 && \$1 ~ /^[a-z_]+\$/ { print \$1; next }"
+        val check = ProcessBuilder("env", env, "awk", awkProgram).start()
+        val mocked = check.inputStream.readBytes().toString(Charsets.UTF_8)
+        assertEquals(mocked, 0, check.waitFor())
+        assertEquals("advise\n", mocked)
+        assertEquals(listOf("hit"), hits.readLines())
+
+        val result = f.returns()
+        assertTrue("shmem sysfs mock was bypassed by the return shell: ${hits.readLines()}; return:\n${result.text}",
+            hits.readLines().size >= 3)
+        assertEquals(result.text, 1, result.exit)
+        f.assertFailsafe("shmem_enabled")
+        assertEquals("never\n", node.readText())
+        assertEquals("never\n", baseline.readText())
     }
 
     @Test
