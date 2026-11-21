@@ -211,6 +211,14 @@ class SourceAdmissionGateTests(unittest.TestCase):
         # Sampling is session-bound and bounded; fault must be emitted first.
         self.assertIn('P0_THERMAL_SAMPLE=OK boot=$BOOT generation=$GEN seq=$seq', thermal_guard)
         self.assertIn('case $((seq % 5)) in', thermal_guard)
+        self.assertIn('P0_XNUHOST_LOAD=READ_ONLY boot=$BOOT generation=$GEN', thermal_guard)
+        self.assertIn('user_ticks=%s system_ticks=%s birth_ticks=%s', thermal_guard)
+        self.assertIn('host_allcpu_ticks=', thermal_guard)
+        # Root monitoring is diagnostic only; no host frequency or process
+        # controls must be introduced as a side effect of telemetry.
+        for prohibited in ('sched_setaffinity', 'scaling_max_freq', 'cpufreq/',
+                           'renice ', 'setprop sys.powerctl'):
+            self.assertNotIn(prohibited, thermal_guard)
         self.assertLess(thermal_guard.index('P0_THERMAL_GUARD=FAIL_CLOSED'),
                         thermal_guard.index('P0_THERMAL_SAMPLE=OK'))
         self.assertIn('atom thermal.guard.fault "$BOOT $GEN $$ $BIRTH $reason ${detail}"', thermal_guard)
