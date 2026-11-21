@@ -1446,6 +1446,8 @@ case "$MODE" in
                 --cpus 8 --ram 4G --set ram-giveback=0 --set ram-prefault=1 --set ram-lock=1 \
                 --set ram-huge=0 --set host-mem-log=5 --set bridges=0 --set wifi=off \
                 --set cpu-pin=1 --set cpu-affinity-bench=1 \
+                --set gpu-level=deadline --set gpu-priority=1 --set setway-skip=1 \
+                --set spin-host=0 --set spin-task=0 \
                 --set bluetooth=virtual --set haptics=off --set encoder=off --set return-graceful-ms=0 \
                 --gpu auto --display shm --set touch-exclusive=1 --width 1080 --height 2340 --hz 60 \
                 --boot-args 'debug=0x14e serial=3 -v kt_fixed_zones=120 -no_slto_panic ml-timeout-lock-panic-scale=40 tlto_us=0 armcpu-self-ipi=1 armcpu-spi-ipi=1 use_contiguous_hint=0 interrupt-masked-debug-mode=0 sched_preemption_disable_debug_mode=0 wdt=-1 sheng-smp=1 oneios-data-wait=3000'
