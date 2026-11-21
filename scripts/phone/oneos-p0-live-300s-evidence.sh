@@ -247,8 +247,16 @@ PY
     echo 'PHONE_RETRY=NO'
 }
 
-if [[ "${1:-}" == '--child' ]]; then
-    [[ $# -eq 2 ]] || fail 'INTERNAL_CALL_BAD_ARGUMENTS'
+[[ $# -eq 0 ]] || { echo 'Usage: bash oneos-p0-live-300s-evidence.sh' >&2; exit 2; }
+mkdir -p "$ONEIOS/out/sm8850/p0-physical"
+OUT="$(mktemp -d "$ONEIOS/out/sm8850/p0-physical/live-300s-$(date -u +%Y%m%dT%H%M%SZ)-XXXXXX")"
+chmod 700 "$OUT"
+printf '%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$OUT/requested-at-utc.txt"
+set +e
+(
+    # Run in an isolated strict-mode subshell, not via bash "$0":
+    # stdin-based invocation makes $0=/usr/bin/bash (an ELF binary).
+    set -Eeuo pipefail
     P0_TMP_SOURCE=''
     P0_THERMAL_STREAM_PID=''
     cleanup_child() {
@@ -261,16 +269,8 @@ if [[ "${1:-}" == '--child' ]]; then
         fi
     }
     trap cleanup_child EXIT
-    physical_child "$2"
-    exit $?
-fi
-[[ $# -eq 0 ]] || { echo 'Usage: bash oneos-p0-live-300s-evidence.sh' >&2; exit 2; }
-mkdir -p "$ONEIOS/out/sm8850/p0-physical"
-OUT="$(mktemp -d "$ONEIOS/out/sm8850/p0-physical/live-300s-$(date -u +%Y%m%dT%H%M%SZ)-XXXXXX")"
-chmod 700 "$OUT"
-printf '%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$OUT/requested-at-utc.txt"
-set +e
-bash "$0" --child "$OUT" 2>&1 | tee "$OUT/console.log"
+    physical_child "$OUT"
+) 2>&1 | tee "$OUT/console.log"
 RC=${PIPESTATUS[0]}
 set -e
 capture_postboot "$OUT" || true
