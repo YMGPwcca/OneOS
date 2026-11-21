@@ -35,10 +35,8 @@ STAGE = "/data/adb/oneios-m3q-framework"
 SWITCH = ROOT/"switcher/assets/oneios_switch.sh"
 GUARD = ROOT/"switcher/assets/oneios_sm8850_thermal_takeover_guard.sh"
 CAP = ROOT/"switcher/assets/oneios_sm8850_thermal_cap.sh"
-TELEMETRY = ROOT/"switcher/assets/oneios_sm8850_telemetry.sh"
 RISK = "I_ACCEPT_SM8850_SHORT_TAKEOVER_90S_RISK"
 RISK_300 = "I_ACCEPT_SM8850_SHORT_TAKEOVER_300S_RISK"
-RISK_600 = "I_ACCEPT_SM8850_MONITOR_ONLY_600S_RISK"
 ACK = "I_ACCEPT_SM8850_FRAMEWORK_TAKEOVER"
 
 def load(path,name):
@@ -85,7 +83,7 @@ def line_manifest(snapshot):
                       [f"z {z['index']} {z['type']} {z['group']}" for z in rows])+"\n").encode(),boot,len(rows)
 
 def prepare(adb_path,serial):
-    sha(SWITCH); sha(GUARD); sha(CAP); sha(TELEMETRY)
+    sha(SWITCH); sha(GUARD); sha(CAP)
     before=INVENTORY.mapper.identity(adb_path,serial)
     # Guard the one-shot clone BEFORE uploading or changing any staged
     # switch/monitor source. Preflight-only validation used to miss this.
@@ -113,7 +111,6 @@ def prepare(adb_path,serial):
         "oneios_switch.sh": SWITCH,
         "oneios_sm8850_thermal_takeover_guard.sh": GUARD,
         "oneios_sm8850_thermal_cap.sh": CAP,
-        "oneios_sm8850_telemetry.sh": TELEMETRY,
     }
     made=False
     try:
@@ -145,17 +142,15 @@ def prepare(adb_path,serial):
                 f"cp {temp}/oneios_switch.sh {STAGE}/.switch.{nonce}; "
                 f"cp {temp}/oneios_sm8850_thermal_takeover_guard.sh {STAGE}/.guard.{nonce}; "
                 f"cp {temp}/oneios_sm8850_thermal_cap.sh {STAGE}/.cap.{nonce}; "
-                f"cp {temp}/oneios_sm8850_telemetry.sh {STAGE}/.telemetry.{nonce}; "
                 f"cp {temp}/thermal.guard.manifest {STAGE}/.manifest.{nonce}; "
-                f"chown 0:0 {STAGE}/.switch.{nonce} {STAGE}/.guard.{nonce} {STAGE}/.cap.{nonce} {STAGE}/.telemetry.{nonce} {STAGE}/.manifest.{nonce}; "
-                f"chmod 700 {STAGE}/.switch.{nonce} {STAGE}/.guard.{nonce} {STAGE}/.cap.{nonce} {STAGE}/.telemetry.{nonce}; "
+                f"chown 0:0 {STAGE}/.switch.{nonce} {STAGE}/.guard.{nonce} {STAGE}/.cap.{nonce} {STAGE}/.manifest.{nonce}; "
+                f"chmod 700 {STAGE}/.switch.{nonce} {STAGE}/.guard.{nonce} {STAGE}/.cap.{nonce}; "
                 f"chmod 600 {STAGE}/.manifest.{nonce}; "
                 f"mv -f {STAGE}/.switch.{nonce} {STAGE}/oneios_switch.sh; "
                 f"mv -f {STAGE}/.guard.{nonce} {STAGE}/oneios_sm8850_thermal_takeover_guard.sh; "
                 f"mv -f {STAGE}/.cap.{nonce} {STAGE}/oneios_sm8850_thermal_cap.sh; "
-                f"mv -f {STAGE}/.telemetry.{nonce} {STAGE}/oneios_sm8850_telemetry.sh; "
                 f"mv -f {STAGE}/.manifest.{nonce} {STAGE}/thermal.guard.manifest; "
-                f"chmod 700 {STAGE}/oneios_switch.sh {STAGE}/oneios_sm8850_thermal_takeover_guard.sh {STAGE}/oneios_sm8850_thermal_cap.sh {STAGE}/oneios_sm8850_telemetry.sh; "
+                f"chmod 700 {STAGE}/oneios_switch.sh {STAGE}/oneios_sm8850_thermal_takeover_guard.sh {STAGE}/oneios_sm8850_thermal_cap.sh; "
                 f"chmod 600 {STAGE}/thermal.guard.manifest"
             )
             remote_root(adb_path,serial,setup,timeout=25)
@@ -171,7 +166,7 @@ def prepare(adb_path,serial):
             try:
                 remote_root(adb_path,serial,
                     f"rm -f {temp}/oneios_switch.sh {temp}/oneios_sm8850_thermal_takeover_guard.sh "
-                    f"{temp}/oneios_sm8850_thermal_cap.sh {temp}/oneios_sm8850_telemetry.sh "
+                    f"{temp}/oneios_sm8850_thermal_cap.sh "
                     f"{temp}/thermal.guard.manifest; rmdir {temp}",timeout=15)
             except (Refused,INVENTORY.mapper.Blocked):
                 raise Refused("temporary ADB upload cleanup unverified")
@@ -179,7 +174,6 @@ def prepare(adb_path,serial):
             "switch_sha256":hashlib.sha256(SWITCH.read_bytes()).hexdigest(),
             "guard_sha256":hashlib.sha256(GUARD.read_bytes()).hexdigest(),
             "cap_sha256":hashlib.sha256(CAP.read_bytes()).hexdigest(),
-            "telemetry_sha256":hashlib.sha256(TELEMETRY.read_bytes()).hexdigest(),
             "manifest_sha256":hashlib.sha256(manifest).hexdigest(),
             "preflight_passed":False}
 
@@ -192,71 +186,6 @@ def preflight(adb_path,serial):
         "P0_FULL_600S_TAKEOVER=BLOCKED" in output):
         raise Refused("short probe thermal admission did not pass: "+output[-1000:])
     return output
-
-def telemetry_comparison(raw_lines):
-    """Pure, offline parse of the root read-only telemetry from current session.
-
-    The first snapshot is valid only with *both* guest process log markers.
-    The final snapshot is valid only when recorded at >=590 seconds after
-    VERIFIED Framework stop; missing samples are never interpolated.
-    """
-    parsed={}
-    order=[]
-    for line in raw_lines:
-        if not line.startswith("P0_TELEMETRY_"):
-            continue
-        name,sep,rest=line.partition(" ")
-        if not sep:
-            continue
-        fields=dict(re.findall(r"([A-Za-z][A-Za-z_0-9]*)=([^\s]+)",rest))
-        try:
-            seq=int(fields.get("seq","-1"))
-        except ValueError:
-            continue
-        if seq<1:
-            continue
-        item=parsed.setdefault(seq,{"temperatures":{},"cpu":{},"gpu":{},"phase":None,"elapsed":None})
-        if name=="P0_TELEMETRY_BEGIN":
-            item["phase"]=fields.get("phase")
-            try: item["elapsed"]=int(fields.get("elapsed_framework_s","-1"))
-            except ValueError: item["elapsed"]=-1
-            order.append(seq)
-        elif name=="P0_TELEMETRY_TEMP":
-            item["temperatures"][fields.get("zone","unknown")]={
-                "type":fields.get("type","unknown"),"milli_c":fields.get("mc","UNAVAILABLE")}
-        elif name=="P0_TELEMETRY_CPU":
-            item["cpu"][fields.get("policy","unknown")]={
-                "cur_khz":fields.get("cur_khz","UNAVAILABLE"),
-                "max_khz":fields.get("max_khz","UNAVAILABLE"),
-                "hwmax_khz":fields.get("hwmax_khz","UNAVAILABLE")}
-        elif name=="P0_TELEMETRY_GPU":
-            item["gpu"]=fields
-    seqs=sorted(set(order))
-    bases=[parsed[n] for n in seqs if parsed[n]["phase"]=="BASELINE"]
-    ends=[parsed[n] for n in seqs if parsed[n]["phase"]=="FINAL" and parsed[n]["elapsed"] is not None and parsed[n]["elapsed"]>=590]
-    baseline=bases[0] if bases else None
-    final=ends[-1] if ends else None
-    diffs=[]
-    if baseline and final:
-        def change(kind,key,first,last):
-            try:
-                av=int(first); bv=int(last)
-                diffs.append(f"{kind} {key} initial={av} final={bv} delta={bv-av:+d}")
-            except (TypeError,ValueError):
-                diffs.append(f"{kind} {key} initial={first} final={last} delta=UNAVAILABLE")
-        for zone,first in sorted(baseline["temperatures"].items()):
-            last=final["temperatures"].get(zone,{})
-            change("THERMAL",f"{zone}/{first['type']}",first["milli_c"],last.get("milli_c","UNAVAILABLE"))
-        for pol,first in sorted(baseline["cpu"].items()):
-            last=final["cpu"].get(pol,{})
-            for key in ("cur_khz","max_khz"):
-                change("CPU",f"{pol}/{key}",first[key],last.get(key,"UNAVAILABLE"))
-        for key in ("clk","busy_pct","devfreq_cur","devfreq_max"):
-            if key in baseline["gpu"] or key in final["gpu"]:
-                change("GPU",key,baseline["gpu"].get(key,"UNAVAILABLE"),final["gpu"].get(key,"UNAVAILABLE"))
-    return {"sample_count":len(seqs),"baseline":baseline,
-            "final":final,"deltas":diffs,"comparison_complete":bool(baseline and final)}
-
 
 def begin_preboot_host_log_stream(adb_path,serial,token,output_dir):
     """Capture the root-only switch log to the Linux host BEFORE reboot.
@@ -321,9 +250,9 @@ def end_preboot_host_log_stream(proc,sink):
 
 
 def run(adb_path,serial,output_dir,duration_seconds=90):
-    if duration_seconds not in (90,300,600):
+    if duration_seconds not in (90,300):
         raise Refused("unsupported probe deadline")
-    risk={90:RISK,300:RISK_300,600:RISK_600}[duration_seconds]
+    risk=RISK if duration_seconds==90 else RISK_300
     artifact=prepare(adb_path,serial)
     artifact["reboot_request_deadline_after_framework_stop_seconds"]=duration_seconds
     print("SHORT_PROBE_PREPARED zones="+str(artifact["zones"]),flush=True)
@@ -421,19 +350,6 @@ def run(adb_path,serial,output_dir,duration_seconds=90):
     artifact["preboot_host_log_bytes"]=stream_file.stat().st_size
     artifact["preboot_host_log_tail"]=streamed_log[-30000:]
     observe_log(streamed_log)
-    # Preserve whatever the host read before ADB, DirtyFrag/su or One UI
-    # stopped responding. These are observations, not synthesized values.
-    telemetry_lines=[line for line in streamed_log.splitlines()
-                     if line.startswith("P0_TELEMETRY_")]
-    telemetry_file=output_dir/("telemetry-"+token+".log")
-    telemetry_file.write_text("\n".join(telemetry_lines)+
-                              ("\n" if telemetry_lines else ""),encoding="utf-8")
-    telemetry_file.chmod(0o600)
-    artifact["telemetry_host_file"]=str(telemetry_file)
-    artifact["telemetry_host_stream_line_count"]=len(telemetry_lines)
-    if duration_seconds==600:
-        print("P0_TELEMETRY_HOST_STREAM_FILE="+str(telemetry_file),flush=True)
-        print("P0_TELEMETRY_HOST_STREAM_LINES="+str(len(telemetry_lines)),flush=True)
     if "report" not in witness_result:
         raise Refused("no independently observed healthy new One UI boot: "+
                       witness_result.get("error","host witness timeout"))
@@ -464,9 +380,6 @@ def run(adb_path,serial,output_dir,duration_seconds=90):
     artifact["unassisted_return_proven"]=False
     artifact["p0_completed"]=False
     artifact["full_600s_takeover_allowed"]=False
-    artifact["monitor_only_600s_requested"]=duration_seconds==600
-    artifact["script_temperature_abort_disabled"]=duration_seconds==600
-    artifact["stock_kernel_or_firmware_thermal_modified"]=False
     out=output_dir/("short-probe-"+datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")+
                     "-"+secrets.token_hex(3)+".json")
     with out.open("x",encoding="utf-8") as f:
@@ -497,16 +410,13 @@ def main(argv=None):
     actions.add_argument("--prepare-probe",action="store_true")
     actions.add_argument("--run-90s",action="store_true")
     actions.add_argument("--run-300s",action="store_true")
-    actions.add_argument("--run-600s",action="store_true")
     p.add_argument("--adb",default=str(Path.home()/"Android/Sdk/platform-tools/adb"))
     p.add_argument("--output",type=Path,default=Path("out/sm8850/short-ios-probe"))
     a=p.parse_args(argv)
-    if not a.prepare_probe and not a.run_90s and not a.run_300s and not a.run_600s:
+    if not a.prepare_probe and not a.run_90s and not a.run_300s:
         print("SHORT_PROBE=AUDIT_NO_ADB. --prepare-probe stages guarded source without Framework stop.")
-        print("90/300s: original software-temperature-abort profile. 600s: explicit software-temperature-LOG-ONLY profile.")
-        print("These durations are reboot-request deadlines since verified Framework stop, NOT full iOS interactive uptime.")
-        print("Kernel/firmware thermal controls remain intact but some Samsung user-space thermal HAL may stop with Android Framework.")
-        print("Legacy watchdog, unassisted recovery and thermal control remain unqualified on SM8850.")
+        print("Explicit --run-90s or --run-300s requests a real iOS guest with a reboot-request deadline that many seconds AFTER verified Framework stop; not that many seconds of guest execution.")
+        print("Hardware watchdog/thermal critical limits and unassisted return are not yet certified.")
         return 0
     try:
         serial=INVENTORY.mapper.serial_for(a.adb)
@@ -515,7 +425,7 @@ def main(argv=None):
             print("SHORT_PROBE_PREPARED_SOURCE_ONLY zones="+str(result["zones"]))
             print("PREFLIGHT=NOT_RUN; FRAMEWORK=NOT_STOPPED")
         else:
-            return run(a.adb,serial,a.output,600 if a.run_600s else (300 if a.run_300s else 90))
+            return run(a.adb,serial,a.output,300 if a.run_300s else 90)
     except (Refused,INVENTORY.mapper.Blocked,MANIFEST.Refused,
             WITNESS.MAPPER.Blocked,OSError,ValueError,subprocess.SubprocessError) as exc:
         print("SHORT_PROBE=BLOCKED_OR_UNVERIFIED "+str(exc),file=sys.stderr)
