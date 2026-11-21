@@ -1430,18 +1430,22 @@ case "$MODE" in
                 die_inner "all 8 SM8850 host cores not accessible (online=$host_online allowed=$host_allowed)"
             echo "ONEIOS_TAKEOVER_CPU=8 host_online=$host_online host_allowed=$host_allowed"
             # Presence in the allowed mask is not per-vCPU affinity proof.
-            # The bench/bridges=0 path keeps touch isolation but does NOT
-            # initialize OneiOS's thermal bridge or the CPU topology bridge.
-            # Never enable bridges=1 as a shortcut: it can mutate unrelated
-            # phone hardware state. Kernel/firmware thermal guards remain.
-            echo "ONEIOS_BENCH_THERMAL_BRIDGE=INACTIVE"
-            echo "ONEIOS_CPU_PLACEMENT_BRIDGE=INACTIVE"
+            # Enable the runtime's explicit bench-only affinity pairing so
+            # each of the eight vCPU/guest-task pairs has a distinct ALLOWED
+            # host core. This reuses OneiOS's parent Oryon topology when
+            # MIDR confirms the eight-core SM8850, and fails closed otherwise.
+            # It does NOT enable any host hardware bridge, change thermal
+            # limits, write cpufreq/governor, or certify lower CPU temperature.
+            # The independent root sensor guard remains mandatory.
+            echo "ONEIOS_BENCH_THERMAL_BRIDGE=INACTIVE_ROOT_GUARD_ACTIVE"
+            echo "ONEIOS_CPU_PLACEMENT=BENCH_AFFINITY_ONLY_8VCPU_SOURCE_ENABLED_NOT_PHYSICALLY_VERIFIED"
             echo "ONEIOS_GPU_3D=RUNTIME_KGSL_PROOF_REQUIRED"
             ulimit -c 0
             exec "/data/runtime/$R_XNUHOST" --session-abi 1 --mode bench \
                 --runtime /data/runtime --image /data/image --data /data/data --session /data/session \
                 --cpus 8 --ram 4G --set ram-giveback=0 --set ram-prefault=1 --set ram-lock=1 \
                 --set ram-huge=0 --set host-mem-log=5 --set bridges=0 --set wifi=off \
+                --set cpu-pin=1 --set cpu-affinity-bench=1 \
                 --set bluetooth=virtual --set haptics=off --set encoder=off --set return-graceful-ms=0 \
                 --gpu auto --display shm --set touch-exclusive=1 --width 1080 --height 2340 --hz 60 \
                 --boot-args 'debug=0x14e serial=3 -v kt_fixed_zones=120 -no_slto_panic ml-timeout-lock-panic-scale=40 tlto_us=0 armcpu-self-ipi=1 armcpu-spi-ipi=1 use_contiguous_hint=0 interrupt-masked-debug-mode=0 sched_preemption_disable_debug_mode=0 wdt=-1 sheng-smp=1 oneios-data-wait=3000'
