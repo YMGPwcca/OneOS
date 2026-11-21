@@ -63,3 +63,20 @@ The operator subsequently ran the committed **read-only** forensics script and s
 `P0_ACCEPTANCE=BLOCKED`
 
 This records a **failed physical source attempt**, not a completed 300-second guest test or thermal certification.
+
+## 2026-11-21: operator's real-phone PID-birth regression result (PASS, read-only)
+
+The operator fetched exact experiment branch commit `55b7f0f895981171dfc155ff729797051c38d2bd` and piped `switcher/assets/oneios_sm8850_thermal_takeover_guard.sh` from Git into rooted S26 Ultra's `/system/bin/sh -s -- --pid-birth-selftest` (no installation, APFS rearm, guest launch, Framework stop or reboot). The reported output was exactly:
+
+```text
+P0_THERMAL_PID_BIRTH=PASS_READ_ONLY
+```
+
+**Scope:** the corrected `birth $$` source can obtain a valid process start-time from real device `/proc` in this shell invocation, and the dedicated passive selftest exits successfully. This **closes the specific PID-birth parser smoke gate** that blocked the previous CPU90 attempt. It does **not** demonstrate that an independent thermal worker can start under real switcher cgroup/namespace conditions, publish a fresh heartbeat, stop Android Framework, boot `xnuhost`, or initiate independently certified recovery. The earlier `data.consumed` remains valid; no rearm or new guest test occurred.
+
+**Next safe verification:** passive `--check` against the current boot's trusted on-device thermal manifest, then review real watchdog/returner readiness separately. Do not call P0 complete or automatically run the experimental CPU90/300s guest. CPU90 remains vendor-unqualified and the 600s source admission lock remains intact.
+
+`ROOT_GUARD_PID_BIRTH_SELFTEST=PASS_PHYSICAL_READ_ONLY`
+`P0_THERMAL_ARMED_FOR_REAL_SESSION=NOT_RETESTED`
+`P0_APFS_CLONE=CONSUMED_PRIOR_ATTEMPT`
+`P0_ACCEPTANCE=BLOCKED`
