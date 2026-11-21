@@ -421,6 +421,19 @@ def run(adb_path,serial,output_dir,duration_seconds=90):
     artifact["preboot_host_log_bytes"]=stream_file.stat().st_size
     artifact["preboot_host_log_tail"]=streamed_log[-30000:]
     observe_log(streamed_log)
+    # Preserve whatever the host read before ADB, DirtyFrag/su or One UI
+    # stopped responding. These are observations, not synthesized values.
+    telemetry_lines=[line for line in streamed_log.splitlines()
+                     if line.startswith("P0_TELEMETRY_")]
+    telemetry_file=output_dir/("telemetry-"+token+".log")
+    telemetry_file.write_text("\n".join(telemetry_lines)+
+                              ("\n" if telemetry_lines else ""),encoding="utf-8")
+    telemetry_file.chmod(0o600)
+    artifact["telemetry_host_file"]=str(telemetry_file)
+    artifact["telemetry_host_stream_line_count"]=len(telemetry_lines)
+    if duration_seconds==600:
+        print("P0_TELEMETRY_HOST_STREAM_FILE="+str(telemetry_file),flush=True)
+        print("P0_TELEMETRY_HOST_STREAM_LINES="+str(len(telemetry_lines)),flush=True)
     if "report" not in witness_result:
         raise Refused("no independently observed healthy new One UI boot: "+
                       witness_result.get("error","host witness timeout"))
