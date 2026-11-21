@@ -193,6 +193,71 @@ def preflight(adb_path,serial):
         raise Refused("short probe thermal admission did not pass: "+output[-1000:])
     return output
 
+def telemetry_comparison(raw_lines):
+    """Pure, offline parse of the root read-only telemetry from current session.
+
+    The first snapshot is valid only with *both* guest process log markers.
+    The final snapshot is valid only when recorded at >=590 seconds after
+    VERIFIED Framework stop; missing samples are never interpolated.
+    """
+    parsed={}
+    order=[]
+    for line in raw_lines:
+        if not line.startswith("P0_TELEMETRY_"):
+            continue
+        name,sep,rest=line.partition(" ")
+        if not sep:
+            continue
+        fields=dict(re.findall(r"([A-Za-z][A-Za-z_0-9]*)=([^\\s]+)",rest))
+        try:
+            seq=int(fields.get("seq","-1"))
+        except ValueError:
+            continue
+        if seq<1:
+            continue
+        item=parsed.setdefault(seq,{"temperatures":{},"cpu":{},"gpu":{},"phase":None,"elapsed":None})
+        if name=="P0_TELEMETRY_BEGIN":
+            item["phase"]=fields.get("phase")
+            try: item["elapsed"]=int(fields.get("elapsed_framework_s","-1"))
+            except ValueError: item["elapsed"]=-1
+            order.append(seq)
+        elif name=="P0_TELEMETRY_TEMP":
+            item["temperatures"][fields.get("zone","unknown")]={
+                "type":fields.get("type","unknown"),"milli_c":fields.get("mc","UNAVAILABLE")}
+        elif name=="P0_TELEMETRY_CPU":
+            item["cpu"][fields.get("policy","unknown")]={
+                "cur_khz":fields.get("cur_khz","UNAVAILABLE"),
+                "max_khz":fields.get("max_khz","UNAVAILABLE"),
+                "hwmax_khz":fields.get("hwmax_khz","UNAVAILABLE")}
+        elif name=="P0_TELEMETRY_GPU":
+            item["gpu"]=fields
+    seqs=sorted(set(order))
+    bases=[parsed[n] for n in seqs if parsed[n]["phase"]=="BASELINE"]
+    ends=[parsed[n] for n in seqs if parsed[n]["phase"]=="FINAL" and parsed[n]["elapsed"] is not None and parsed[n]["elapsed"]>=590]
+    baseline=bases[0] if bases else None
+    final=ends[-1] if ends else None
+    diffs=[]
+    if baseline and final:
+        def change(kind,key,first,last):
+            try:
+                av=int(first); bv=int(last)
+                diffs.append(f"{kind} {key} initial={av} final={bv} delta={bv-av:+d}")
+            except (TypeError,ValueError):
+                diffs.append(f"{kind} {key} initial={first} final={last} delta=UNAVAILABLE")
+        for zone,first in sorted(baseline["temperatures"].items()):
+            last=final["temperatures"].get(zone,{})
+            change("THERMAL",f"{zone}/{first['type']}",first["milli_c"],last.get("milli_c","UNAVAILABLE"))
+        for pol,first in sorted(baseline["cpu"].items()):
+            last=final["cpu"].get(pol,{})
+            for key in ("cur_khz","max_khz"):
+                change("CPU",f"{pol}/{key}",first[key],last.get(key,"UNAVAILABLE"))
+        for key in ("clk","busy_pct","devfreq_cur","devfreq_max"):
+            if key in baseline["gpu"] or key in final["gpu"]:
+                change("GPU",key,baseline["gpu"].get(key,"UNAVAILABLE"),final["gpu"].get(key,"UNAVAILABLE"))
+    return {"sample_count":len(seqs),"baseline":baseline,
+            "final":final,"deltas":diffs,"comparison_complete":bool(baseline and final)}
+
+
 def begin_preboot_host_log_stream(adb_path,serial,token,output_dir):
     """Capture the root-only switch log to the Linux host BEFORE reboot.
 
