@@ -85,12 +85,16 @@ read_all() {
         is_uint "$val" && [ "$val" -gt 0 ] && [ "$val" -le 1200 ] || return 1
     done
     [ "$(cat /proc/sys/kernel/random/boot_id 2>/dev/null)" = "$HEADER_BOOT" ] || return 1
+    # HIGH-RISK EXPERIMENT ONLY (operator-requested CPU abort 90 C).
+    # 90000 is not firmware/vendor-qualified for this SM8850 build.
+    # Other cutoffs and ALL invalid/missing/stale-sensor fail-closed paths
+    # remain unchanged. Not a P0 thermal/recovery acceptance profile.
     # EARLY EXPERIMENT ABORT, not a hardware critical threshold.
     # Preserve the exact exceeded group and real-zone peak with fixed units.
     # These diagnostic tokens are appended to the existing fault record and
     # must NEVER delay or override the original fail-closed return behavior.
     crossed=
-    [ "$CPU_MAX" -lt 55000 ] || crossed="${crossed}cpu,"
+    [ "$CPU_MAX" -lt 90000 ] || crossed="${crossed}cpu,"
     [ "$GPU_MAX" -lt 55000 ] || crossed="${crossed}gpu,"
     [ "$DDR_MAX" -lt 55000 ] || crossed="${crossed}ddr,"
     [ "$BAT" -lt 380 ] || crossed="${crossed}bat,"
@@ -131,8 +135,9 @@ case "$MODE" in
         [ "$(cat "$CTL/framework.mode" 2>/dev/null)" = probe ] || die non_probe
         echo $$ > /sys/fs/cgroup/cgroup.procs 2>/dev/null
         echo -1000 > /proc/$$/oom_score_adj 2>/dev/null
-        BIRTH=$(birth $$)
+        BIRTH=$(birth $)
         [ -n "$BIRTH" ] || die no_pid_birth
+        echo "P0_THERMAL_PROFILE=CPU_90C_HIGH_RISK_NOT_VENDOR_CERTIFIED_GPU_DDR_55C_BAT_38C_LRP_AP_42C"
         atom thermal.guard.pid "$$ $BIRTH" || die cannot_record_pid
         seq=0
         while [ "$GEN" = "$(cat "$CTL/watchdog.generation" 2>/dev/null)" ]; do
