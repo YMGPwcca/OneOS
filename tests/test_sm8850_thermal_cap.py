@@ -33,28 +33,32 @@ class PolicyTests(unittest.TestCase):
         result = subprocess.run(["sh", "-n", str(CAP)], capture_output=True, text=True)
         self.assertEqual(0, result.returncode, result.stderr)
 
-    def test_initial_low_power_and_three_bands(self):
-        for cpu, want in ((39000, "1:80"), (42000, "2:65"), (48000, "3:50")):
+    def test_throttle_first_six_bands_with_no_80c_return(self):
+        for cpu, want in ((39000, "1:60"), (55000, "2:40"),
+                          (65000, "3:28"), (72000, "4:18"),
+                          (77000, "5:12"), (80000, "6:8"),
+                          (89000, "6:8")):
             with self.subTest(cpu=cpu):
                 s = pick(0, (cpu, 39000, 40000, 285, 306, 340))
                 self.assertEqual(0, s.returncode, s.stderr)
                 self.assertEqual(want, s.stdout.strip())
 
-    def test_all_three_non_cpu_groups_can_derate(self):
-        for temps in ((39000, 49000, 40000, 285, 306, 340),
-                      (39000, 39000, 49000, 285, 306, 340),
-                      (39000, 39000, 40000, 360, 306, 340),
-                      (39000, 39000, 40000, 285, 390, 340),
-                      (39000, 39000, 40000, 285, 306, 390)):
+    def test_non_cpu_groups_can_force_strong_throttle(self):
+        cases = ((39000, 85000, 40000, 285, 306, 340),
+                 (39000, 39000, 85000, 285, 306, 340),
+                 (39000, 39000, 40000, 440, 306, 340),
+                 (39000, 39000, 40000, 285, 470, 340),
+                 (39000, 39000, 40000, 285, 306, 650))
+        for temps in cases:
             with self.subTest(temps=temps):
-                self.assertEqual("3:50", pick(0, temps).stdout.strip())
+                self.assertEqual("6:8", pick(0, temps).stdout.strip())
 
     def test_no_live_relaxation_even_when_cold(self):
-        self.assertEqual("3:50", pick(3).stdout.strip())
-        self.assertEqual("2:65", pick(2).stdout.strip())
+        self.assertEqual("6:8", pick(6).stdout.strip())
+        self.assertEqual("3:28", pick(3).stdout.strip())
 
-    def test_hard_abort_has_priority_for_every_group(self):
-        boundaries = (55000, 55000, 55000, 380, 420, 420)
+    def test_emergency_is_not_normal_throttling(self):
+        boundaries = (90000, 95000, 95000, 480, 500, 700)
         for i, value in enumerate(boundaries):
             values = list(NOMINAL)
             values[i] = value
@@ -64,7 +68,7 @@ class PolicyTests(unittest.TestCase):
                 self.assertEqual("", result.stdout)
 
     def test_invalid_temperature_or_level_is_not_safe(self):
-        cases = [(-1, NOMINAL), (4, NOMINAL),
+        cases = [(-1, NOMINAL), (7, NOMINAL),
                  (0, (0, *NOMINAL[1:])),
                  (0, ("not-a-temp", *NOMINAL[1:])),
                  (0, (200001, *NOMINAL[1:])),
@@ -75,9 +79,9 @@ class PolicyTests(unittest.TestCase):
 
     def test_read_only_guard_remains_separate_and_exact(self):
         src = GUARD.read_text()
-        for threshold in ('"$CPU_MAX" -lt 55000', '"$GPU_MAX" -lt 55000',
-                          '"$DDR_MAX" -lt 55000', '"$BAT" -lt 380',
-                          '"$LRP" -lt 420', '"$AP" -lt 420'):
+        for threshold in ('"$CPU_MAX" -lt 90000', '"$GPU_MAX" -lt 95000',
+                          '"$DDR_MAX" -lt 95000', '"$BAT" -lt 480',
+                          '"$LRP" -lt 500', '"$AP" -lt 700'):
             self.assertIn(threshold, src)
         self.assertNotIn("scaling_max_freq", src)
         self.assertIn("P0_THERMAL_GUARD=FAIL_CLOSED", src)
@@ -120,12 +124,13 @@ class SyntheticCpufreqTests(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name)
         self.policies = {}
-        for name, hw, curr in (("policy0", 3600000, 3600000),
-                               ("policy4", 4000000, 2500000),
-                               ("policy6", 4742400, 4742400)):
+        for name, hw, mn, curr in (("policy0", 3600000, 384000, 3600000),
+                                   ("policy4", 4000000, 400000, 2000000),
+                                   ("policy6", 4742400, 768000, 4742400)):
             d = self.root / "sys/devices/system/cpu/cpufreq" / name
             d.mkdir(parents=True)
             (d / "cpuinfo_max_freq").write_text(f"{hw}\n")
+            (d / "cpuinfo_min_freq").write_text(f"{mn}\n")
             (d / "scaling_max_freq").write_text(f"{curr}\n")
             self.policies[name] = d
 
@@ -136,19 +141,19 @@ class SyntheticCpufreqTests(unittest.TestCase):
         return int((self.policies[name] / "scaling_max_freq").read_text())
 
     def test_clamp_and_external_low_power_vote_preserved(self):
-        proc = self.cap(80)
+        proc = self.cap(60)
         self.assertEqual(0, proc.returncode, proc.stderr)
-        self.assertEqual(2880000, self.value("policy0"))
-        self.assertEqual(2500000, self.value("policy4"))  # pre-existing 62.5% cap
-        self.assertEqual(3793920, self.value("policy6"))
+        self.assertEqual(2160000, self.value("policy0"))
+        self.assertEqual(2000000, self.value("policy4"))  # already lower vote
+        self.assertEqual(2845440, self.value("policy6"))
 
-    def test_cap_monotonic_80_65_50_and_never_raises(self):
-        for pct in (80, 65, 50, 80):
+    def test_cap_monotonic_to_minimum_and_never_raises(self):
+        for pct in (60, 40, 28, 18, 12, 8, 60):
             with self.subTest(pct=pct):
                 self.assertEqual(0, self.cap(pct).returncode)
-        self.assertEqual(1800000, self.value("policy0"))
-        self.assertEqual(2000000, self.value("policy4"))
-        self.assertEqual(2371200, self.value("policy6"))
+        self.assertEqual(384000, self.value("policy0"))
+        self.assertEqual(400000, self.value("policy4"))
+        self.assertEqual(768000, self.value("policy6"))
 
     def test_missing_or_inconsistent_policy_blocks(self):
         (self.policies["policy6"] / "cpuinfo_max_freq").unlink()
