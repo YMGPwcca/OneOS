@@ -182,6 +182,7 @@ def preflight(adb_path,serial):
     output=remote_root(adb_path,serial,cmd,timeout=90)
     if ("PREFLIGHT OK" not in output or
         "P0_THERMAL_GUARD=READ_ONLY_CURRENT_BOOT_READY_NOT_CERTIFIED" not in output or
+        "P0_CPU_CAP=READ_ONLY_POLICY_AVAILABLE_NOT_CERTIFIED" not in output or
         "P0_FULL_600S_TAKEOVER=BLOCKED" in output):
         raise Refused("short probe thermal admission did not pass: "+output[-1000:])
     return output
