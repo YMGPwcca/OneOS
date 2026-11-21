@@ -1,6 +1,6 @@
 # SM8850 real short iOS takeover probe — 90/300-second Framework-stop return deadline (opt-in)
 
-**Status:** integrated into the OneOS `oneios_switch.sh` takeover path on the P0 draft branch; physical 90s probe **OBSERVED**, early thermal abort, guest-ready unverified; diagnostic guard update not yet deployed. This is **not** production-certified P0 and does **not** unlock the 600-second `run` profile.
+**Status:** OneOS P0 draft: the earlier physical 90s probe had an early thermal abort; the 2026-11-21 physical 300s attempt observed Thermal Guard arming and a subsequent new healthy One UI boot, but no confirmed Framework-stop or xnuhost-launch markers. The actual early-return reason awaits inspection of the saved preboot logs. **P0 remains unqualified; the 600s `run` source lock remains enabled.**
 
 ## Why this exists
 
@@ -16,9 +16,9 @@ python3 scripts/phone/sm8850-takeover-short-probe.py --run-90s \
   --output "$HOME/projects/OneiOS/out/sm8850/short-ios-probe"
 ```
 
-The draft source also offers `--run-300s`. This is an **extended, explicit-risk** option, not an accepted thermal/recovery profile. It changes only the mandatory reboot-REQUEST deadline to 300 seconds after verified Framework stop, **not** to 300 seconds of iOS execution or a guaranteed end-to-end 300-second reboot. No physical 300-second result is claimed. The original `--run-90s` mode remains available; both retain the same experimental early-abort sensor checks and the 600-second source lock.
+The draft source also offers `--run-300s`. This is an **extended, explicit-risk** option, not an accepted thermal/recovery profile. It changes only the mandatory reboot-REQUEST deadline to 300 seconds after verified Framework stop, **not** to 300 seconds of iOS execution or a guaranteed end-to-end 300-second reboot. One physical 300s-request attempt occurred on 2026-11-21 but **did not prove guest launch, Framework-stop timebase or recovery certification** (see experiment ledger below). The original `--run-90s` mode remains available; both retain the same experimental early-abort sensor checks and the 600-second source lock.
 
-Default `sm8850-takeover-short-probe.py` is a **zero-ADB audit**. Optional `--prepare-probe` uploads trusted code and a newly surveyed boot-bound manifest but does **not** stop Framework. **Only `--run-90s` initiates the disruptive takeover**. It runs exactly one `--framework-session probe` using the explicit risk acknowledgment `I_ACCEPT_SM8850_SHORT_TAKEOVER_90S_RISK`.
+Default `sm8850-takeover-short-probe.py` is a **zero-ADB audit**. Optional `--prepare-probe` uploads trusted code and a newly surveyed boot-bound manifest but does **not** stop Framework. **Both `--run-90s` and `--run-300s` initiate a disruptive takeover** and use their corresponding explicit risk tokens. Both retain fail-closed P0 return logic and one-shot APFS consumption.
 
 ## What the OneOS code now does
 
@@ -127,3 +127,16 @@ The operator read the original root-owned `control/thermal.guard.heartbeat` afte
 - For the **previous real 90s Framework stop + xnuhost exec**, its last healthy guard heartbeat at uptime 44590 recorded CPU **44.8°C**, GPU **37.8°C**, DDR **37.4°C**, BAT **29.0°C**, LRP **31.4°C**, AP **33.2°C**; CPU is already 12.9°C above this newer idle baseline, but these are *separate physical sessions*, not a controlled paired thermal comparison. The later `soft_temperature_abort` was logged without the failing sensor values; **cannot determine which sensor crossed** from these healthy samples.
 - Engineering decision: mark **read-only OneUI baseline PASS**, but leave **post-Framework thermal qualification, culprit sensor, vendor-critical thermal limits, iOS guest READY/first frame, Vulkan KGSL and unassisted recovery UNVERIFIED**. Do **not** raise experimental abort limits, disable sensor checks, claim a production thermal guard, or unlock 600s mode. The next *disruptive* probe, only with physical risk accepted and recovery available, should use already-committed exact-fault diagnostics and preboot host log streaming. No extra physical takeover is implied by this documentation.
 - On-host evidence files: `out/sm8850/oneui-thermal-baseline-20261120T233413Z/zones/junction-20261120T233416Z-57b8f5.json` and `.../four-sensor/four-sensor-20261120T233421Z-88b3c2.json`.
+
+## 2026-11-21: first physical 300s-request probe — early new One UI boot, guest unproven
+
+Operator-reported CachyOS session, first 300s probe using pinned OneOS runtime commit `99b48b2cb55e7d5a893cfa32778a1d4ab154f9e2` and OneiOS source `4ae8874bac37c66e1214f68bc2606543ad941a1b`; evidence wrapper from OneOS `19aea89856430562f8bba8a206d985382ce758ae`. Target SM-S948B/m3q/SM8850, firmware S948BXXS4BZIG, root UID 0 and SELinux Enforcing before dispatch.
+
+- A previously consumed APFS Data clone was **successfully rearmed** from the separately retained benchmark seed, with integrity/isolated namespace checks. The old clone and marker were preserved under the root-owned `.retired-data/` archive; no manual marker deletion. `APFS_DATA_REARMED=YES`, `SM8850_MOUNT_NAMESPACE_PROBE=PASS_NO_FRAMEWORK_STOP`.
+- Exact-boot 28-zone host survey and passive probe preflight passed. Switch was explicitly dispatched in `--run-300s` mode; host printed `SHORT_PROBE_TIMEBASE=REBOOT_REQUEST_DEADLINE_300S_AFTER_FRAMEWORK_STOP`. **This line precedes Framework-stop validation and is not evidence that the 300s deadline was ever armed or expired.**
+- Host witnessed a subsequent new healthy normal One UI boot. Operator reports the phone rebooted automatically roughly **20 seconds after the host timebase line** (approximate wall interval; not a device-monotonic deadline measurement). This is an operator observation, **not** independent watchdog qualification or exact returner attribution.
+- The host preboot switch stream captured **3,358 bytes**, and the guard-armed milestone was seen: `THERMAL_GUARD_ARMED=TRUE`. However `FRAMEWORK_STOP_MARKER=FALSE`, `XNUHOST_LAUNCH_MARKER=FALSE`, `HISTORICAL_RETURN_CORRELATED=FALSE`, `POSTBOOT_ROOT_LOG_ACCESSIBLE=FALSE`, with final `SHORT_PROBE=INSUFFICIENT_GUEST_LAUNCH_EVIDENCE_NOT_PASS`. FALSE means **positive log evidence missing**, not proof a component never ran.
+- Root-owned device and host evidence remains in a **local/private** bundle under `out/sm8850/p0-physical/live-300s-20261121T004007Z-0ceEtu/`; the `probe/preboot-switch-*.log`, `thermal-guard-preboot-stream.log` and `probe/short-probe-*.json` are **not yet supplied for direct examination**. The precise reason for early return (thermal threshold/fault, stale heartbeat, preparation cutoff, other return path) is therefore **NOT YET ESTABLISHED**.
+- **Next action: inspect those existing host files only**. Do NOT rearm APFS or launch another short or 600s session solely to rediscover the cause. The 600s source lock and experimental early thermal abort thresholds remain unchanged. `P0_ACCEPTANCE=OPEN_NOT_CERTIFIED`.
+
+This is a physical failed/uncorroborated probe **with evidence preserved**, not a PASS for 300s runtime, guest UI or production thermal/recovery safety. The host archive contains private logs and must not be published unredacted.
