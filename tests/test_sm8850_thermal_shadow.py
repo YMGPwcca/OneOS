@@ -208,6 +208,11 @@ class SourceAdmissionGateTests(unittest.TestCase):
             self.assertIn(threshold, thermal_guard)
         self.assertIn('SOFT_FAULT_DETAIL="crossed=', thermal_guard)
         self.assertIn('CPU_MAX_ZONE=$typ@$idx', thermal_guard)
+        # Sampling is session-bound and bounded; fault must be emitted first.
+        self.assertIn('P0_THERMAL_SAMPLE=OK boot=$BOOT generation=$GEN seq=$seq', thermal_guard)
+        self.assertIn('case $((seq % 5)) in', thermal_guard)
+        self.assertLess(thermal_guard.index('P0_THERMAL_GUARD=FAIL_CLOSED'),
+                        thermal_guard.index('P0_THERMAL_SAMPLE=OK'))
         self.assertIn('atom thermal.guard.fault "$BOOT $GEN $$ $BIRTH $reason ${detail}"', thermal_guard)
         self.assertNotIn('atom thermal.guard.fault "$BOOT $GEN $ $BIRTH', thermal_guard)
         # Real on-device failure: bare '$' in birth($) reads /proc/$/stat,
