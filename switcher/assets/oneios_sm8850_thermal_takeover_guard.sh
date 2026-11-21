@@ -112,6 +112,15 @@ atom() {
 }
 MODE=${1:-}
 case "$MODE" in
+    --pid-birth-selftest)
+        # Read-only, no root/Framework/session requirement: exercise the
+        # same birth($$) parser before consuming a one-shot APFS Data clone.
+        [ "$#" = 1 ] || die usage
+        SELF_BIRTH=$(birth $$) || die no_pid_birth
+        case "$SELF_BIRTH" in ''|*[!0-9]*) die no_pid_birth ;; esac
+        [ "$SELF_BIRTH" -gt 0 ] || die no_pid_birth
+        echo "P0_THERMAL_PID_BIRTH=PASS_READ_ONLY"
+        exit 0 ;;
     --check)
         [ "$#" = 2 ] || die usage
         MAN=$2
@@ -135,7 +144,7 @@ case "$MODE" in
         [ "$(cat "$CTL/framework.mode" 2>/dev/null)" = probe ] || die non_probe
         echo $$ > /sys/fs/cgroup/cgroup.procs 2>/dev/null
         echo -1000 > /proc/$$/oom_score_adj 2>/dev/null
-        BIRTH=$(birth $)
+        BIRTH=$(birth $$)
         [ -n "$BIRTH" ] || die no_pid_birth
         echo "P0_THERMAL_PROFILE=CPU_90C_HIGH_RISK_NOT_VENDOR_CERTIFIED_GPU_DDR_55C_BAT_38C_LRP_AP_42C"
         atom thermal.guard.pid "$$ $BIRTH" || die cannot_record_pid
