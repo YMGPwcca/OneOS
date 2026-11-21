@@ -207,6 +207,19 @@ class SourceAdmissionGateTests(unittest.TestCase):
         self.assertNotIn('atom thermal.guard.fault "$BOOT $GEN $ $BIRTH', thermal_guard)
         self.assertIn('if [ "$FRAMEWORK" = 1 ] && { [ "$FW_MODE" = run ] || [ "$FW_MODE" = probe ]; }; then', source)
 
+    def test_sm8850_bench_uses_only_guest_scoped_affinity_without_hal(self):
+        source = SWITCH.read_text()
+        # The actual framework-probe/bench argv, not a README or an inert flag.
+        section = source[source.index('echo "ONEIOS_TAKEOVER_CPU=8'):source.index('die_inner "could not exec the GPU-3D benchmark runtime"')]
+        self.assertIn('--set cpu-pin=1 --set cpu-affinity-bench=1', section)
+        self.assertIn('--set bridges=0 --set wifi=off', section)
+        self.assertIn('ONEIOS_BENCH_THERMAL_BRIDGE=INACTIVE_ROOT_GUARD_ACTIVE', section)
+        self.assertIn('ONEIOS_CPU_PLACEMENT=BENCH_AFFINITY_ONLY_8VCPU_SOURCE_ENABLED_NOT_PHYSICALLY_VERIFIED', section)
+        self.assertNotIn('--set bridges=1', section)
+        # Admission and the root thermal worker are separate safeguards.
+        self.assertIn('framework_thermal_guard_healthy()', source)
+        self.assertIn('P0_FULL_600S_TAKEOVER=BLOCKED_UNQUALIFIED_THERMAL_GUARD', source)
+
     def test_check_only_continues_to_allow_passive_preflight(self):
         source = SWITCH.read_text()
         section = source[source.index('if [ "$MODE" = --check ] || [ "$MODE" = --framework-check ]; then'):]
