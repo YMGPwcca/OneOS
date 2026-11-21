@@ -86,12 +86,26 @@ class PackagesTest {
         // The iOS 27 (OneiOS) session scripts are staged in their own stage by their own root
         // script (OneiosRoot), not with a package set.
         val oneios = OneiosRoot.SESSION_SCRIPTS.toSet()
-        assertEquals(setOf("oneios_switch.sh", "oneios_return.sh"), names.filter { it.startsWith("oneios") }.toSet())
-        assertEquals(oneios, names.filter { it.startsWith("oneios") }.toSet())
-        assertEquals((names - setOf("oneos_tunnel.sh", "7zz") - oneios) + generated, shipped.toSet())
+        // These diagnostic-only SM8850 P0 scripts must remain checked in for
+        // local source/guard tests, but must NOT accidentally enter the generic
+        // OneOS APK or its root-script staging allowlist.
+        val thermal = setOf(
+            "oneios_sm8850_thermal_health.sh",
+            "oneios_sm8850_thermal_pinned_reader.sh",
+            "oneios_sm8850_thermal_reader.sh",
+            "oneios_sm8850_thermal_shadow.sh",
+            "oneios_sm8850_thermal_takeover_guard.sh",
+            "oneios_sm8850_thermal_cap.sh",
+            "oneios_sm8850_thermal_trial.sh",
+        )
+        val excluded = thermal + setOf("oneos_tunnel.sh", "7zz")
+        assertEquals(oneios + thermal, names.filter { it.startsWith("oneios") }.toSet())
+        assertEquals(setOf("oneios_switch.sh", "oneios_return.sh"), oneios)
+        assertEquals((names - excluded - oneios) + generated, shipped.toSet())
         val build = File(Shipped.appAssets, "../../../build.gradle.kts").readText()
         for (n in oneios) assertTrue("app/build.gradle.kts does not ship $n", build.contains("\"$n\" to File(repoRoot, \"switcher/assets/$n\")"))
         for (n in shipped) assertTrue("app/build.gradle.kts does not ship $n", build.contains("\"$n\" to File(repoRoot, \"switcher/assets/$n\")"))
-        assertTrue(build.contains("val switcherNotShipped = setOf(\"oneos_tunnel.sh\", \"7zz\")"))
+        assertTrue(build.contains("val switcherNotShipped = setOf("))
+        for (n in excluded) assertTrue("app/build.gradle.kts does not explicitly exclude $n", build.contains("\"$n\""))
     }
 }

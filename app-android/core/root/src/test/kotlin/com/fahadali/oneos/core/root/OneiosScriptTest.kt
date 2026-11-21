@@ -1048,14 +1048,47 @@ class OneiosScriptTest {
     }
 
     @Test
-    fun normalReturnFailsSafeWhenShmemReadbackDoesNotMatch() = failsafe("shmem_enabled") { f ->
+    fun normalReturnFailsSafeWhenShmemReadbackDoesNotMatch() = each { f ->
+        f.phone()
         val node = shmemNode(f, "advise")
-        File(f.control, "base/shmem_enabled").writeText("never\n")
-        // The fake node accepts the write, but the driver still reports its old value.
-        f.file("bin/cat").apply {
-            writeText("#!/bin/sh\nif [ \"\$1\" = '${node.path}' ]; then echo 'always within_size [advise] never deny force'; else exec /bin/cat \"\$@\"; fi\n")
+        val baseline = File(f.control, "base/shmem_enabled").apply { writeText("never\n") }
+
+        // Older mksh versions have a built-in cat(1), which takes precedence
+        // over the fake bin/cat on PATH. Mock the shmem-specific external
+        // awk stage instead, so the simulated sysfs reader reports its stale
+        // mode even after the (fake regular file's) write succeeds.
+        // The real oneios_return.sh fail-closed logic remains unchanged.
+        val hits = f.file("behave/shmem-awk-hits")
+        val realAwk = listOf("/usr/bin/awk", "/bin/awk").first { File(it).canExecute() }
+        val shim = f.file("bin/awk").apply {
+            writeText(
+                "#!/bin/sh\n" +
+                    "case \"\$1\" in\n" +
+                    "  *'NF == 1 && \$1 ~ /^[a-z_]+\$/'*)\n" +
+                    "    printf 'hit\\n' >> '${hits.path}'\n" +
+                    "    printf '%s\\n' advise ;;\n" +
+                    "  *) exec $realAwk \"\$@\" ;;\n" +
+                    "esac\n",
+            )
             assertTrue(setExecutable(true))
         }
+        // Prove the fake is selected before starting return, and then verify
+        // the real return script called that same fake for BOTH sysfs reads.
+        val env = "PATH=${shim.parentFile.path}:${System.getenv("PATH")}"
+        val awkProgram = "NF == 1 && \$1 ~ /^[a-z_]+\$/ { print \$1; next }"
+        val check = ProcessBuilder("env", env, "awk", awkProgram).start()
+        val mocked = check.inputStream.readBytes().toString(Charsets.UTF_8)
+        assertEquals(mocked, 0, check.waitFor())
+        assertEquals("advise\n", mocked)
+        assertEquals(listOf("hit"), hits.readLines())
+
+        val result = f.returns()
+        assertTrue("shmem sysfs mock was bypassed by the return shell: ${hits.readLines()}; return:\n${result.text}",
+            hits.readLines().size >= 3)
+        assertEquals(result.text, 1, result.exit)
+        f.assertFailsafe("shmem_enabled")
+        assertEquals("never\n", node.readText())
+        assertEquals("never\n", baseline.readText())
     }
 
     @Test
@@ -1081,6 +1114,29 @@ class OneiosScriptTest {
         f.assertFailsafe("shmem_enabled")
         assertEquals("advise\n", node.readText())
         assertTrue(baseline.isFile)
+    }
+
+    /**
+     * SM8850 now protects *the whole staged /data root*, not individual file
+     * bind mounts (BusyBox cannot remount those on this firmware). Data and
+     * session/tmp are the only writable child mounts. Keep asserting both
+     * positive write islands and negative stage/control write probes.
+     */
+    private fun assertGuestStageReadonlyWithWritableDataAndSession(inner: String) {
+        val stage = inner.indexOf("mount --bind \"\$STAGE\" /data")
+        val islands = inner.indexOf("for d in data session; do", stage)
+        val islandBind = inner.indexOf("mount --bind \"/data/\$d\" \"/data/\$d\"", islands)
+        val readonly = inner.indexOf("mount -o remount,bind,ro /data /data", islandBind)
+        val stageProbe = inner.indexOf("if true 2>/dev/null > /data/.oneios-stage-write-check; then", readonly)
+        val controlProbe = inner.indexOf("if true 2>/dev/null > /data/control/.w; then", stageProbe)
+        val writableProbe = inner.indexOf("for check in /data/data /data/session/tmp; do", controlProbe)
+        val pid = inner.indexOf("echo \$\$ > /data/session/xnuhost.pid", writableProbe)
+        assertTrue("stage bind -> writable islands -> whole-root read-only -> negative probes -> writable probes -> guest PID",
+            stage >= 0 && islands > stage && islandBind > islands &&
+                readonly > islandBind && stageProbe > readonly &&
+                controlProbe > stageProbe && writableProbe > controlProbe && pid > writableProbe)
+        assertTrue(inner.contains("guest writable island is read-only"))
+        assertTrue(inner.contains("the way back's control folder is writable in the session's namespace"))
     }
 
     private fun watcher(f: Fake, max: Int = 600): Process {
@@ -1140,7 +1196,7 @@ class OneiosScriptTest {
         f.assertInPlace()
         // In xnuhost's namespace that folder, and the scripts, are read-only.
         val inner = code(switchScript).joinToString("\n").let { it.substring(it.indexOf("    --inner)"), it.indexOf("    --stop-loop)")) }
-        assertTrue(inner.contains("for d in runtime image control bin oneios_switch.sh oneios_return.sh; do"))
+        assertGuestStageReadonlyWithWritableDataAndSession(inner)
         assertTrue(inner.contains("the way back's control folder is writable in the session's namespace"))
     }
 
@@ -2046,7 +2102,7 @@ class OneiosScriptTest {
             assertTrue(n, OneiosRoot.problems(OneiosRoot.Verb.SCRIPT, listOf(n, "10", sum)).isNotEmpty())
         }
         val inner = code(switchScript).joinToString("\n").let { it.substring(it.indexOf("    --inner)"), it.indexOf("    --stop-loop)")) }
-        assertTrue(inner.contains("for d in runtime image control bin oneios_switch.sh oneios_return.sh; do"))
+        assertGuestStageReadonlyWithWritableDataAndSession(inner)
         // A changed file is not taken, and what was staged stays.
         val icon = bootScreenFiles.last().readBytes()
         assertRefused(f.verb(OneiosRoot.Verb.SCRIPT, listOf("oneos_boot_icon.png", icon.size.toString(), sum), icon), "did not arrive intact")
@@ -2410,7 +2466,10 @@ class OneiosScriptTest {
             "at \"making the mounts private\"" to "mount --make-rprivate /",
             "at \"binding the stage over /data\"" to "mount --bind \"\$STAGE\" /data",
             "at \"running busybox from the stage\"" to "\"\$BB\" true 2>/dev/null",
-            "at \"making /data/\$d read-only\"" to "mount -o remount,bind,ro",
+            "at \"preparing writable Data and session islands\"" to "for d in data session; do",
+            "at \"making entire staged /data read-only\"" to "mount -o remount,bind,ro /data /data",
+            "at \"checking staged root and control are read-only\"" to "if true 2>/dev/null > /data/.oneios-stage-write-check; then",
+            "at \"checking writable guest Data/session islands\"" to "for check in /data/data /data/session/tmp; do",
             "at \"checking that /data/control is read-only\"" to "> /data/control/.w",
             "at \"checking that One UI's /data is not visible\"" to "[ ! -e /data/system ]",
             "at \"session folders and the pid\"" to "echo \$\$ > /data/session/xnuhost.pid",

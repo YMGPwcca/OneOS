@@ -84,7 +84,7 @@ MODE="${1:-session}"
 # A full-run needs a separate risk token and a recorded prior takeover smoke.
 FRAMEWORK_REBOOT=0
 case "$MODE:$2" in
-    --framework-audit-reboot:*|--framework-check:reboot-smoke|--framework-session:reboot-smoke|--framework-check:run|--framework-session:run)
+    --framework-audit-reboot:*|--framework-check:reboot-smoke|--framework-session:reboot-smoke|--framework-check:run|--framework-session:run|--framework-check:probe|--framework-session:probe)
         FRAMEWORK_REBOOT=1 ;;
     --feed:*|--watch:*|--keys:*|--keys-poll:*|--framework-deadline:*|--stop-loop:*|--watchdog-health:*|--watchdog-supervise:*)
         # These are independent children of the already armed session.
@@ -545,6 +545,13 @@ framework_deadline() {
             why="invalid framework deadline"
         elif ! framework_pid_alive "$CTL/framework.watcher"; then
             why="framework watcher lost"
+        elif [ "$(cat "$CTL/framework.mode" 2>/dev/null)" = probe ] && ! framework_thermal_guard_healthy; then
+            why="root thermal monitor lost, stale, or requested early return"
+        elif [ "$(cat "$CTL/framework.mode" 2>/dev/null)" = probe ] &&
+             [ "$(cat "$CTL/state" 2>/dev/null)" = running ] &&
+             { [ "$(cat "$CTL/thermal.cap.required" 2>/dev/null)" != "$WD_GEN" ] ||
+               ! framework_thermal_cap_healthy; }; then
+            why="SM8850 independent CPU frequency cap missing or stale"
         elif [ "$tick" -ge "$limit" ]; then
             expired=1
             why="framework deadline reached at $tick (deadline $limit)"
@@ -557,7 +564,7 @@ framework_deadline() {
             [ "$(cat "$CTL/state" 2>/dev/null)" = running ] &&
             [ ! -e "$SESSION/return.request" ]; then
             mode=$(cat "$CTL/framework.mode" 2>/dev/null)
-            if [ "$mode" = run ]; then
+            if [ "$mode" = run ] || [ "$mode" = probe ]; then
                 guest_pid=$(cat "$CTL/xnuhost.pid" 2>/dev/null)
                 guest_ns=$(cat "$CTL/mntns" 2>/dev/null)
                 [ -n "$guest_ns" ] && [ "$(readlink "$P/$guest_pid/ns/mnt" 2>/dev/null)" = "$guest_ns" ] || mode=
@@ -581,8 +588,48 @@ framework_pid_alive() {
         [ "$(readlink "$P/$checked_pid/ns/mnt")" = "$(readlink "$P/1/ns/mnt")" ]; }
 }
 
+framework_thermal_guard_healthy() {
+    [ ! -e "$CTL/thermal.guard.fault" ] || return 1
+    framework_pid_alive "$CTL/thermal.guard.pid" || return 1
+    read -r th_ver th_boot th_gen th_pid th_birth th_seq th_tick th_status th_cpu th_gpu th_ddr th_bat th_lrp th_ap th_extra < "$CTL/thermal.guard.heartbeat" || return 1
+    [ -z "$th_extra" ] && [ "$th_ver" = v1 ] &&
+        [ "$th_boot" = "$(cat "$CTL/boot" 2>/dev/null)" ] &&
+        [ "$th_gen" = "$(watchdog_generation)" ] &&
+        [ "$th_status" = OK ] &&
+        [ "$th_pid $th_birth" = "$(cat "$CTL/thermal.guard.pid" 2>/dev/null)" ] || return 1
+    for n in "$th_seq" "$th_tick" "$th_cpu" "$th_gpu" "$th_ddr" "$th_bat" "$th_lrp" "$th_ap"; do
+        watchdog_uint "$n" || return 1
+    done
+    [ "$th_seq" -gt 0 ] || return 1
+    th_now=$(watchdog_now) || return 1
+    [ "$th_tick" -le "$th_now" ] && [ $((th_now - th_tick)) -le 6 ]
+}
+# The independent CPU cap is supplementary to (never a replacement for) the
+# original root emergency thermal monitor. It is mandatory for an SM8850
+# Framework probe once its worker has been armed after Framework stop.
+framework_thermal_cap_healthy() {
+    [ ! -e "$CTL/thermal.cap.fault" ] || return 1
+    framework_pid_alive "$CTL/thermal.cap.pid" || return 1
+    read -r cp_ver cp_boot cp_gen cp_pid cp_birth cp_seq cp_tick cp_status cp_level cp_pct cp_extra < "$CTL/thermal.cap.heartbeat" || return 1
+    [ -z "$cp_extra" ] && [ "$cp_ver" = v1 ] &&
+        [ "$cp_boot" = "$(cat "$CTL/boot" 2>/dev/null)" ] &&
+        [ "$cp_gen" = "$(watchdog_generation)" ] &&
+        [ "$cp_pid $cp_birth" = "$(cat "$CTL/thermal.cap.pid" 2>/dev/null)" ] &&
+        [ "$cp_status" = OK ] || return 1
+    for v in "$cp_seq" "$cp_tick" "$cp_level" "$cp_pct"; do watchdog_uint "$v" || return 1; done
+    [ "$cp_seq" -gt 0 ] || return 1
+    case "$cp_level:$cp_pct" in 1:80|2:65|3:50) ;; *) return 1 ;; esac
+    cp_now=$(watchdog_now) || return 1
+    [ "$cp_tick" -le "$cp_now" ] && [ $((cp_now - cp_tick)) -le 4 ]
+}
 framework_recovery_ready() {
     framework_pid_alive "$CTL/framework.guard" && framework_pid_alive "$CTL/framework.watcher" || return 1
+    [ "$(cat "$CTL/framework.mode" 2>/dev/null)" != probe ] || framework_thermal_guard_healthy || return 1
+    if [ "$(cat "$CTL/framework.mode" 2>/dev/null)" = probe ] &&
+       [ "$(cat "$CTL/state" 2>/dev/null)" = running ]; then
+        [ "$(cat "$CTL/thermal.cap.required" 2>/dev/null)" = "$(watchdog_generation)" ] &&
+            framework_thermal_cap_healthy || return 1
+    fi
     [ "$(grep -c . "$CTL/keys/pids" 2>/dev/null)" = 3 ] || return 1
     for reader in $(cat "$CTL/keys/pids"); do
         framework_pid_alive "$CTL/keys/reader.$reader" || return 1
@@ -1391,9 +1438,14 @@ case "$MODE" in
             *) die_inner "the switch is no longer starting (state '$ST'): xnuhost is not started" ;;
         esac
         AT="exec of /data/runtime/$R_XNUHOST"
+        # Monotonic guest exec ATTEMPT marker, not guest-ready or first frame.
+        # The independent Framework-down deadline has already been armed;
+        # this marker never extends or resets that mandatory reboot cutoff.
+        guest_exec_attempt_tick=$(watchdog_now) || guest_exec_attempt_tick=unavailable
+        echo "ONEIOS_GUEST_EXEC_ATTEMPT_TICK=$guest_exec_attempt_tick"
         echo "oneios inner: $(date '+%F %T') starting /data/runtime/$R_XNUHOST (pid $$)"
         if [ "$FRAMEWORK" = 1 ]; then
-            [ "$(cat /data/control/framework.mode)" = run ] || die_inner "no full-session admission"
+            case "$(cat /data/control/framework.mode)" in run|probe) ;; *) die_inner "no guest-session admission" ;; esac
             # S26 Ultra has 8 online CPUs. A kernel cpuset may restrict our
             # thread affinity even if xnuhost creates eight vCPU threads.
             # Do not claim full-core execution unless the guest's *inherited*
@@ -1406,18 +1458,24 @@ case "$MODE" in
                 die_inner "all 8 SM8850 host cores not accessible (online=$host_online allowed=$host_allowed)"
             echo "ONEIOS_TAKEOVER_CPU=8 host_online=$host_online host_allowed=$host_allowed"
             # Presence in the allowed mask is not per-vCPU affinity proof.
-            # The bench/bridges=0 path keeps touch isolation but does NOT
-            # initialize OneiOS's thermal bridge or the CPU topology bridge.
-            # Never enable bridges=1 as a shortcut: it can mutate unrelated
-            # phone hardware state. Kernel/firmware thermal guards remain.
-            echo "ONEIOS_BENCH_THERMAL_BRIDGE=INACTIVE"
-            echo "ONEIOS_CPU_PLACEMENT_BRIDGE=INACTIVE"
+            # Enable the runtime's explicit bench-only affinity pairing so
+            # each of the eight vCPU/guest-task pairs has a distinct ALLOWED
+            # host core. This reuses OneiOS's parent Oryon topology when
+            # MIDR confirms the eight-core SM8850, and fails closed otherwise.
+            # It does NOT enable any host hardware bridge, change thermal
+            # limits, write cpufreq/governor, or certify lower CPU temperature.
+            # The independent root sensor guard remains mandatory.
+            echo "ONEIOS_BENCH_THERMAL_BRIDGE=INACTIVE_ROOT_GUARD_ACTIVE"
+            echo "ONEIOS_CPU_PLACEMENT=BENCH_AFFINITY_ONLY_8VCPU_SOURCE_ENABLED_NOT_PHYSICALLY_VERIFIED"
             echo "ONEIOS_GPU_3D=RUNTIME_KGSL_PROOF_REQUIRED"
             ulimit -c 0
             exec "/data/runtime/$R_XNUHOST" --session-abi 1 --mode bench \
                 --runtime /data/runtime --image /data/image --data /data/data --session /data/session \
                 --cpus 8 --ram 4G --set ram-giveback=0 --set ram-prefault=1 --set ram-lock=1 \
                 --set ram-huge=0 --set host-mem-log=5 --set bridges=0 --set wifi=off \
+                --set cpu-pin=1 --set cpu-affinity-bench=1 \
+                --set gpu-level=deadline --set gpu-priority=1 --set setway-skip=1 \
+                --set spin-host=0 --set spin-task=0 \
                 --set bluetooth=virtual --set haptics=off --set encoder=off --set return-graceful-ms=0 \
                 --gpu auto --display shm --set touch-exclusive=1 --width 1080 --height 2340 --hz 60 \
                 --boot-args 'debug=0x14e serial=3 -v kt_fixed_zones=120 -no_slto_panic ml-timeout-lock-panic-scale=40 tlto_us=0 armcpu-self-ipi=1 armcpu-spi-ipi=1 use_contiguous_hint=0 interrupt-masked-debug-mode=0 sched_preemption_disable_debug_mode=0 wdt=-1 sheng-smp=1 oneios-data-wait=3000'
@@ -1739,10 +1797,11 @@ P_DEVICE=$(getprop ro.product.device)
 P_SOC=$(getprop ro.soc.model)
 if [ "$FRAMEWORK" = 1 ]; then
     case "$MODE:$2" in
-        --framework-check:smoke|--framework-check:run|--framework-session:smoke|--framework-session:run|--framework-check:reboot-smoke|--framework-session:reboot-smoke) ;;
+        --framework-check:smoke|--framework-check:run|--framework-session:smoke|--framework-session:run|--framework-check:reboot-smoke|--framework-session:reboot-smoke|--framework-check:probe|--framework-session:probe) ;;
         *) framework_block "use the explicit SM8850 experimental Framework profile" ;;
     esac
     FW_MODE=$2
+    FW_PROBE_SECONDS=90
     [ "$FW_MODE" != reboot-smoke ] || FW_MODE=smoke
     [ "$APP" = 0 ] && framework_identity || framework_block "experimental profile requires SM-S948B/m3q/SM8850 firmware S948BXXS4BZIG with SELinux enforcing"
     if [ "$MODE" = --framework-session ]; then
@@ -1750,6 +1809,13 @@ if [ "$FRAMEWORK" = 1 ]; then
         if [ "$FW_MODE" = run ]; then
             [ "$5" = I_ACCEPT_LEGACY_WATCHDOG_FULL_600S_RISK ] ||
                 framework_block "600-second legacy-watchdog guest requires separate explicit risk acknowledgement"
+        elif [ "$FW_MODE" = probe ]; then
+            # Exact explicit profile token; not an environment override.
+            case "$5" in
+                I_ACCEPT_SM8850_SHORT_TAKEOVER_90S_RISK) FW_PROBE_SECONDS=90 ;;
+                I_ACCEPT_SM8850_SHORT_TAKEOVER_300S_RISK) FW_PROBE_SECONDS=300 ;;
+                *) framework_block "explicit 90s/300s short-probe risk acknowledgement required" ;;
+            esac
         fi
         FW_LAUNCH=$4
         case "$FW_LAUNCH" in ''|*[!a-f0-9]*) framework_block "invalid experiment log identifier" ;; esac
@@ -1764,7 +1830,7 @@ else
 fi
 
 # The stage first: without a runtime that has xnuhost, that one line is the answer.
-if [ "$FRAMEWORK" = 0 ] || [ "$FW_MODE" = run ]; then
+if [ "$FRAMEWORK" = 0 ] || [ "$FW_MODE" = run ] || [ "$FW_MODE" = probe ]; then
     stage_checks
 else
     root_only "$STAGE" && root_only "$SELF" && root_only "$SELF_RETURN" ||
@@ -1859,7 +1925,24 @@ if [ "$FRAMEWORK" = 1 ]; then
         framework_block "the qualified native watchdog supervisor is not staged"
     fi
     [ "$(getprop init.svc.zygote_next)" = running ] || framework_block "the expected zygote_next service is not running"
-    if [ "$FW_MODE" = run ]; then
+    if [ "$FW_MODE" = probe ]; then
+        # A root-owned, exact-boot 28-zone or equivalent manifest is mandatory
+        # before enabling any experimental guest with Framework stopped.
+        GUARD_SCRIPT="$STAGE/oneios_sm8850_thermal_takeover_guard.sh"
+        GUARD_MANIFEST="$STAGE/thermal.guard.manifest"
+        root_only "$GUARD_SCRIPT" && root_only "$GUARD_MANIFEST" &&
+            [ -x "$GUARD_SCRIPT" ] &&
+            $SH "$GUARD_SCRIPT" --check "$GUARD_MANIFEST" ||
+            framework_block "probe thermal sensor set unavailable, invalid, or beyond early-abort cutoffs"
+        # Real clock caps are separate from the emergency guard. Source must
+        # refuse BEFORE Framework stop when sysfs policies/ownership are not
+        # available; never silently launch a hot guest uncapped.
+        CAP_SCRIPT="$STAGE/oneios_sm8850_thermal_cap.sh"
+        root_only "$CAP_SCRIPT" && [ -x "$CAP_SCRIPT" ] &&
+            $SH "$CAP_SCRIPT" --check ||
+            framework_block "P0_CPU_CAP=BLOCKED no verified writable SM8850 cpufreq policy or staged root worker"
+    fi
+    if [ "$FW_MODE" = run ] || [ "$FW_MODE" = probe ]; then
         [ "$(cat "$STAGE/image.ready" 2>/dev/null)" = sm8850-ios27-3d-8cpu-600s ] ||
             framework_block "the attested 3D, 8-vCPU, 600s guest stage was not finalized"
         # This exact phone already passed a Framework-only smoke; the
@@ -1947,12 +2030,37 @@ set -- $(stat -f -c '%a %S' /data 2>/dev/null)
 # The app's experimental tick (root's switch verb passes it on).
 [ "$APP" != 1 ] || [ "${ONEIOS_ACK_EXPERIMENTAL:-0}" = 1 ] || refuse "the experimental tick was not given"
 
+# Reject a previously claimed APFS Data clone during check-only as well
+# as session launch. A stale clone must NEVER make preflight look green.
+# A fresh clone must come from the separate root-owned seed rearm process,
+# which archives the old data + marker instead of unlinking the marker.
+if [ "$FRAMEWORK" = 1 ] && [ "$FW_MODE" = probe ]; then
+    [ ! -L "$STAGE/data.consumed" ] && [ ! -e "$STAGE/data.consumed" ] ||
+        framework_block "APFS_DATA_CLONE=CONSUMED; rearm from verified original seed and preserve old snapshot; do NOT remove data.consumed"
+    [ ! -e "$STAGE/image.ready.rearm-pending" ] &&
+        [ ! -L "$STAGE/image.ready.rearm-pending" ] ||
+        framework_block "APFS_DATA_REARM=INCOMPLETE; preserve evidence and repair stage before probe"
+fi
 echo "Preflight passed (runtime $R_VERSION, xnuhost $R_XNUHOST, image iOS $I_VERSION $I_BUILD format $I_FORMAT, busybox $BB, SELinux $(getenforce 2>/dev/null))"
 if [ "$MODE" = --check ] || [ "$MODE" = --framework-check ]; then
+    if [ "$FRAMEWORK" = 1 ] && [ "$FW_MODE" = run ]; then
+        # Check-only remains useful for passive diagnostics and APFS staging;
+        # it is not permission to stop Framework or launch a hot iOS guest.
+        echo "P0_FULL_600S_TAKEOVER=BLOCKED_UNQUALIFIED_THERMAL_GUARD"
+        echo "P0_RECOVERY=UNASSISTED_REBOOT_AND_WATCHDOG_NOT_CERTIFIED"
+    fi
     echo "PREFLIGHT OK"
     exit 0
 fi
 if [ "$FRAMEWORK" = 1 ] && [ "$FW_MODE" = run ]; then
+    # Source-level P0 admission lock. There is intentionally no env/file/ACK
+    # bypass: neither a fixture test nor a preflight pass qualifies a
+    # production thermal guard or an unassisted reboot. Applies before the
+    # one-shot APFS Data clone can be consumed and before Framework stops.
+    # This does not retrofit the already staged on-phone copy of this script.
+    framework_block "P0_FULL_600S_TAKEOVER=BLOCKED_UNQUALIFIED_THERMAL_GUARD; independent root-side guard and unassisted reboot-return are NOT certified"
+fi
+if [ "$FRAMEWORK" = 1 ] && { [ "$FW_MODE" = run ] || [ "$FW_MODE" = probe ]; }; then
     # Consume this independently cloned APFS Data BEFORE the first possible
     # writable guest open. A failed/aborted takeover cannot reuse the clone.
     [ ! -L "$STAGE/data.consumed" ] && [ ! -e "$STAGE/data.consumed" ] ||
@@ -2039,6 +2147,22 @@ if ! printf '%s\n' "$WD_GEN" > "$CTL/watchdog.generation"; then
     echo failed > "$CTL/state"
     exit 4
 fi
+if [ "$FRAMEWORK" = 1 ] && [ "$FW_MODE" = probe ]; then
+    # Root-owned monitor is armed BEFORE any Framework stop. Independent
+    # deadline and watcher each supervise it and use the existing returner.
+    "$BB" setsid $SH "$GUARD_SCRIPT" --run "$CTL" "$GUARD_MANIFEST" "$WD_GEN" \
+        8>&- </dev/null >>"$STAGE/thermal-guard.log" 2>&1 &
+    attempt=0
+    until framework_thermal_guard_healthy; do
+        [ "$attempt" -lt 30 ] || {
+            echo "Cannot arm root thermal monitor; One UI left running."
+            echo failed > "$CTL/state"
+            exit 4
+        }
+        sleep 0.2; attempt=$((attempt+1))
+    done
+    echo "P0_SHORT_PROBE_THERMAL=ARMED_ROOT_SENSOR_GUARD_NOT_PRODUCTION_CERTIFIED"
+fi
 "$BB" setsid $SH "$SELF" --watch 8>&- </dev/null >>"$STAGE/return.log" 2>&1 &
 KTOK="$$.$(date +%s)"
 echo "$KTOK" > "$CTL/keys/session"
@@ -2100,6 +2224,8 @@ if [ "$FRAMEWORK_REBOOT" = 1 ]; then
     echo "Samsung may enter Download Mode if the phone restarts while both volume keys are held with USB connected."
     if [ "$FW_MODE" = run ]; then
         echo "FULL iOS guest, 8 vCPUs, GPU auto/3D and touch: independent 600s mandatory reboot-return deadline after Framework stop."
+    elif [ "$FW_MODE" = probe ]; then
+        echo "SHORT 8-vCPU iOS guest probe: reboot-return requested at verified Framework-stop tick +${FW_PROBE_SECONDS}s, NOT ${FW_PROBE_SECONDS}s of guest execution; thermal guard may abort earlier."
         echo "Legacy watchdog a:82 and normal One UI boot are NOT independently qualified. Explicit-risk experiment."
     else
         echo "Framework-only smoke: independent 20s deadline requests reboot after Framework stop."
@@ -2265,14 +2391,40 @@ if [ "$FRAMEWORK" = 1 ]; then
     [ "$(timeout 3 service check inputflinger)" = 'Service inputflinger: not found' ] &&
         [ "$(timeout 3 service check input)" = 'Service input: not found' ] ||
         fw_recover "Android input services did not stop with system_server"
+    if [ "$FW_MODE" = probe ]; then
+        # Cap from the independently sampled guard, after Framework is down
+        # but BEFORE a single guest instruction is executed. All return
+        # helpers and the independent thermal cutoff are already armed.
+        "$BB" setsid $SH "$CAP_SCRIPT" --run "$CTL" "$WD_GEN" \
+            8>&- </dev/null >>"$STAGE/thermal-cap.log" 2>&1 &
+        cap_wait=0
+        until framework_thermal_cap_healthy; do
+            [ "$cap_wait" -lt 30 ] ||
+                fw_recover "SM8850 independent CPU cap did not arm; no guest was started"
+            sleep 0.2
+            cap_wait=$((cap_wait+1))
+        done
+        printf '%s\n' "$WD_GEN" > "$CTL/thermal.cap.required" ||
+            fw_recover "could not bind the CPU cap to this Framework generation"
+        echo "P0_CPU_CAP=ARMED_BEFORE_XNUHOST_NOT_HARDWARE_CERTIFIED"
+    fi
     grep -E '^(MemAvailable|SwapFree):' "$P/meminfo"
     fw_seconds=10
     [ "$FRAMEWORK_REBOOT" != 1 ] || fw_seconds=20
+    [ "$FW_MODE" != probe ] || fw_seconds=90
+    if [ "$FW_MODE" = probe ] && [ "$FW_PROBE_SECONDS" = 300 ]; then
+        fw_seconds=300
+    fi
     if [ "$FW_MODE" = run ]; then
         # Exactly ten minutes from verified Framework stop, not from ADB
         # launch. The independent framework-deadline guard stays active
         # even if xnuhost hangs or USB disconnects.
         fw_seconds=600
+    fi
+    if [ "$FW_MODE" = run ] || [ "$FW_MODE" = probe ]; then
+        # Both paths launch the SAME real 8-vCPU guest. The 90s profile
+        # must apply the same guest memory / map-count prerequisites,
+        # with the original sysctl saved for reboot-only return.
         [ "$(awk '/^MemAvailable:/ {print $2}' "$P/meminfo")" -ge 5500000 ] ||
             fw_recover "available memory is below the benchmark minimum"
         framework_configure || fw_recover "could not set and verify vm.max_map_count"
@@ -2281,6 +2433,13 @@ if [ "$FRAMEWORK" = 1 ]; then
         mv -f "$CTL/framework.deadline.tmp" "$CTL/framework.deadline" ||
         fw_recover "could not arm the phase deadline"
     echo "Framework stopped, app groups drained and Android input absent at uptime $fw_tick. Deadline: $((fw_tick + fw_seconds))"
+    if [ "$FW_MODE" = probe ]; then
+        if [ "$fw_seconds" = 90 ]; then
+            echo "P0_SHORT_PROBE_DEADLINE=REQUEST_REBOOT_AT_FRAMEWORK_STOP_PLUS_90S_NOT_GUEST_RUNTIME_90S"
+        else
+            echo "P0_SHORT_PROBE_DEADLINE=REQUEST_REBOOT_AT_FRAMEWORK_STOP_PLUS_300S_NOT_GUEST_RUNTIME_300S"
+        fi
+    fi
     if [ "$FRAMEWORK_REBOOT" = 1 ]; then
         printf '%s\n' "$WD_GEN" > "$CTL/framework.takeover-confirmed" ||
             fw_recover "could not record verified Framework stop"
@@ -2350,6 +2509,22 @@ echo "$XP" > "$CTL/xnuhost.pid"
 echo "$XNS" > "$CTL/mntns"
 [ "$FRAMEWORK" = 1 ] || echo running > "$CTL/state"
 echo "xnuhost: pid $XP in mount namespace $XNS, log $SESSION/xnuhost.log"
+if [ "$FRAMEWORK" = 1 ] && [ "$FW_MODE" = probe ]; then
+    # Only observational evidence: pid publication may precede exec; the
+    # inner shell emits a separate guest-exec ATTEMPT marker just before exec.
+    # Never reset framework.deadline or lengthen the thermal exposure here.
+    guest_observed_tick=$(watchdog_now) || guest_observed_tick=
+    framework_cap=$(cat "$CTL/framework.deadline" 2>/dev/null)
+    if watchdog_uint "$guest_observed_tick" && watchdog_uint "$framework_cap" && watchdog_uint "$fw_tick"; then
+        setup_elapsed=$((guest_observed_tick - fw_tick))
+        remaining=$((framework_cap - guest_observed_tick))
+        [ "$setup_elapsed" -ge 0 ] || setup_elapsed=0
+        [ "$remaining" -ge 0 ] || remaining=0
+        echo "P0_SHORT_PROBE_TIMING=framework_stop_tick:$fw_tick guest_pid_observed_tick:$guest_observed_tick setup_elapsed_seconds:$setup_elapsed remaining_to_reboot_request_seconds:$remaining"
+    else
+        echo "P0_SHORT_PROBE_TIMING=UNKNOWN_MONOTONIC_READ_FAILED"
+    fi
+fi
 
 # The guest's screen: the runtime's display helper, when it carries one. It
 # runs here, on One UI's side (it needs surfaceflinger's binder and the
