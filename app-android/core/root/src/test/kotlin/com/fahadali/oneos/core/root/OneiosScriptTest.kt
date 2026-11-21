@@ -1051,11 +1051,26 @@ class OneiosScriptTest {
     fun normalReturnFailsSafeWhenShmemReadbackDoesNotMatch() = failsafe("shmem_enabled") { f ->
         val node = shmemNode(f, "advise")
         File(f.control, "base/shmem_enabled").writeText("never\n")
-        // The fake node accepts the write, but the driver still reports its old value.
-        f.file("bin/cat").apply {
-            writeText("#!/bin/sh\nif [ \"\$1\" = '${node.path}' ]; then echo 'always within_size [advise] never deny force'; else exec /bin/cat \"\$@\"; fi\n")
+        // A sysfs file can accept a write yet keep reporting its previous
+        // active mode. Match the fake node by suffix, not the temporary
+        // absolute root spelling, which can vary across shells/worktrees.
+        // The production restore_shmem() fail-closed check is unchanged.
+        val shim = f.file("bin/cat").apply {
+            writeText(
+                "#!/bin/sh\n" +
+                    "case \"\$1\" in\n" +
+                    "  */sys/kernel/mm/transparent_hugepage/shmem_enabled)\n" +
+                    "    printf '%s\\n' 'always within_size [advise] never deny force' ;;\n" +
+                    "  *) exec /bin/cat \"\$@\" ;;\n" +
+                    "esac\n",
+            )
             assertTrue(setExecutable(true))
         }
+        val env = "PATH=${shim.parentFile.path}:${System.getenv("PATH")}"
+        val check = ProcessBuilder("env", env, "cat", node.path).start()
+        val readback = check.inputStream.readBytes().toString(Charsets.UTF_8)
+        assertEquals(readback, 0, check.waitFor())
+        assertTrue("fake sysfs readback not intercepted: $readback", readback.contains("[advise]"))
     }
 
     @Test
