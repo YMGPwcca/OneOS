@@ -1802,6 +1802,10 @@ if [ "$FRAMEWORK" = 1 ]; then
     esac
     FW_MODE=$2
     FW_PROBE_SECONDS=90
+    # This flag affects ONLY additional script-level temperature aborts.
+    # It must not disable the kernel/firmware thermal, the 600s deadline,
+    # non-temperature recovery faults or original watchdog.
+    FW_TEMP_LOG_ONLY=0
     [ "$FW_MODE" != reboot-smoke ] || FW_MODE=smoke
     [ "$APP" = 0 ] && framework_identity || framework_block "experimental profile requires SM-S948B/m3q/SM8850 firmware S948BXXS4BZIG with SELinux enforcing"
     if [ "$MODE" = --framework-session ]; then
@@ -1814,7 +1818,10 @@ if [ "$FRAMEWORK" = 1 ]; then
             case "$5" in
                 I_ACCEPT_SM8850_SHORT_TAKEOVER_90S_RISK) FW_PROBE_SECONDS=90 ;;
                 I_ACCEPT_SM8850_SHORT_TAKEOVER_300S_RISK) FW_PROBE_SECONDS=300 ;;
-                *) framework_block "explicit 90s/300s short-probe risk acknowledgement required" ;;
+                I_ACCEPT_SM8850_MONITOR_ONLY_600S_RISK)
+                    FW_PROBE_SECONDS=600
+                    FW_TEMP_LOG_ONLY=1 ;;
+                *) framework_block "explicit 90s/300s guard-on or monitor-only 600s probe acknowledgement required" ;;
             esac
         fi
         FW_LAUNCH=$4
@@ -2150,8 +2157,14 @@ fi
 if [ "$FRAMEWORK" = 1 ] && [ "$FW_MODE" = probe ]; then
     # Root-owned monitor is armed BEFORE any Framework stop. Independent
     # deadline and watcher each supervise it and use the existing returner.
-    "$BB" setsid $SH "$GUARD_SCRIPT" --run "$CTL" "$GUARD_MANIFEST" "$WD_GEN" \
-        8>&- </dev/null >>"$STAGE/thermal-guard.log" 2>&1 &
+    if [ "$FW_TEMP_LOG_ONLY" = 1 ]; then
+        echo "P0_THERMAL_POLICY=SCRIPT_TEMPERATURE_LOG_ONLY_STOCK_HARDWARE_UNCHANGED"
+        "$BB" setsid $SH "$GUARD_SCRIPT" --run "$CTL" "$GUARD_MANIFEST" "$WD_GEN" temperature-log-only \
+            8>&- </dev/null >>"$STAGE/thermal-guard.log" 2>&1 &
+    else
+        "$BB" setsid $SH "$GUARD_SCRIPT" --run "$CTL" "$GUARD_MANIFEST" "$WD_GEN" \
+            8>&- </dev/null >>"$STAGE/thermal-guard.log" 2>&1 &
+    fi
     attempt=0
     until framework_thermal_guard_healthy; do
         [ "$attempt" -lt 30 ] || {
@@ -2395,8 +2408,13 @@ if [ "$FRAMEWORK" = 1 ]; then
         # Cap from the independently sampled guard, after Framework is down
         # but BEFORE a single guest instruction is executed. All return
         # helpers and the independent thermal cutoff are already armed.
-        "$BB" setsid $SH "$CAP_SCRIPT" --run "$CTL" "$WD_GEN" \
-            8>&- </dev/null >>"$STAGE/thermal-cap.log" 2>&1 &
+        if [ "$FW_TEMP_LOG_ONLY" = 1 ]; then
+            "$BB" setsid $SH "$CAP_SCRIPT" --run "$CTL" "$WD_GEN" temperature-log-only \
+                8>&- </dev/null >>"$STAGE/thermal-cap.log" 2>&1 &
+        else
+            "$BB" setsid $SH "$CAP_SCRIPT" --run "$CTL" "$WD_GEN" \
+                8>&- </dev/null >>"$STAGE/thermal-cap.log" 2>&1 &
+        fi
         cap_wait=0
         until framework_thermal_cap_healthy; do
             [ "$cap_wait" -lt 30 ] ||
@@ -2412,8 +2430,8 @@ if [ "$FRAMEWORK" = 1 ]; then
     fw_seconds=10
     [ "$FRAMEWORK_REBOOT" != 1 ] || fw_seconds=20
     [ "$FW_MODE" != probe ] || fw_seconds=90
-    if [ "$FW_MODE" = probe ] && [ "$FW_PROBE_SECONDS" = 300 ]; then
-        fw_seconds=300
+    if [ "$FW_MODE" = probe ] && { [ "$FW_PROBE_SECONDS" = 300 ] || [ "$FW_PROBE_SECONDS" = 600 ]; }; then
+        fw_seconds=$FW_PROBE_SECONDS
     fi
     if [ "$FW_MODE" = run ]; then
         # Exactly ten minutes from verified Framework stop, not from ADB
@@ -2434,11 +2452,14 @@ if [ "$FRAMEWORK" = 1 ]; then
         fw_recover "could not arm the phase deadline"
     echo "Framework stopped, app groups drained and Android input absent at uptime $fw_tick. Deadline: $((fw_tick + fw_seconds))"
     if [ "$FW_MODE" = probe ]; then
-        if [ "$fw_seconds" = 90 ]; then
-            echo "P0_SHORT_PROBE_DEADLINE=REQUEST_REBOOT_AT_FRAMEWORK_STOP_PLUS_90S_NOT_GUEST_RUNTIME_90S"
-        else
-            echo "P0_SHORT_PROBE_DEADLINE=REQUEST_REBOOT_AT_FRAMEWORK_STOP_PLUS_300S_NOT_GUEST_RUNTIME_300S"
-        fi
+        case "$fw_seconds" in
+            90)
+                echo "P0_SHORT_PROBE_DEADLINE=REQUEST_REBOOT_AT_FRAMEWORK_STOP_PLUS_90S_NOT_GUEST_RUNTIME_90S" ;;
+            300)
+                echo "P0_SHORT_PROBE_DEADLINE=REQUEST_REBOOT_AT_FRAMEWORK_STOP_PLUS_300S_NOT_GUEST_RUNTIME_300S" ;;
+            600)
+                echo "P0_EXPERIMENTAL_TELEMETRY_DEADLINE=REQUEST_REBOOT_AT_FRAMEWORK_STOP_PLUS_600S_NOT_GUEST_RUNTIME_600S" ;;
+        esac
     fi
     if [ "$FRAMEWORK_REBOOT" = 1 ]; then
         printf '%s\n' "$WD_GEN" > "$CTL/framework.takeover-confirmed" ||
