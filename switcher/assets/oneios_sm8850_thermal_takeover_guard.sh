@@ -118,17 +118,8 @@ case "$MODE" in
         echo "P0_THERMAL_GUARD=READ_ONLY_CURRENT_BOOT_READY_NOT_CERTIFIED"
         exit 0 ;;
     --run)
-        [ "$#" = 4 ] || [ "$#" = 5 ] || die usage
+        [ "$#" = 4 ] || die usage
         CTL=$2; MAN=$3; GEN=$4
-        # Opt-in benchmark mode: this script monitors and logs thermal
-        # exceedances but NEVER publishes thermal.guard.fault for temperature
-        # alone. Kernel/firmware thermal management is completely untouched.
-        # Sensor loss/corruption remains a genuine integrity fault.
-        TEMPERATURE_LOG_ONLY=0
-        if [ "$#" = 5 ]; then
-            [ "$5" = temperature-log-only ] || die invalid_thermal_mode
-            TEMPERATURE_LOG_ONLY=1
-        fi
         [ "$(id -u)" = 0 ] || die root_required
         case "$CTL" in /data/adb/oneios-m3q-framework/control) ;; *) die stage_path ;; esac
         case "$MAN" in /data/adb/oneios-m3q-framework/thermal.guard.manifest) ;; *) die manifest_path ;; esac
@@ -152,21 +143,15 @@ case "$MODE" in
                 :
             else
                 rc=$?
-                if [ "$TEMPERATURE_LOG_ONLY" = 1 ] && [ "$rc" = 2 ]; then
-                    # Intentionally DO NOT signal return/reboot. Preserve the
-                    # observation for terminal capture and on-device forensics.
-                    echo "P0_TEMPERATURE_EXCEEDED=LOG_ONLY boot=$BOOT gen=$GEN seq=$seq $SOFT_FAULT_DETAIL"
-                else
-                    case "$rc" in
-                        2) reason=soft_temperature_abort
-                           detail=$SOFT_FAULT_DETAIL ;;
-                        *) reason=missing_or_invalid_sensor
-                           detail= ;;
-                    esac
-                    atom thermal.guard.fault "$BOOT $GEN $$ $BIRTH $reason ${detail}" || :
-                    echo "P0_THERMAL_GUARD=FAIL_CLOSED $reason ${detail}"
-                    exit 4
-                fi
+                case "$rc" in
+                    2) reason=soft_temperature_abort
+                       detail=$SOFT_FAULT_DETAIL ;;
+                    *) reason=missing_or_invalid_sensor
+                       detail= ;;
+                esac
+                atom thermal.guard.fault "$BOOT $GEN $$ $BIRTH $reason ${detail}" || :
+                echo "P0_THERMAL_GUARD=FAIL_CLOSED $reason ${detail}"
+                exit 4
             fi
             seq=$((seq+1))
             tick=$(mono_seconds) || {
@@ -177,9 +162,7 @@ case "$MODE" in
                 die heartbeat_write_failure
             # Bounded root-owned thermal telemetry survives xnuhost bridges=0.
             # Boot/generation distinguish new samples from appended older runs.
-            # In temperature-log-only mode, a threshold is observational and
-            # NEVER sent to the reboot-only returner. Hardware thermal is not
-            # modified. Integrity failures still use the normal return path.
+            # Never delay or replace the fail-closed fault branch above.
             case $((seq % 5)) in
                 1)
                     echo "P0_THERMAL_SAMPLE=OK boot=$BOOT generation=$GEN seq=$seq uptime=$tick cpu_mC=$CPU_MAX cpu_zone=$CPU_MAX_ZONE gpu_mC=$GPU_MAX gpu_zone=$GPU_MAX_ZONE ddr_mC=$DDR_MAX ddr_zone=$DDR_MAX_ZONE bat_dC=$BAT lrp_dC=$LRP board_ap_dC=$AP"
