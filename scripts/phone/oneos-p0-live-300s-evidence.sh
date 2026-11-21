@@ -9,7 +9,7 @@ ONEIOS="${ONEIOS_DIR:-$HOME/projects/OneiOS}"
 ONEOS="${ONEOS_REPO:-$ONEIOS/app}"
 ADB="${ONEOS_ADB:-$HOME/Android/Sdk/platform-tools/adb}"
 BRANCH="exp/sm8850-p0-cpu90c-300s"
-PIN="fa6cd88610c031c13288432476838e8b7b5a68f3"
+PIN="022c0fac5ed32a3b1445717c0a384cdc458ebd5e"
 STAGE="/data/adb/oneios-m3q-framework"
 
 fail() { echo "P0_PHYSICAL=BLOCKED reason=$*" >&2; exit 4; }
@@ -71,6 +71,12 @@ physical_child() {
     P0_TMP_SOURCE="$source"
     git -C "$ONEOS" archive "$PIN" | tar -xf - -C "$source"
     [[ -f "$source/scripts/phone/sm8850-takeover-short-probe.py" ]] || fail 'PINNED_PROBE_MISSING'
+    grep -Fq '        BIRTH=$(birth $$)' "$source/switcher/assets/oneios_sm8850_thermal_takeover_guard.sh" ||
+      fail 'PID_BIRTH_SOURCE_FIX_MISSING'
+    grep -Fq 'P0_THERMAL_PID_BIRTH=PASS_READ_ONLY' "$source/switcher/assets/oneios_sm8850_thermal_takeover_guard.sh" ||
+      fail 'PID_BIRTH_SELFTEST_SOURCE_MISSING'
+    grep -Fq '$SH "$GUARD_SCRIPT" --pid-birth-selftest' "$source/switcher/assets/oneios_switch.sh" ||
+      fail 'PRE_CLONE_PID_BIRTH_PREFLIGHT_MISSING'
     grep -Fq '"$CPU_MAX" -lt 90000' "$source/switcher/assets/oneios_sm8850_thermal_takeover_guard.sh" || fail 'CPU90_GUARD_SOURCE_MISSING'
     grep -Fq '"$GPU_MAX" -lt 55000' "$source/switcher/assets/oneios_sm8850_thermal_takeover_guard.sh" || fail 'GPU55_FAILCLOSED_SOURCE_MISSING'
     grep -Fq '"$DDR_MAX" -lt 55000' "$source/switcher/assets/oneios_sm8850_thermal_takeover_guard.sh" || fail 'DDR55_FAILCLOSED_SOURCE_MISSING'
@@ -116,6 +122,22 @@ physical_child() {
     [[ "$model:$device:$soc:$firmware" == 'SM-S948B:m3q:SM8850:S948BXXS4BZIG' ]] || fail 'WRONG_DEVICE_OR_FIRMWARE'
     [[ "$uid" == 0 ]] || fail 'ROOT_NOT_ACTIVE_ON_CURRENT_BOOT'
     [[ "$(adb_property "$serial" sys.boot_completed)" == 1 ]] || fail 'ONEUI_NOT_FULLY_BOOTED'
+
+    # Execute the exact pinned thermal script in READ-ONLY PID birth selftest
+    # mode on the phone, before any APFS Data clone is consumed or rearmed.
+    # The script is sent through stdin, not installed on the phone.
+    echo '===== ROOT THERMAL PID BIRTH SELFTEST BEFORE APFS REARM ====='
+    if ! timeout 20s "$ADB" -s "$serial" shell -T \
+      "su -c '/system/bin/sh -s -- --pid-birth-selftest'" \
+      < "$source/switcher/assets/oneios_sm8850_thermal_takeover_guard.sh" \
+      > "$out/pid-birth-preclone.txt" 2>&1; then
+        cat "$out/pid-birth-preclone.txt" || :
+        fail 'ROOT_THERMAL_PID_BIRTH_SELFTEST_FAILED_NO_REARM'
+    fi
+    cat "$out/pid-birth-preclone.txt"
+    grep -Fxq 'P0_THERMAL_PID_BIRTH=PASS_READ_ONLY' "$out/pid-birth-preclone.txt" ||
+      fail 'ROOT_THERMAL_PID_BIRTH_NOT_ATTESTED_NO_REARM'
+    echo 'P0_THERMAL_PID_BIRTH_BEFORE_REARM=PASS_READ_ONLY'
 
     echo '===== PRESERVE PREVIOUS CONTROL RECORDS BEFORE SESSION ROTATION ====='
     capture_root_records "$serial" "$out/previous-root-records"
@@ -214,7 +236,7 @@ lines = [
 '- Scope: OneOS SM-S948B/m3q/SM8850, firmware S948BXXS4BZIG.',
 '- Requested mode: one high-risk `--run-300s` CPU-90C Framework takeover, after any necessary APFS rearm; CPU 90 C not vendor-certified.',
 '- Deadline meaning: REQUEST reboot at verified Framework stop + 300 seconds; NOT guest-runtime guarantee.',
-'- OneOS CPU-90C experimental source: `fa6cd88610c031c13288432476838e8b7b5a68f3`.',
+'- OneOS CPU-90C experimental source: `022c0fac5ed32a3b1445717c0a384cdc458ebd5e`.',
 '- OneiOS local source: `' + (root/'oneios-source-sha.txt').read_text().strip() + '`.' if (root/'oneios-source-sha.txt').exists() else '- OneiOS local source: UNAVAILABLE.',
 '- Host process exit code: `' + str(rc) + '` (does NOT itself certify P0).',
 '- Physical dispatch observed in console: `' + ('YES' if 'SHORT_PROBE_REQUESTING_REAL_IOS_GUEST' in console else 'NO') + '`.',
