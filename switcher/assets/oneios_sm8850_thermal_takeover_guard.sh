@@ -4,8 +4,9 @@
 # This source does not open watchdog, change thresholds, reboot, or stop UI.
 # It publishes fail-closed observations for OneOS's existing reboot-only
 # framework-deadline and watcher, which own all return/recovery actions.
-# Cutoffs below are deliberately EARLY ABORT points for one short experiment,
-# NOT validated hardware critical temperatures or production thermal policy.
+# Throttle-first experiment: 80 C is NOT a return point. The conservative
+# 90 C junction threshold is a last-resort runaway escape, NOT a certified
+# SM8850 critical trip. Guard still fails closed on missing sensors.
 set -u
 LC_ALL=C; export LC_ALL
 umask 077
@@ -90,12 +91,12 @@ read_all() {
     # These diagnostic tokens are appended to the existing fault record and
     # must NEVER delay or override the original fail-closed return behavior.
     crossed=
-    [ "$CPU_MAX" -lt 55000 ] || crossed="${crossed}cpu,"
-    [ "$GPU_MAX" -lt 55000 ] || crossed="${crossed}gpu,"
-    [ "$DDR_MAX" -lt 55000 ] || crossed="${crossed}ddr,"
-    [ "$BAT" -lt 380 ] || crossed="${crossed}bat,"
-    [ "$LRP" -lt 420 ] || crossed="${crossed}lrp,"
-    [ "$AP" -lt 420 ] || crossed="${crossed}board_ap,"
+    [ "$CPU_MAX" -lt 90000 ] || crossed="${crossed}cpu,"
+    [ "$GPU_MAX" -lt 95000 ] || crossed="${crossed}gpu,"
+    [ "$DDR_MAX" -lt 95000 ] || crossed="${crossed}ddr,"
+    [ "$BAT" -lt 480 ] || crossed="${crossed}bat,"
+    [ "$LRP" -lt 500 ] || crossed="${crossed}lrp,"
+    [ "$AP" -lt 700 ] || crossed="${crossed}board_ap,"
     if [ -n "$crossed" ]; then
         SOFT_FAULT_DETAIL="crossed=${crossed%,} cpu_mC=$CPU_MAX cpu_zone=$CPU_MAX_ZONE gpu_mC=$GPU_MAX gpu_zone=$GPU_MAX_ZONE ddr_mC=$DDR_MAX ddr_zone=$DDR_MAX_ZONE bat_dC=$BAT lrp_dC=$LRP board_ap_dC=$AP"
         return 2
