@@ -440,3 +440,10 @@ cd ~/projects/OneiOS/app
 python3 -m unittest discover -s tests -p 'test_sm8850_thermal_shadow.py' -v
 ```
 This is a **source and simulator regression**, not a physical thermal or recovery certification. **No new CPU90/300s phone test is authorized by passing it.**
+
+
+### Host and guest CPU-load telemetry with bridges disabled (source-only)
+
+Follow-up to the direct-parent affinity port: `oneios_sm8850_thermal_takeover_guard.sh` now reads, **only on every fifth successful heartbeat**, root-owned session `control/xnuhost.pid`, the live process's `/proc/<pid>/stat` counters (post-comm fields 12 user ticks, 13 system ticks, 20 birth ticks), and aggregate `/proc/stat` CPU ticks. It emits `P0_XNUHOST_LOAD=READ_ONLY` with boot/generation/monotonic uptime/PID/birth identity alongside `P0_THERMAL_SAMPLE=OK`. The cumulative counters support **offline CPU-load deltas**; a single counter is **not** CPU% or proof of a userland process's energy use. Missing or recycled PIDs yield no guest-load sample and **never mask a thermal fault**. Fault emission still precedes normal telemetry. No `renice`, scheduling, frequency, cgroup, thermal-trip, watchdog or reboot changes occur in the monitor.
+
+The OneOS source regression now checks the per-session CPU tick fields, bounded sample rate and read-only exclusion list. An external observed CPU peak of **101.1 C** in the prior separate CPU90 attempt remains a STOP signal; **this telemetry is not active evidence until a new, separately authorized safe session is recorded.** The conservative normal CPU55 profile remains unchanged. A local-first, NO-ADB combined CI runner is available from [OneiOS `scripts/ci-sm8850-parent-port-local.sh`](https://github.com/YMGPwcca/OneiOS/blob/feat/oneios-sm8850-m3q/scripts/ci-sm8850-parent-port-local.sh); it pins sources from both forks and only runs host tests, with no stage/rearm/Framework calls. Its results have **not** been observed yet.
