@@ -108,7 +108,7 @@ class PolicyTests(unittest.TestCase):
         self.assertIn('[ "$got" -le "$target" ]', src)
         self.assertNotIn("echo -1 > $CFL", src)
         for command in ("setprop sys.powerctl", "reboot -f", "stop zygote",
-                        "echo b > /proc/sysrq-trigger", "cpufreq_max_limit "):
+                        "echo b > /proc/sysrq-trigger", "/sys/devices/system/cpu/cpufreq_limit/"):
             self.assertNotIn(command, src)
 
 
