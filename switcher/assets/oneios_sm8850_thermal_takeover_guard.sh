@@ -164,7 +164,23 @@ case "$MODE" in
             # Boot/generation distinguish new samples from appended older runs.
             # Never delay or replace the fail-closed fault branch above.
             case $((seq % 5)) in
-                1) echo "P0_THERMAL_SAMPLE=OK boot=$BOOT generation=$GEN seq=$seq uptime=$tick cpu_mC=$CPU_MAX cpu_zone=$CPU_MAX_ZONE gpu_mC=$GPU_MAX gpu_zone=$GPU_MAX_ZONE ddr_mC=$DDR_MAX ddr_zone=$DDR_MAX_ZONE bat_dC=$BAT lrp_dC=$LRP board_ap_dC=$AP" ;;
+                1)
+                    echo "P0_THERMAL_SAMPLE=OK boot=$BOOT generation=$GEN seq=$seq uptime=$tick cpu_mC=$CPU_MAX cpu_zone=$CPU_MAX_ZONE gpu_mC=$GPU_MAX gpu_zone=$GPU_MAX_ZONE ddr_mC=$DDR_MAX ddr_zone=$DDR_MAX_ZONE bat_dC=$BAT lrp_dC=$LRP board_ap_dC=$AP"
+                    # Parent OneiOS's thermal bridge reports host CPU and
+                    # xnuhost load; bridges=0 cannot use that bridge. Read
+                    # cumulative /proc counters from the independent guard
+                    # instead. Never signal, renice, pin, open watchdog or
+                    # block a return: this is diagnostic data only.
+                    guest_pid=$(cat "$CTL/xnuhost.pid" 2>/dev/null)
+                    if is_uint "$guest_pid" && [ "$guest_pid" -gt 1 ]; then
+                        guest_cpu=$(sed 's/^.*) //' "/proc/$guest_pid/stat" 2>/dev/null |
+                            awk '$1 != "Z" && $1 != "X" && $12 ~ /^[0-9]+$/ && $13 ~ /^[0-9]+$/ && $20 ~ /^[0-9]+$/ { printf "user_ticks=%s system_ticks=%s birth_ticks=%s", $12, $13, $20; exit }')
+                        if [ -n "$guest_cpu" ]; then
+                            host_cpu_ticks=$(awk '/^cpu / { printf "%.0f", $2+$3+$4+$5+$6+$7+$8+$9; exit }' /proc/stat 2>/dev/null)
+                            echo "P0_XNUHOST_LOAD=READ_ONLY boot=$BOOT generation=$GEN uptime=$tick pid=$guest_pid $guest_cpu host_allcpu_ticks=${host_cpu_ticks:-unavailable}"
+                        fi
+                    fi
+                    ;;
             esac
             sleep 1
         done
