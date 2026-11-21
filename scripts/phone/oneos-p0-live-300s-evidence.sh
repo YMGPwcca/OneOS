@@ -8,8 +8,8 @@ umask 077
 ONEIOS="${ONEIOS_DIR:-$HOME/projects/OneiOS}"
 ONEOS="${ONEOS_REPO:-$ONEIOS/app}"
 ADB="${ONEOS_ADB:-$HOME/Android/Sdk/platform-tools/adb}"
-BRANCH="feat/sm8850-p0-thermal-reader-sim"
-PIN="99b48b2cb55e7d5a893cfa32778a1d4ab154f9e2"
+BRANCH="exp/sm8850-p0-cpu90c-300s"
+PIN="fa6cd88610c031c13288432476838e8b7b5a68f3"
 STAGE="/data/adb/oneios-m3q-framework"
 
 fail() { echo "P0_PHYSICAL=BLOCKED reason=$*" >&2; exit 4; }
@@ -71,6 +71,21 @@ physical_child() {
     P0_TMP_SOURCE="$source"
     git -C "$ONEOS" archive "$PIN" | tar -xf - -C "$source"
     [[ -f "$source/scripts/phone/sm8850-takeover-short-probe.py" ]] || fail 'PINNED_PROBE_MISSING'
+    grep -Fq '"$CPU_MAX" -lt 90000' "$source/switcher/assets/oneios_sm8850_thermal_takeover_guard.sh" || fail 'CPU90_GUARD_SOURCE_MISSING'
+    grep -Fq '"$GPU_MAX" -lt 55000' "$source/switcher/assets/oneios_sm8850_thermal_takeover_guard.sh" || fail 'GPU55_FAILCLOSED_SOURCE_MISSING'
+    grep -Fq '"$DDR_MAX" -lt 55000' "$source/switcher/assets/oneios_sm8850_thermal_takeover_guard.sh" || fail 'DDR55_FAILCLOSED_SOURCE_MISSING'
+    grep -Fq '"$BAT" -lt 380' "$source/switcher/assets/oneios_sm8850_thermal_takeover_guard.sh" || fail 'BAT38_FAILCLOSED_SOURCE_MISSING'
+    grep -Fq '"$LRP" -lt 420' "$source/switcher/assets/oneios_sm8850_thermal_takeover_guard.sh" || fail 'LRP42_FAILCLOSED_SOURCE_MISSING'
+    grep -Fq '"$AP" -lt 420' "$source/switcher/assets/oneios_sm8850_thermal_takeover_guard.sh" || fail 'BOARD_AP42_FAILCLOSED_SOURCE_MISSING'
+    if grep -Fq '"$CPU_MAX" -lt 55000' "$source/switcher/assets/oneios_sm8850_thermal_takeover_guard.sh"; then
+        fail 'CPU90_EXPERIMENT_NOT_ACTIVATED'
+    fi
+    echo '===== TARGETED EXPERIMENT REGRESSION (OFFLINE; BEFORE DEVICE ACTION) ====='
+    if ! (cd "$source" && python3 -m unittest discover -s tests -p 'test_sm8850_thermal_shadow.py' -v) > "$out/cpu90-regression.log" 2>&1; then
+        tail -n 100 "$out/cpu90-regression.log"
+        fail 'CPU90_SOURCE_REGRESSION_FAILED'
+    fi
+    echo 'CPU90_TARGETED_REGRESSION=PASS_OFFLINE_NOT_HARDWARE_QUALIFICATION'
     grep -Fq 'actions.add_argument("--run-300s"' "$source/scripts/phone/sm8850-takeover-short-probe.py" || fail 'PINNED_300S_MODE_MISSING'
     grep -Fq 'P0_FULL_600S_TAKEOVER=BLOCKED_UNQUALIFIED_THERMAL_GUARD' "$source/switcher/assets/oneios_switch.sh" || fail 'FULL_600S_SOURCE_LOCK_MISSING'
     echo "ONEOS_SOURCE_SHA=$PIN"
@@ -146,7 +161,8 @@ physical_child() {
         echo 'PREBOOT_THERMAL_HOST_STREAM=UNAVAILABLE; root-log postboot capture will be attempted'
     fi
 
-    echo '===== ONE ACTUAL PHYSICAL P0 PROBE: 300S RETURN-REQUEST DEADLINE ====='
+    echo '===== ONE HIGH-RISK PHYSICAL EXPERIMENT: CPU ABORT 90C / 300S RETURN-REQUEST DEADLINE ====='
+    echo 'WARNING=CPU90_NOT_VENDOR_CERTIFIED; OTHER_SENSOR_ABORTS_AND_600S_LOCK_UNCHANGED'
     echo 'WARNING=ANDROID_FRAMEWORK_WILL_STOP; THERMAL_GUARD_CAN_ABORT_EARLY'
     echo 'WARNING=UNASSISTED_WATCHDOG_RECOVERY_NOT_CERTIFIED'
     echo 'NO_SECOND_PROBE_OR_AUTOMATIC_RETRY'
@@ -196,9 +212,9 @@ lines = [
 '# SM8850 P0 physical experiment evidence',
 '',
 '- Scope: OneOS SM-S948B/m3q/SM8850, firmware S948BXXS4BZIG.',
-'- Requested mode: one `--run-300s` real Framework takeover, after any necessary APFS rearm.',
+'- Requested mode: one high-risk `--run-300s` CPU-90C Framework takeover, after any necessary APFS rearm; CPU 90 C not vendor-certified.',
 '- Deadline meaning: REQUEST reboot at verified Framework stop + 300 seconds; NOT guest-runtime guarantee.',
-'- OneOS source: `99b48b2cb55e7d5a893cfa32778a1d4ab154f9e2`.',
+'- OneOS CPU-90C experimental source: `fa6cd88610c031c13288432476838e8b7b5a68f3`.',
 '- OneiOS local source: `' + (root/'oneios-source-sha.txt').read_text().strip() + '`.' if (root/'oneios-source-sha.txt').exists() else '- OneiOS local source: UNAVAILABLE.',
 '- Host process exit code: `' + str(rc) + '` (does NOT itself certify P0).',
 '- Physical dispatch observed in console: `' + ('YES' if 'SHORT_PROBE_REQUESTING_REAL_IOS_GUEST' in console else 'NO') + '`.',
@@ -247,7 +263,11 @@ PY
     echo 'PHONE_RETRY=NO'
 }
 
-[[ $# -eq 0 ]] || { echo 'Usage: bash oneos-p0-live-300s-evidence.sh' >&2; exit 2; }
+[[ $# -eq 0 ]] || { echo 'Usage: export ONEOS_CPU90_RISK_ACK=I_ACCEPT_SM8850_CPU_90C_EXPERIMENT; git show ... | bash' >&2; exit 2; }
+[[ "${ONEOS_CPU90_RISK_ACK:-}" == I_ACCEPT_SM8850_CPU_90C_EXPERIMENT ]] || {
+    echo 'HIGH_RISK_CPU90_EXPERIMENT_REFUSED: explicit ONEOS_CPU90_RISK_ACK missing; nothing executed on device' >&2
+    exit 2
+}
 mkdir -p "$ONEIOS/out/sm8850/p0-physical"
 OUT="$(mktemp -d "$ONEIOS/out/sm8850/p0-physical/live-300s-$(date -u +%Y%m%dT%H%M%SZ)-XXXXXX")"
 chmod 700 "$OUT"
