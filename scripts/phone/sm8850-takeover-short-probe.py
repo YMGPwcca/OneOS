@@ -256,9 +256,9 @@ def end_preboot_host_log_stream(proc,sink):
 
 
 def run(adb_path,serial,output_dir,duration_seconds=90):
-    if duration_seconds not in (90,300):
+    if duration_seconds not in (90,300,600):
         raise Refused("unsupported probe deadline")
-    risk=RISK if duration_seconds==90 else RISK_300
+    risk={90:RISK,300:RISK_300,600:RISK_600}[duration_seconds]
     artifact=prepare(adb_path,serial)
     artifact["reboot_request_deadline_after_framework_stop_seconds"]=duration_seconds
     print("SHORT_PROBE_PREPARED zones="+str(artifact["zones"]),flush=True)
@@ -386,6 +386,9 @@ def run(adb_path,serial,output_dir,duration_seconds=90):
     artifact["unassisted_return_proven"]=False
     artifact["p0_completed"]=False
     artifact["full_600s_takeover_allowed"]=False
+    artifact["monitor_only_600s_requested"]=duration_seconds==600
+    artifact["script_temperature_abort_disabled"]=duration_seconds==600
+    artifact["stock_kernel_or_firmware_thermal_modified"]=False
     out=output_dir/("short-probe-"+datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")+
                     "-"+secrets.token_hex(3)+".json")
     with out.open("x",encoding="utf-8") as f:
@@ -416,13 +419,16 @@ def main(argv=None):
     actions.add_argument("--prepare-probe",action="store_true")
     actions.add_argument("--run-90s",action="store_true")
     actions.add_argument("--run-300s",action="store_true")
+    actions.add_argument("--run-600s",action="store_true")
     p.add_argument("--adb",default=str(Path.home()/"Android/Sdk/platform-tools/adb"))
     p.add_argument("--output",type=Path,default=Path("out/sm8850/short-ios-probe"))
     a=p.parse_args(argv)
-    if not a.prepare_probe and not a.run_90s and not a.run_300s:
+    if not a.prepare_probe and not a.run_90s and not a.run_300s and not a.run_600s:
         print("SHORT_PROBE=AUDIT_NO_ADB. --prepare-probe stages guarded source without Framework stop.")
-        print("Explicit --run-90s or --run-300s requests a real iOS guest with a reboot-request deadline that many seconds AFTER verified Framework stop; not that many seconds of guest execution.")
-        print("Hardware watchdog/thermal critical limits and unassisted return are not yet certified.")
+        print("90/300s: original software-temperature-abort profile. 600s: explicit software-temperature-LOG-ONLY profile.")
+        print("These durations are reboot-request deadlines since verified Framework stop, NOT full iOS interactive uptime.")
+        print("Kernel/firmware thermal controls remain intact but some Samsung user-space thermal HAL may stop with Android Framework.")
+        print("Legacy watchdog, unassisted recovery and thermal control remain unqualified on SM8850.")
         return 0
     try:
         serial=INVENTORY.mapper.serial_for(a.adb)
@@ -431,7 +437,7 @@ def main(argv=None):
             print("SHORT_PROBE_PREPARED_SOURCE_ONLY zones="+str(result["zones"]))
             print("PREFLIGHT=NOT_RUN; FRAMEWORK=NOT_STOPPED")
         else:
-            return run(a.adb,serial,a.output,300 if a.run_300s else 90)
+            return run(a.adb,serial,a.output,600 if a.run_600s else (300 if a.run_300s else 90))
     except (Refused,INVENTORY.mapper.Blocked,MANIFEST.Refused,
             WITNESS.MAPPER.Blocked,OSError,ValueError,subprocess.SubprocessError) as exc:
         print("SHORT_PROBE=BLOCKED_OR_UNVERIFIED "+str(exc),file=sys.stderr)
