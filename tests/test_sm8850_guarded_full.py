@@ -7,6 +7,7 @@ from pathlib import Path
 import os
 import subprocess
 import tempfile
+import textwrap
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -80,6 +81,95 @@ class FullRunThermalContract(unittest.TestCase):
         self.assertIn('--run "$CTL" "$STAGE/thermal.guard.manifest" "$WD_GEN"', s)
         self.assertIn('--run "$CTL" "$WD_GEN"', s)
         self.assertIn('ONEIOS_GPU_3D_MODE=REQUIRED_FAIL_CLOSED_NO_2D_FALLBACK', s)
+
+    def test_wake_boost_settles_before_framework_cutoff(self):
+        source = SWITCH.read_text()
+        wake = source.index('# SM8850: the Android KEYCODE_WAKEUP request')
+        cutoff = source.index('printf \'%s\\n\' "$((fw_start + 45))" > "$CTL/framework.cutoff"')
+        stop = source.index('if ! stop_android_framework; then')
+        self.assertLess(wake, cutoff)
+        self.assertLess(cutoff, stop)
+        self.assertEqual(1, source.count('input keyevent KEYCODE_WAKEUP'))
+        self.assertIn('CPU_MIN_COOLDOWN=THREE_HEALTHY_SAMPLES', source)
+        self.assertIn('switch-panel-wake-refused', source)
+        self.assertIn('wake_stable -ge 3', source)
+        self.assertIn('wake_elapsed -lt 20', source)
+
+    def test_wake_boost_cooldown_synthetic_without_phone_access(self):
+        source = SWITCH.read_text()
+        marker = '# SM8850: the Android KEYCODE_WAKEUP request'
+        stop = 'if [ "$FRAMEWORK" = 1 ] && [ -z "$armed" ]; then\n    if fw_start='
+        self.assertEqual(1, source.count(marker))
+        self.assertEqual(1, source.count(stop))
+        fragment = marker + source.split(marker, 1)[1].split(stop, 1)[0]
+        fragment = fragment.replace(
+            '/sys/devices/system/cpu/cpufreq/policy0',
+            '$TEST_ROOT/policy0',
+        ).replace(
+            '/sys/devices/system/cpu/cpufreq/policy6',
+            '$TEST_ROOT/policy6',
+        )
+        # There are no shell calls to the phone: all sysfs is fake and all
+        # Android commands (wake, pidof, getprop, sleep) are stubbed.
+        fixture = textwrap.dedent("""\\
+            #!/bin/sh
+            set -eu
+            FRAMEWORK=1 FW_MODE=run armed=
+            SESSION="$TEST_ROOT/session"
+            mkdir -p "$SESSION"
+            watchdog_uint() {
+                case "$1" in ''|*[!0-9]*) return 1;; esac
+                return 0
+            }
+            framework_thermal_guard_healthy() {
+                th_cpu="${TEST_HOT_CPU:-40000}"
+                th_gpu=40000 th_ddr=40000
+                return 0
+            }
+            getprop() { printf 'running\\n'; }
+            pidof() { [ "$1" = system_server ]; }
+            timeout() {
+                [ "$1" = 5 ] && [ "$2" = input ] &&
+                    [ "$3" = keyevent ] && [ "$4" = KEYCODE_WAKEUP ] || return 1
+                printf '1228800\\n' > "$TEST_ROOT/policy0/scaling_min_freq"
+                printf '883200\\n' > "$TEST_ROOT/policy6/scaling_min_freq"
+            }
+            sleep() {
+                n=$(cat "$TEST_ROOT/count")
+                n=$((n + 1))
+                echo "$n" > "$TEST_ROOT/count"
+                if [ "${TEST_NEVER_RELEASE:-0}" = 0 ] && [ "$n" -ge 6 ]; then
+                    printf '384000\\n' > "$TEST_ROOT/policy0/scaling_min_freq"
+                    printf '768000\\n' > "$TEST_ROOT/policy6/scaling_min_freq"
+                fi
+            }
+            __FRAGMENT__
+            echo "MOCK_ARMED=$armed"
+            """).replace("__FRAGMENT__", fragment)
+        for never_release, hot_cpu, expected in (
+            ("0", "40000", "CPU_MIN_COOLDOWN=THREE_HEALTHY_SAMPLES"),
+            ("1", "40000", "BLOCKED_BEFORE_FRAMEWORK_STOP"),
+            ("0", "65000", "BLOCKED_BEFORE_FRAMEWORK_STOP"),
+        ):
+            with self.subTest(never_release=never_release, hot_cpu=hot_cpu), tempfile.TemporaryDirectory() as td:
+                root = Path(td)
+                for policy, floor in (("policy0", 384000), ("policy6", 768000)):
+                    p = root / policy
+                    p.mkdir()
+                    for name in ("cpuinfo_min_freq", "scaling_min_freq"):
+                        (p / name).write_text(str(floor) + "\n")
+                (root / "count").write_text("0\n")
+                for shell in ("sh",):
+                    proc = subprocess.run([shell, "-c", fixture],
+                        env={**os.environ, "TEST_ROOT": str(root),
+                             "TEST_NEVER_RELEASE": never_release, "TEST_HOT_CPU": hot_cpu},
+                        capture_output=True, text=True, timeout=10)
+                    self.assertEqual(0, proc.returncode, (proc.stdout, proc.stderr))
+                    self.assertIn(expected, proc.stdout)
+                    if never_release == "0" and hot_cpu == "40000":
+                        self.assertIn("MOCK_ARMED=\n", proc.stdout)
+                    else:
+                        self.assertIn("MOCK_ARMED=switch-panel-wake-refused", proc.stdout)
 
     def test_thermal_arms_before_framework_stop(self):
         s = SWITCH.read_text()
