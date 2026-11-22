@@ -44,6 +44,30 @@ class FullRunThermalContract(unittest.TestCase):
                 self.assertEqual(0, p.returncode, p.stderr)
                 self.assertEqual(band, p.stdout.strip())
 
+    def test_live_boot_baseline_starts_strict_at_40_percent(self):
+        # Production uses previous level=2 at its FIRST post-stop sample,
+        # even if the temperature is initially only 39 C. It must never
+        # write the CPU minimum or bypass the independent emergency guard.
+        source = CAP.read_text()
+        self.assertIn('level=2\n        seq=0', source)
+        self.assertIn('P0_CPU_CAP=BOOT_STRICT_BASELINE_REQUESTED pct=40', source)
+        self.assertLess(
+            source.index('if framework_down_for_cpu_cap; then'),
+            source.index('P0_CPU_CAP=BOOT_STRICT_BASELINE_REQUESTED pct=40'),
+        )
+        self.assertEqual("2:40", policy(39000, prev=2).stdout.strip())
+        for temp, level in ((55000, "2:40"),
+                            (65000, "3:28"),
+                            (72000, "4:18"),
+                            (77000, "5:12"),
+                            (80000, "6:8"),
+                            (89999, "6:8")):
+            with self.subTest(temp=temp):
+                p = policy(temp, prev=2)
+                self.assertEqual(0, p.returncode, p.stderr)
+                self.assertEqual(level, p.stdout.strip())
+        self.assertEqual(2, policy(90000, prev=2).returncode)
+
     def test_emergency_remains_distinct(self):
         self.assertEqual(2, policy(90000).returncode)
         self.assertNotEqual(0, policy(0).returncode)
