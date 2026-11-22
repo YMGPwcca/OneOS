@@ -134,20 +134,28 @@ class FullRunThermalContract(unittest.TestCase):
         )
         self.assertIn('ONEIOS_GPU_3D_MODE=REQUIRED_FAIL_CLOSED_NO_2D_FALLBACK', s)
 
-    def test_isolated_panel_bridge_requires_matching_native_runtime(self):
+    def test_full_hardware_bridges_enable_explicitly_and_require_matching_runtime(self):
         source = SWITCH.read_text()
-        # Never set bridges=1 in the SM8850 GPU3D/touch-exclusive profile.
-        self.assertIn('--set bridges=0 --set panel-bridge=1 --set touch-sleep=0', source)
-        self.assertNotIn('--set bridges=1 --set panel-bridge=1', source)
-        self.assertIn('PANEL_BRIDGE=ACTIVE_ONLY_BRIGHTNESS_TSP', source)
-        self.assertIn('staged xnuhost lacks isolated panel bridge', source)
-        # Reject the stale runtime before data.consumed, no destructive stop.
+        # Explicitly activate the REAL bridges=1 profile, not the prior
+        # brightness-only surrogate. The generic CPU topology, battery and
+        # thermal host bridges now execute along with display/TSP control.
+        self.assertIn(
+            '--set bridges=1 --set sm8850-full-bridges=1 --set touch-sleep=0',
+            source,
+        )
+        self.assertIn('--set cpu-affinity-bench=0 --set cpu-pin=1', source)
+        self.assertNotIn('--set bridges=0 --set panel-bridge=1', source)
+        self.assertIn('ONEIOS_CPU_PLACEMENT_BRIDGE=ACTIVE_BRIDGES_1_CPU_PIN_1', source)
+        self.assertIn('SM8850_FULL_BRIDGES=ACTIVE', source)
+        self.assertIn('staged xnuhost lacks full bridges=1 Framework profile', source)
+        # If the native artifact is stale, fail before the one-shot Data
+        # consumption, the Framework stop and any root bridge mutation.
         self.assertLess(
-            source.index("grep -Fq 'PANEL_BRIDGE=ACTIVE_ONLY_BRIGHTNESS_TSP'"),
+            source.index("grep -Fq 'SM8850_FULL_BRIDGES=ACTIVE'"),
             source.index('APFS_DATA_CLONE=CONSUMED_ONE_SHOT_BEFORE_FRAMEWORK_STOP'),
         )
         self.assertLess(
-            source.index("grep -Fq 'PANEL_BRIDGE=ACTIVE_ONLY_BRIGHTNESS_TSP'"),
+            source.index("grep -Fq 'SM8850_FULL_BRIDGES=ACTIVE'"),
             source.index('if ! stop_android_framework; then'),
         )
 
