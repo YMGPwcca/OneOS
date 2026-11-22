@@ -73,6 +73,35 @@ class FullRunThermalContract(unittest.TestCase):
         self.assertNotEqual(0, policy(0).returncode)
         self.assertEqual("6:8", policy(39000, prev=6).stdout.strip())
 
+    def test_experimental_policy_keeps_throttling_without_software_temp_abort(self):
+        # The default mode still returns 2 at 90 C. The separately opted-in
+        # mode requests 8% rather than a userspace reboot for the same input.
+        for temp, expected in ((39000, "3:28"), (80000, "6:8"),
+                               (90000, "6:8"), (101100, "6:8")):
+            with self.subTest(temp=temp):
+                p = subprocess.run([
+                    "sh", str(CAP), "--policy-floor", "3", str(temp),
+                    *map(str, NORMAL[1:])
+                ], capture_output=True, text=True, timeout=6)
+                self.assertEqual(0, p.returncode, p.stderr)
+                self.assertEqual(expected, p.stdout.strip())
+        self.assertEqual(2, policy(90000).returncode)
+
+    def test_no_soft_trip_only_on_explicit_180s_bridge_run(self):
+        switch = SWITCH.read_text()
+        guard = GUARD.read_text()
+        cap = CAP.read_text()
+        self.assertIn('I_ACCEPT_SOFT_GUARD_OFF_180S', switch)
+        self.assertIn('[ "$FW_DURATION" = 180 ]', switch)
+        self.assertIn('--run-passive "$CTL" "$STAGE/thermal.guard.manifest"', switch)
+        self.assertIn('--run-prearmed-floor "$CTL" "$WD_GEN"', switch)
+        self.assertIn('PASSIVE_OVERRANGE_NO_SOFT_RETURN', guard)
+        self.assertIn('MONITOR_ONLY', cap.upper() + switch)
+        self.assertIn('apply_cap "" "$pct" lenient', cap)
+        self.assertIn('apply_cap "" "$pct" strict', cap)
+        self.assertIn('level=3', cap)
+        self.assertNotIn('> "$pol/scaling_min_freq"', cap)
+
     def test_root_guard_is_fullrun_only(self):
         guard = GUARD.read_text()
         cap = CAP.read_text()
@@ -442,6 +471,27 @@ class SyntheticCpufreqTest(unittest.TestCase):
         self.assertEqual(1440000, self.read("policy0"))
         self.assertEqual(1896960, self.read("policy6"))
         self.assertIn("FIXTURE_APPLIED pct=40 strict=strict", p.stdout)
+
+    def test_experimental_floor_aware_underclock_keeps_vendor_vote(self):
+        (self.policies["policy0"] / "scaling_min_freq").write_text("2112000")
+        (self.policies["policy6"] / "scaling_min_freq").write_text("2112000")
+        p = subprocess.run(["sh", str(CAP), "--fixture-floor-step",
+                            str(self.root), "28"],
+                           capture_output=True, text=True, timeout=7)
+        self.assertEqual(0, p.returncode, (p.stdout, p.stderr))
+        self.assertEqual(2112000, self.read("policy0"))
+        self.assertEqual(2112000, self.read("policy6"))
+        self.assertIn("MIN_FLOOR_LIMITED policy=policy0", p.stdout)
+        self.assertIn("MIN_FLOOR_LIMITED policy=policy6", p.stdout)
+        # Later Samsung release permits a genuinely lower effective ceiling.
+        (self.policies["policy0"] / "scaling_min_freq").write_text("384000")
+        (self.policies["policy6"] / "scaling_min_freq").write_text("768000")
+        p = subprocess.run(["sh", str(CAP), "--fixture-floor-step",
+                            str(self.root), "28"],
+                           capture_output=True, text=True, timeout=7)
+        self.assertEqual(0, p.returncode, (p.stdout, p.stderr))
+        self.assertEqual(1008000, self.read("policy0"))
+        self.assertEqual(1327872, self.read("policy6"))
 
     def test_invalid_or_missing_active_scaling_min_is_rejected(self):
         scaling_min = self.policies["policy0"] / "scaling_min_freq"
