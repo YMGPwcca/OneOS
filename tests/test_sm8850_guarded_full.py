@@ -68,6 +68,9 @@ class FullRunThermalContract(unittest.TestCase):
         self.assertIn('if [ "$cur" -gt "$target" ]; then', cap)
         self.assertIn('"$got" -le "$target"', cap)
         self.assertNotIn('> "$pol/scaling_min_freq"', cap)
+        self.assertIn('apply_cap "" "$pct" strict', cap)
+        self.assertIn('fault "unachievable_cpu_cap_floor level=$desired pct=$pct"', cap)
+        self.assertIn('P0_CPU_CAP=UNENFORCEABLE_MIN_VOTE', cap)
 
     def test_bounded_duration_and_affinity(self):
         s = SWITCH.read_text()
@@ -213,6 +216,11 @@ class SyntheticCpufreqTest(unittest.TestCase):
     def read(self, name):
         return int((self.policies[name] / "scaling_max_freq").read_text())
 
+    def apply_strict(self, pct):
+        return subprocess.run(["sh", str(CAP), "--fixture-strict-step",
+                               str(self.root), str(pct)],
+                              capture_output=True, text=True, timeout=7)
+
     def test_monotonic_never_raise_and_minimum_floor(self):
         for percentage in (60, 40, 28, 18, 12, 8, 60):
             with self.subTest(pct=percentage):
@@ -246,6 +254,33 @@ class SyntheticCpufreqTest(unittest.TestCase):
         self.assertEqual(0, p.returncode, p.stderr)
         self.assertEqual(384000, self.read("policy0"))
         self.assertEqual(768000, self.read("policy6"))
+
+    def test_strict_rejects_dangerous_samsung_votes_before_any_cap_write(self):
+        # Read-only phone sample 19 and sample 23 (not a synthetic guess):
+        # Samsung raised both minimums to 2.112 GHz, then briefly fixed
+        # the entire policy range near 3.4 / 3.76 GHz on One UI.
+        for floor0, floor6, pct in (
+            (2112000, 2112000, 40),
+            (3398400, 3763200, 60),
+        ):
+            with self.subTest(floor0=floor0, floor6=floor6, pct=pct):
+                (self.policies["policy0"] / "scaling_min_freq").write_text(str(floor0))
+                (self.policies["policy6"] / "scaling_min_freq").write_text(str(floor6))
+                old = {n: self.read(n) for n in self.policies}
+                p = self.apply_strict(pct)
+                self.assertNotEqual(0, p.returncode)
+                self.assertIn("P0_CPU_CAP=UNENFORCEABLE_MIN_VOTE", p.stdout)
+                self.assertIn("P0_CPU_CAP=BLOCKED fixture_policy_failed", p.stderr)
+                self.assertEqual(old, {n: self.read(n) for n in self.policies})
+
+    def test_strict_allows_real_throttling_after_minimum_vote_releases(self):
+        (self.policies["policy0"] / "scaling_min_freq").write_text("384000")
+        (self.policies["policy6"] / "scaling_min_freq").write_text("768000")
+        p = self.apply_strict(40)
+        self.assertEqual(0, p.returncode, (p.stdout, p.stderr))
+        self.assertEqual(1440000, self.read("policy0"))
+        self.assertEqual(1896960, self.read("policy6"))
+        self.assertIn("FIXTURE_APPLIED pct=40 strict=strict", p.stdout)
 
     def test_invalid_or_missing_active_scaling_min_is_rejected(self):
         scaling_min = self.policies["policy0"] / "scaling_min_freq"
