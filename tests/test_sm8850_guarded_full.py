@@ -115,7 +115,7 @@ class FullRunThermalContract(unittest.TestCase):
         )
         # There are no shell calls to the phone: all sysfs is fake and all
         # Android commands (wake, pidof, getprop, sleep) are stubbed.
-        fixture = textwrap.dedent("""\\
+        fixture = textwrap.dedent("""\
             #!/bin/sh
             set -eu
             FRAMEWORK=1 FW_MODE=run armed=
