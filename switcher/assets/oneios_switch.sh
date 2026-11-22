@@ -545,6 +545,10 @@ framework_deadline() {
             why="invalid framework deadline"
         elif ! framework_pid_alive "$CTL/framework.watcher"; then
             why="framework watcher lost"
+        elif [ "$(cat "$CTL/framework.mode" 2>/dev/null)" = run ] &&
+             { [ "$(cat "$CTL/thermal.required" 2>/dev/null)" != "$WD_GEN" ] ||
+               ! framework_thermal_guard_healthy || ! framework_thermal_cap_healthy; }; then
+            why="independent thermal monitor/cap missing, stale, or exceeded emergency threshold"
         elif [ "$tick" -ge "$limit" ]; then
             expired=1
             why="framework deadline reached at $tick (deadline $limit)"
@@ -581,8 +585,47 @@ framework_pid_alive() {
         [ "$(readlink "$P/$checked_pid/ns/mnt")" = "$(readlink "$P/1/ns/mnt")" ]; }
 }
 
+# Root thermal monitor and CPU cap are outside the guest's cgroup, in
+# init's mount namespace. Exact boot, watchdog generation, PID birth and
+# heartbeat age are verified independently of xnuhost. 80 C means throttle,
+# not return; 90 C is a last-resort emergency guard fault.
+framework_thermal_guard_healthy() {
+    [ ! -e "$CTL/thermal.guard.fault" ] || return 1
+    framework_pid_alive "$CTL/thermal.guard.pid" || return 1
+    read -r th_ver th_boot th_gen th_pid th_birth th_seq th_tick th_status th_cpu th_gpu th_ddr th_bat th_lrp th_ap th_extra < "$CTL/thermal.guard.heartbeat" || return 1
+    [ -z "$th_extra" ] && [ "$th_ver" = v1 ] &&
+        [ "$th_boot" = "$(cat "$CTL/boot" 2>/dev/null)" ] &&
+        [ "$th_gen" = "$(watchdog_generation)" ] &&
+        [ "$th_pid $th_birth" = "$(cat "$CTL/thermal.guard.pid" 2>/dev/null)" ] &&
+        [ "$th_status" = OK ] || return 1
+    for v in "$th_seq" "$th_tick" "$th_cpu" "$th_gpu" "$th_ddr" "$th_bat" "$th_lrp" "$th_ap"; do
+        watchdog_uint "$v" || return 1
+    done
+    [ "$th_seq" -gt 0 ] || return 1
+    th_now=$(watchdog_now) || return 1
+    [ "$th_tick" -le "$th_now" ] && [ $((th_now - th_tick)) -le 6 ]
+}
+framework_thermal_cap_healthy() {
+    [ ! -e "$CTL/thermal.cap.fault" ] || return 1
+    framework_pid_alive "$CTL/thermal.cap.pid" || return 1
+    read -r cp_ver cp_boot cp_gen cp_pid cp_birth cp_seq cp_tick cp_status cp_level cp_pct cp_extra < "$CTL/thermal.cap.heartbeat" || return 1
+    [ -z "$cp_extra" ] && [ "$cp_ver" = v1 ] &&
+        [ "$cp_boot" = "$(cat "$CTL/boot" 2>/dev/null)" ] &&
+        [ "$cp_gen" = "$(watchdog_generation)" ] &&
+        [ "$cp_pid $cp_birth" = "$(cat "$CTL/thermal.cap.pid" 2>/dev/null)" ] &&
+        [ "$cp_status" = OK ] || return 1
+    for v in "$cp_seq" "$cp_tick" "$cp_level" "$cp_pct"; do watchdog_uint "$v" || return 1; done
+    [ "$cp_seq" -gt 0 ] || return 1
+    case "$cp_level:$cp_pct" in 1:60|2:40|3:28|4:18|5:12|6:8) ;; *) return 1 ;; esac
+    cp_now=$(watchdog_now) || return 1
+    [ "$cp_tick" -le "$cp_now" ] && [ $((cp_now - cp_tick)) -le 4 ]
+}
 framework_recovery_ready() {
     framework_pid_alive "$CTL/framework.guard" && framework_pid_alive "$CTL/framework.watcher" || return 1
+    if [ "$(cat "$CTL/framework.mode" 2>/dev/null)" = run ]; then
+        [ "$(cat "$CTL/thermal.required" 2>/dev/null)" = "$(watchdog_generation)" ] &&
+            framework_thermal_guard_healthy && framework_thermal_cap_healthy || return 1
+    fi
     [ "$(grep -c . "$CTL/keys/pids" 2>/dev/null)" = 3 ] || return 1
     for reader in $(cat "$CTL/keys/pids"); do
         framework_pid_alive "$CTL/keys/reader.$reader" || return 1
@@ -1925,10 +1968,17 @@ if [ "$FRAMEWORK" = 1 ]; then
         # remains bench/bridges=0 for exclusive touch: the OneiOS thermal
         # bridge and CPU topology/affinity bridge are not started here.
         echo "SM8850_FULL_RUN_GUEST_BOOT=PRIOR_PHYSICAL_OBSERVATION_NOT_A_NEW_SESSION_PASS"
-        echo "SM8850_FULL_RUN_THERMAL_BRIDGE=INACTIVE_BENCH_BRIDGES_0"
+        echo "SM8850_FULL_RUN_THERMAL_BRIDGE=INACTIVE_BENCH_BRIDGES_0_ROOT_MONITOR_MANDATORY"
         echo "SM8850_FULL_RUN_CPU_AFFINITY=REQUIRES_XNUHOST_BENCH_AFFINITY_8_DISTINCT_CORES_LOG"
         echo "SM8850_FULL_RUN_GPU_3D=KGSL_OBSERVED_PRIOR_RUN_AUTO_FALLBACK_POSSIBLE"
         echo "SM8850_FULL_RUN_RECOVERY=DEADLINE_AND_UNASSISTED_RETURN_NOT_FULLY_VERIFIED"
+        for th_file in oneios_sm8850_thermal_takeover_guard.sh oneios_sm8850_thermal_cap.sh thermal.guard.manifest; do
+            root_only "$STAGE/$th_file" || framework_block "untrusted or missing independent thermal asset $th_file"
+        done
+        $SH "$STAGE/oneios_sm8850_thermal_takeover_guard.sh" --check "$STAGE/thermal.guard.manifest" ||
+            framework_block "root thermal sensor manifest not qualified on current boot"
+        $SH "$STAGE/oneios_sm8850_thermal_cap.sh" --check ||
+            framework_block "root CPU cap policy nodes not writable or unverifiable"
         root_only "$STAGE/data" && root_only "$STAGE/data/data.img" && root_only "$STAGE/data/unique-chip-id" &&
             [ "$(stat -c '%s:%h' "$STAGE/data/data.img")" = 8589934592:1 ] &&
             [ "$(stat -c '%s:%h' "$STAGE/data/unique-chip-id")" = 8:1 ] ||
@@ -2090,6 +2140,33 @@ for p in $(cat "$CTL/keys/pids" 2>/dev/null); do
         framework_pid_alive "$CTL/keys/reader.$p" || armed="key reader $p is not in the protected recovery context"
     fi
 done
+if [ "$FRAMEWORK" = 1 ] && [ "$FW_MODE" = run ] && [ -z "$armed" ]; then
+    # Arm both root-side workers BEFORE Framework stops. Their PIDs,
+    # birth tokens, heartbeat and emergency faults stay OUTSIDE the guest
+    # cgroup. A failed admission never proceeds to stop system_server.
+    "$BB" setsid $SH "$STAGE/oneios_sm8850_thermal_takeover_guard.sh" --run "$CTL" "$STAGE/thermal.guard.manifest" "$WD_GEN" \
+        8>&- </dev/null >>"$STAGE/thermal-guard.log" 2>&1 &
+    n=0
+    until framework_thermal_guard_healthy; do
+        [ "$n" -lt 25 ] || break
+        sleep 0.2; n=$((n + 1))
+    done
+    if ! framework_thermal_guard_healthy; then
+        armed="independent root thermal monitor did not start"
+    else
+        "$BB" setsid $SH "$STAGE/oneios_sm8850_thermal_cap.sh" --run "$CTL" "$WD_GEN" \
+            8>&- </dev/null >>"$STAGE/thermal-cap.log" 2>&1 &
+        n=0
+        until framework_thermal_cap_healthy; do
+            [ "$n" -lt 25 ] || break
+            sleep 0.2; n=$((n + 1))
+        done
+        framework_thermal_cap_healthy || armed="independent root CPU throttle failed to arm"
+    fi
+    [ -n "$armed" ] || printf '%s\n' "$WD_GEN" > "$CTL/thermal.required" ||
+        armed="could not require independent thermal workers"
+    [ -n "$armed" ] || echo "THERMAL_GUARD=ARMED_ROOT; CPU_THROTTLE=ACTIVE_MONOTONIC_60_40_28_18_12_8; LAST_RESORT_CPU=90C"
+fi
 if [ "$FRAMEWORK" = 1 ] && [ -z "$armed" ]; then
     if fw_start=$(watchdog_now) && framework_pid_alive "$CTL/framework.watcher" &&
         printf '%s\n' "$((fw_start + 45))" > "$CTL/framework.cutoff"; then
@@ -2118,7 +2195,7 @@ if [ "$FRAMEWORK_REBOOT" = 1 ]; then
     echo "SM8850 USB safety: DO NOT press Volume Up + Volume Down during the experimental session."
     echo "Samsung may enter Download Mode if the phone restarts while both volume keys are held with USB connected."
     if [ "$FW_MODE" = run ]; then
-        echo "FULL iOS guest, 8 vCPUs, GPU auto/3D and touch: independent 600s mandatory reboot-return deadline after Framework stop."
+        echo "FULL iOS guest, 8 vCPUs, GPU 3D and touch: independent ${FW_DURATION}s deadline from Framework stop; root throttle guard ACTIVE."
         echo "Legacy watchdog a:82 and normal One UI boot are NOT independently qualified. Explicit-risk experiment."
     else
         echo "Framework-only smoke: independent 20s deadline requests reboot after Framework stop."
