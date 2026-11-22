@@ -230,8 +230,8 @@ case "$MODE" in
           [ "$(cat "$CTL/framework.soft-thermal" 2>/dev/null)" = disabled-180s ] ||
             die untrusted_experimental_session
         framework_down_for_cpu_cap || die framework_not_stopped
-        echo $ > /sys/fs/cgroup/cgroup.procs 2>/dev/null
-        echo -1000 > /proc/$/oom_score_adj 2>/dev/null
+        echo $$ > /sys/fs/cgroup/cgroup.procs 2>/dev/null
+        echo -1000 > /proc/$$/oom_score_adj 2>/dev/null
         echo "P0_CPU_CAP=BEST_EFFORT_FIXED_28_PERCENT_NO_THERMAL_GUARD_NO_REBOOT"
         seq=0
         while [ "$GEN" = "$(cat "$CTL/watchdog.generation" 2>/dev/null)" ]; do
