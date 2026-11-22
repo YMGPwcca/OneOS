@@ -4,7 +4,9 @@
 No ADB, root, sysfs mutation, watchdog open or Framework stop.
 """
 from pathlib import Path
+import os
 import subprocess
+import tempfile
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -84,6 +86,54 @@ class FullRunThermalContract(unittest.TestCase):
         self.assertIn('independent thermal monitor/cap missing, stale', s)
         self.assertIn('root thermal sensor manifest not qualified on current boot', s)
         self.assertLess(s.index('=== [3/5]'), s.index('CPU_THROTTLE=ARMED_POST_STOP'))
+
+
+@unittest.skipIf(os.geteuid() == 0, "root may not use the fixture write mode")
+class SyntheticCpufreqTest(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(prefix="oneios-cpu-cap-test.", dir="/tmp")
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.policies = {}
+        for name, max_hz, min_hz, current in (
+            ("policy0", 3600000, 384000, 3600000),
+            ("policy6", 4742400, 768000, 2200000),
+        ):
+            folder = self.root / "sys/devices/system/cpu/cpufreq" / name
+            folder.mkdir(parents=True)
+            (folder / "cpuinfo_max_freq").write_text(str(max_hz))
+            (folder / "cpuinfo_min_freq").write_text(str(min_hz))
+            (folder / "scaling_max_freq").write_text(str(current))
+            self.policies[name] = folder
+
+    def apply(self, pct):
+        return subprocess.run(["sh", str(CAP), "--fixture-step",
+                               str(self.root), str(pct)],
+                              capture_output=True, text=True, timeout=7)
+
+    def read(self, name):
+        return int((self.policies[name] / "scaling_max_freq").read_text())
+
+    def test_monotonic_never_raise_and_minimum_floor(self):
+        for percentage in (60, 40, 28, 18, 12, 8, 60):
+            with self.subTest(pct=percentage):
+                p = self.apply(percentage)
+                self.assertEqual(0, p.returncode, p.stderr)
+        self.assertEqual(384000, self.read("policy0"))
+        self.assertEqual(768000, self.read("policy6"))
+
+    def test_external_tighter_vote_is_not_lifted(self):
+        p = self.apply(60)
+        self.assertEqual(0, p.returncode, p.stderr)
+        self.assertEqual(2160000, self.read("policy0"))
+        self.assertEqual(2200000, self.read("policy6"))
+
+    def test_invalid_policy_and_live_root_are_blocked(self):
+        self.assertNotEqual(0, subprocess.run(
+            ["sh", str(CAP), "--fixture-step", "/sys", "60"],
+            capture_output=True, text=True, timeout=7).returncode)
+        (self.policies["policy6"] / "cpuinfo_min_freq").unlink()
+        self.assertNotEqual(0, self.apply(60).returncode)
 
 
 if __name__ == "__main__":
