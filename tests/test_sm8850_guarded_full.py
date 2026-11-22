@@ -134,6 +134,23 @@ class FullRunThermalContract(unittest.TestCase):
         )
         self.assertIn('ONEIOS_GPU_3D_MODE=REQUIRED_FAIL_CLOSED_NO_2D_FALLBACK', s)
 
+    def test_isolated_panel_bridge_requires_matching_native_runtime(self):
+        source = SWITCH.read_text()
+        # Never set bridges=1 in the SM8850 GPU3D/touch-exclusive profile.
+        self.assertIn('--set bridges=0 --set panel-bridge=1 --set touch-sleep=0', source)
+        self.assertNotIn('--set bridges=1 --set panel-bridge=1', source)
+        self.assertIn('PANEL_BRIDGE=ACTIVE_ONLY_BRIGHTNESS_TSP', source)
+        self.assertIn('staged xnuhost lacks isolated panel bridge', source)
+        # Reject the stale runtime before data.consumed, no destructive stop.
+        self.assertLess(
+            source.index("grep -Fq 'PANEL_BRIDGE=ACTIVE_ONLY_BRIGHTNESS_TSP'"),
+            source.index('APFS_DATA_CLONE=CONSUMED_ONE_SHOT_BEFORE_FRAMEWORK_STOP'),
+        )
+        self.assertLess(
+            source.index("grep -Fq 'PANEL_BRIDGE=ACTIVE_ONLY_BRIGHTNESS_TSP'"),
+            source.index('if ! stop_android_framework; then'),
+        )
+
     def test_wake_boost_settles_before_framework_cutoff(self):
         source = SWITCH.read_text()
         wake = source.index('# SM8850: the Android KEYCODE_WAKEUP request')
