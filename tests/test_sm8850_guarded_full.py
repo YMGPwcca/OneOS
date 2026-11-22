@@ -114,6 +114,18 @@ class FullRunThermalContract(unittest.TestCase):
         self.assertIn('framework_thermal_guard_healthy', switch)
         self.assertIn('framework_thermal_cap_healthy', switch)
 
+    def test_no_guard_requires_new_xnuhost_before_consuming_apfs_data(self):
+        switch = SWITCH.read_text()
+        old = "SM8850_FULL_BRIDGES=ACTIVE"
+        new = "SM8850_FULL_BRIDGES=ADMITTED_NO_USERSPACE_THERMAL_180S"
+        self.assertIn("grep -Fq '" + old + "'", switch)
+        self.assertIn("grep -Fq '" + new + "'", switch)
+        self.assertIn('SM8850_NO_GUARD_XNUHOST_ADMISSION=STAGED_RUNTIME_COMPATIBLE', switch)
+        self.assertLess(switch.index(new),
+                        switch.index('APFS_DATA_CLONE=CONSUMED_ONE_SHOT_BEFORE_FRAMEWORK_STOP'))
+        self.assertIn('staged xnuhost lacks current 180s no-thermal-guard admission', switch)
+        self.assertIn('ONEIOS_BENCH_THERMAL_BRIDGE=ACTIVE_WITH_NO_ROOT_THERMAL_MONITOR', switch)
+
     def test_root_guard_is_fullrun_only(self):
         guard = GUARD.read_text()
         cap = CAP.read_text()
