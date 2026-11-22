@@ -123,7 +123,13 @@ class FullRunThermalContract(unittest.TestCase):
         self.assertNotIn('> "$pol/scaling_min_freq"', cap)
         self.assertIn('apply_cap "" "$pct" strict', cap)
         self.assertIn('framework_down_for_cpu_cap() {', cap)
-        self.assertIn('--run-prearmed)', cap)
+        # The default prearm and the experimental floor-aware prearm
+        # share the same live worker; assert the combined case-arm.
+        self.assertIn('--run|--run-prearmed|--run-prearmed-floor)', cap)
+        self.assertIn(
+            'if [ "$MODE" = --run-prearmed ] || [ "$MODE" = --run-prearmed-floor ]; then',
+            cap,
+        )
         self.assertIn('atom thermal.cap.prearmed "v1 $BOOT $GEN $$ $BIRTH"', cap)
         self.assertIn('if framework_down_for_cpu_cap; then', cap)
         self.assertIn('P0_CPU_CAP=PREARMED_READ_ONLY', cap)
