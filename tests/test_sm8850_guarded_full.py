@@ -96,7 +96,7 @@ class FullRunThermalContract(unittest.TestCase):
         self.assertIn('--run-passive "$CTL" "$STAGE/thermal.guard.manifest"', switch)
         self.assertIn('--run-prearmed-floor "$CTL" "$WD_GEN"', switch)
         self.assertIn('PASSIVE_OVERRANGE_NO_SOFT_RETURN', guard)
-        self.assertIn('MONITOR_ONLY', cap.upper() + switch)
+        self.assertIn('PASSIVE_MONITOR_NO_SOFT_OVERHEAT_REBOOT', switch)
         self.assertIn('apply_cap "" "$pct" lenient', cap)
         self.assertIn('apply_cap "" "$pct" strict', cap)
         self.assertIn('level=3', cap)
