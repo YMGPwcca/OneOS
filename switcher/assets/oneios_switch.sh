@@ -1492,7 +1492,11 @@ case "$MODE" in
             # battery and thermal bridge, not the former affinity-only bench.
             # Radio, haptics and encoder remain separately disabled on this
             # first integration. The root thermal guard/cap NEVER relax.
-            echo "ONEIOS_BENCH_THERMAL_BRIDGE=ACTIVE_READ_ONLY_ROOT_GUARD_SEPARATE"
+            if [ "$(cat /data/control/framework.soft-thermal 2>/dev/null)" = disabled-180s ]; then
+                echo "ONEIOS_BENCH_THERMAL_BRIDGE=ACTIVE_WITH_NO_ROOT_THERMAL_MONITOR"
+            else
+                echo "ONEIOS_BENCH_THERMAL_BRIDGE=ACTIVE_READ_ONLY_ROOT_GUARD_SEPARATE"
+            fi
             echo "ONEIOS_CPU_PLACEMENT_BRIDGE=ACTIVE_BRIDGES_1_CPU_PIN_1"
             echo "ONEIOS_GPU_3D=RUNTIME_KGSL_PROOF_REQUIRED"
             echo "ONEIOS_GPU_3D_MODE=REQUIRED_FAIL_CLOSED_NO_2D_FALLBACK"
@@ -2065,6 +2069,11 @@ if [ "$FRAMEWORK" = 1 ]; then
         # independent APFS Data clone can be consumed.
         grep -Fq 'SM8850_FULL_BRIDGES=ACTIVE' "$X" 2>/dev/null ||
             framework_block "staged xnuhost lacks full bridges=1 Framework profile; rebuild and upgrade the native runtime before rearming Data"
+        if [ "$FW_SOFT_THERMAL_OFF" = 1 ]; then
+            grep -Fq 'SM8850_FULL_BRIDGES=ADMITTED_NO_USERSPACE_THERMAL_180S' "$X" 2>/dev/null ||
+                framework_block "staged xnuhost lacks current 180s no-thermal-guard admission; rebuild and stage the native runtime BEFORE rearming APFS Data"
+            echo "SM8850_NO_GUARD_XNUHOST_ADMISSION=STAGED_RUNTIME_COMPATIBLE"
+        fi
         cap=$(awk '/^CapEff:/ {print $2}' "$P/$$/status")
         [ "$((0x${cap:-0} & 16384))" -ne 0 ] || framework_block "CAP_IPC_LOCK is absent"
         [ "$(df -Pk "$STAGE" | awk 'NR==2 {print $4}')" -ge 31457280 ] ||
@@ -2377,7 +2386,11 @@ if [ "$FRAMEWORK_REBOOT" = 1 ]; then
     echo "SM8850 USB safety: DO NOT press Volume Up + Volume Down during the experimental session."
     echo "Samsung may enter Download Mode if the phone restarts while both volume keys are held with USB connected."
     if [ "$FW_MODE" = run ]; then
-        echo "FULL iOS guest, 8 vCPUs, GPU 3D and touch: independent ${FW_DURATION}s deadline from Framework stop; root throttle guard ACTIVE."
+        if [ "$FW_SOFT_THERMAL_OFF" = 1 ]; then
+            echo "FULL iOS guest, 8 vCPUs, GPU 3D and touch: ${FW_DURATION}s reboot deadline; NO software thermal guard, CPU cap best effort only."
+        else
+            echo "FULL iOS guest, 8 vCPUs, GPU 3D and touch: independent ${FW_DURATION}s deadline from Framework stop; root throttle guard ACTIVE."
+        fi
         echo "Legacy watchdog a:82 and normal One UI boot are NOT independently qualified. Explicit-risk experiment."
     else
         echo "Framework-only smoke: independent 20s deadline requests reboot after Framework stop."
