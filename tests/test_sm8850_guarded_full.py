@@ -113,7 +113,7 @@ class FullRunThermalContract(unittest.TestCase):
         self.assertIn('"$FW_DURATION" -ge 60', s)
         self.assertIn('"$FW_DURATION" -le 600', s)
         self.assertIn('fw_seconds=$FW_DURATION', s)
-        self.assertIn('--set bridges=0 --set cpu-affinity-bench=1 --set cpu-pin=1', s)
+        self.assertIn('--set bridges=1 --set sm8850-full-bridges=1 --set touch-sleep=0 --set cpu-affinity-bench=0 --set cpu-pin=1', s)
         self.assertIn('framework_thermal_guard_healthy()', s)
         self.assertIn('framework_thermal_cap_healthy()', s)
         self.assertIn('"$CTL/thermal.guard.required"', s)
