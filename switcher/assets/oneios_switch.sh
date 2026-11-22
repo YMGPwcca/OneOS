@@ -2212,7 +2212,9 @@ if [ "$FRAMEWORK" = 1 ] && [ "$FW_MODE" = run ] && [ -z "$armed" ]; then
                [ "$th_gpu" -lt 60000 ] &&
                [ "$th_ddr" -lt 60000 ]; then
                 wake_stable=$((wake_stable + 1))
-                if [ "$wake_stable" -ge 3 ]; then
+                # Even if a minimum vote appears settled immediately,
+                # allow delayed Samsung power/performance votes to appear.
+                if [ "$wake_stable" -ge 3 ] && [ "$wake_elapsed" -ge 8 ]; then
                     wake_ok=1
                     break
                 fi
@@ -2225,7 +2227,7 @@ if [ "$FRAMEWORK" = 1 ] && [ "$FW_MODE" = run ] && [ -z "$armed" ]; then
         if [ "$wake_ok" = 1 ]; then
             echo "FRAMEWORK_PANEL_WAKE=ANDROID_KEYCODE_WAKEUP_PRE_STOP; CPU_MIN_COOLDOWN=THREE_HEALTHY_SAMPLES; CPU0_MIN_KHZ=$wake_min0; CPU6_MIN_KHZ=$wake_min6; CPU_PEAK_MC=$th_cpu; TOUCH_PANEL_POWER_NOT_CERTIFIED"
         else
-            armed="switch-panel-wake-refused: CPU minimum boost or thermal sample not settled before Framework cutoff"
+            armed="switch-panel-wake-refused: CPU floor or thermal sample unsettled (CPU0_MIN=${wake_min0:-unreadable}, CPU6_MIN=${wake_min6:-unreadable}, CPU_MC=${th_cpu:-unreadable}, elapsed=${wake_elapsed}s)"
         fi
     fi
     if [ -n "$armed" ]; then
