@@ -207,7 +207,7 @@ class FullRunThermalContract(unittest.TestCase):
         begin = source.index('framework_down_for_cpu_cap() {')
         end = source.index('\n}', begin) + 2
         func = source[begin:end]
-        script = textwrap.dedent("""\\
+        script = textwrap.dedent("""\
             #!/bin/sh
             CTL="$TEST_ROOT/control"
             getprop() {
