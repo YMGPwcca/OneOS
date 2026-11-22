@@ -126,7 +126,7 @@ apply_cap() {
         requested=$target
         if [ "$target" -lt "$active_min" ]; then
             target=$active_min
-            echo "P0_CPU_CAP=MIN_FLOOR_LIMITED policy=${pol##*/} pct=$pct requested_khz=$requested scaling_min_khz=$active_min effective_target_khz=$target"
+            echo "P0_CPU_CAP=MIN_FLOOR_LIMITED policy=${pol##*/} pct=$pct requested_khz=$requested scaling_min_khz=$active_min effective_target_khz=$target boot=${BOOT:-fixture} generation=${GEN:-fixture}"
         fi
         if [ "$cur" -gt "$target" ]; then
             printf '%s\n' "$target" > "$pol/scaling_max_freq" || return 1
