@@ -95,9 +95,9 @@ class FullRunThermalContract(unittest.TestCase):
         self.assertEqual(1, source.count('input keyevent KEYCODE_WAKEUP'))
         self.assertIn('CPU_MIN_COOLDOWN=THREE_HEALTHY_SAMPLES', source)
         self.assertIn('switch-panel-wake-refused', source)
-        self.assertIn('wake_stable -ge 3', source)
-        self.assertIn('wake_elapsed -ge 8', source)
-        self.assertIn('wake_elapsed -lt 20', source)
+        self.assertIn('[ "$wake_stable" -ge 3 ]', source)
+        self.assertIn('[ "$wake_elapsed" -ge 8 ]', source)
+        self.assertIn('[ "$wake_elapsed" -lt 20 ]', source)
 
     def test_wake_boost_cooldown_synthetic_without_phone_access(self):
         source = SWITCH.read_text()
