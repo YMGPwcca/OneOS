@@ -248,10 +248,14 @@ class FullRunThermalContract(unittest.TestCase):
         stop = source.index('if ! stop_android_framework; then')
         self.assertLess(wake, cutoff)
         self.assertLess(cutoff, stop)
-        # Exactly one wake command in each mutually exclusive mode.
-        self.assertEqual(2, source.count('input keyevent KEYCODE_WAKEUP'))
+        # Protected mode wakes once; experimental mode adds a bounded pulse train
+        # and an immediate pre-stop wake.
+        self.assertEqual(3, source.count('input keyevent KEYCODE_WAKEUP'))
         self.assertIn('if [ "$FW_SOFT_THERMAL_OFF" = 1 ]; then', source)
-        self.assertIn('FRAMEWORK_PANEL_WAKE=EXPERIMENTAL_8S_COOLDOWN_NO_SOFTWARE_THERMAL_GATE', source)
+        self.assertIn('FRAMEWORK_PANEL_WAKE=EXPERIMENTAL_4_WAKEUP_PULSES_EVERY_2S_PRE_STOP', source)
+        self.assertIn('FRAMEWORK_FINAL_WAKE=KEYCODE_WAKEUP_IMMEDIATELY_PRE_STOP', source)
+        self.assertIn('while [ "$wake_pulses" -lt 4 ]; do', source)
+        self.assertIn('[ "$wake_pulses" -ge 4 ] || sleep 2', source)
         self.assertIn('CPU_MIN_COOLDOWN=THREE_HEALTHY_SAMPLES', source)
         self.assertIn('switch-panel-wake-refused', source)
         self.assertIn('[ "$wake_stable" -ge 3 ]', source)
@@ -359,16 +363,28 @@ class FullRunThermalContract(unittest.TestCase):
                 self.assertNotIn("CPU_MIN_COOLDOWN=THREE_HEALTHY_SAMPLES", proc.stdout)
                 if wake_fails == "0":
                     self.assertIn(
-                        "FRAMEWORK_PANEL_WAKE=EXPERIMENTAL_8S_COOLDOWN_NO_SOFTWARE_THERMAL_GATE",
+                        "FRAMEWORK_PANEL_WAKE=EXPERIMENTAL_4_WAKEUP_PULSES_EVERY_2S_PRE_STOP",
                         proc.stdout,
                     )
                     self.assertIn("MOCK_ARMED=\n", proc.stdout)
-                    self.assertEqual("1", (root / "count").read_text().strip())
+                    self.assertEqual("3", (root / "count").read_text().strip())
                 else:
                     self.assertIn("FRAMEWORK_PANEL_WAKE=BLOCKED_BEFORE_FRAMEWORK_STOP", proc.stdout)
                     self.assertIn("MOCK_ARMED=switch-panel-wake-refused", proc.stdout)
                     self.assertEqual("0", (root / "count").read_text().strip())
 
+    def test_final_wakeup_precedes_framework_stop(self):
+        source = SWITCH.read_text()
+        start = source.index('stop_android_framework() {')
+        end = source.index('\n}\n', start) + 2
+        body = source[start:end]
+        self.assertEqual(1, body.count('input keyevent KEYCODE_WAKEUP'))
+        self.assertIn('FRAMEWORK_FINAL_WAKE=FAILED_BEFORE_FRAMEWORK_STOP', body)
+        self.assertIn('FRAMEWORK_FINAL_WAKE=KEYCODE_WAKEUP_IMMEDIATELY_PRE_STOP', body)
+        self.assertLess(body.index('input keyevent KEYCODE_WAKEUP'),
+                        body.index('> "$CTL/stopped"'))
+        self.assertLess(body.index('> "$CTL/stopped"'),
+                        body.index('setprop ctl.stop zygote'))
     def test_cpu_cap_framework_down_gate_synthetic(self):
         # Execute the REAL gate on a fake control directory. No phone,
         # no root privileges, and no cpufreq writes.
