@@ -134,6 +134,29 @@ class FullRunThermalContract(unittest.TestCase):
         )
         self.assertIn('ONEIOS_GPU_3D_MODE=REQUIRED_FAIL_CLOSED_NO_2D_FALLBACK', s)
 
+    def test_archived_smoke_remains_valid_after_manual_android_reboot(self):
+        source = SWITCH.read_text()
+        gate = source.split("sm8850_old_smoke_valid() {", 1)[1].split(
+            'SM8850_PREVIOUS_REBOOT_SMOKE=VERIFIED_DEADLINE_REQUEST_ONLY', 1
+        )[0]
+        # Preserve rooted, original-boot smoke provenance checks and the
+        # mandatory presence of a verified historical session.
+        self.assertIn('root_only "$sr_ctl" && root_only "$sr_outcome_path"', gate)
+        self.assertIn('[ "${sr_marker%%.*}" = "$sr_boot" ]', gate)
+        self.assertIn('[ "$(cat "$sr_ctl/framework.mode" 2>/dev/null)" = smoke ]', gate)
+        self.assertIn('sm8850_old_smoke_valid "$sr_archive/control" "$sr_archive/return.outcome"', gate)
+        self.assertIn('[ -n "$smoke_proof" ] ||', gate)
+        # A manual reboot can report "reboot". It is not evidence about
+        # the historical smoke run and cannot invalidate it.
+        self.assertNotIn(
+            '[ "$(getprop ro.boot.bootreason)" = reboot,oneios-sm8850-reboot-return ]',
+            gate,
+        )
+        self.assertIn(
+            'SM8850_CURRENT_BOOT_REASON=INFORMATIONAL_ONLY:',
+            source,
+        )
+
     def test_full_hardware_bridges_enable_explicitly_and_require_matching_runtime(self):
         source = SWITCH.read_text()
         # Explicitly activate the REAL bridges=1 profile, not the prior
