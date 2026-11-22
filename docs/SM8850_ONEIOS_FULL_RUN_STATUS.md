@@ -12,6 +12,40 @@
 > Full cross-repository metrics and P0–P3 work items:
 > [OneiOS 2026-11-20 ledger](https://github.com/YMGPwcca/OneiOS/blob/feat/oneios-sm8850-m3q/docs/SM8850_LIVE_STATUS_2026-11-20.md).
 
+## Experimental panel-only bridge (branch feat/sm8850-isolated-panel-bridge)
+
+The 2026-11-22 physical full-run displayed iOS but could not unlock by touch,
+and the panel appeared asleep/dim. The bench command uses `bridges=0`
+deliberately, which prevented xnuhost from creating the existing
+brightness / touch-power guest bridge.
+
+This isolated OneOS branch opts into
+`--set panel-bridge=1 --set touch-sleep=0` while **retaining
+`--set bridges=0`**, GPU 3d, native touch-exclusive, 8-vCPU pinning
+and all independent thermal/reboot guards. The guest gets only the
+brightness/TSP channel; power-key wake is routed to that worker,
+without activating generic HCI, radio, haptics, battery or CPU-thermal
+bridges. Turning `bridges=1` with exclusive touch is still refused
+by xnuhost configuration validation.
+
+The matching OneiOS xnuhost code verifies the active root OneOS
+Framework session, current boot/generation, absent system_server,
+stopped zygote services and separate mount namespace **before any**
+panel/TSP power write. If native `sec_touchscreen` power control or
+backlight is missing, it refuses guest launch rather than claiming
+touch/brightness works. Both iOS and the host keep TSP awake on
+display-off in this experimental profile.
+
+OneOS full-run preflight also requires the new native xnuhost binary's
+`PANEL_BRIDGE=ACTIVE_ONLY_BRIGHTNESS_TSP` marker and refuses an
+obsolete runtime BEFORE consuming one-shot APFS Data. Reboot-stage
+checks alone do not verify a matching binary. Local CachyOS build
+and offline tests MUST succeed before any staged runtime upgrade.
+
+**Status: CODE-ONLY, NO DEVICE VERIFICATION.** This branch does not
+authorize a new live takeover, change watchdog/thermal policy, or
+turn on the blocked normal Android app switch.
+
 ## Three distinct security/operational states
 
 | Interface | SM8850 status |
