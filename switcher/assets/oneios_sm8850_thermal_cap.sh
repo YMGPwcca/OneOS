@@ -214,11 +214,11 @@ case "$MODE" in
         echo -1000 > /proc/$$/oom_score_adj 2>/dev/null
         BIRTH=$(birth $$)
         [ -n "$BIRTH" ] || die no_pid_birth
-        atom thermal.cap.pid "$ $BIRTH" || die cap_pid_write
+        atom thermal.cap.pid "$$ $BIRTH" || die cap_pid_write
         if [ "$MODE" = --run-prearmed ]; then
             # Publish trusted PID/birth identity while still read-only.
             # The switch validates this BEFORE it can stop system_server.
-            atom thermal.cap.prearmed "v1 $BOOT $GEN $ $BIRTH" ||
+            atom thermal.cap.prearmed "v1 $BOOT $GEN $$ $BIRTH" ||
                 die cannot_publish_prearmed_pid
             standby_start=$(tick) || fault standby_monotonic_clock
             echo "P0_CPU_CAP=PREARMED_READ_ONLY boot=$BOOT generation=$GEN"
