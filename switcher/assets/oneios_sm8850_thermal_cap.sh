@@ -246,8 +246,8 @@ case "$MODE" in
             [ "$GEN" = "$(cat "$CTL/watchdog.generation" 2>/dev/null)" ] || exit 0
         fi
         # SM8850 full-guest boot is an immediate CPU burst, not an idle
-        # workload. 60% at the first sample was too permissive for the
-        # previously observed 95 C pre-xnuhost thermal event. Start at
+        # workload. Starting at 40% rather than 60% increases thermal
+        # headroom; it has NOT been proven to prevent the prior 95 C event.
         # level 2 (40%) on the first validated post-stop heartbeat.
         # Do NOT lower scaling_min_freq or relax vendor/firmware protection.
         # Subsequent cap levels remain monotonic and stricter when hot.
