@@ -5,6 +5,9 @@
 #
 # The cap only LOWERS scaling_max_freq. It never releases SSRM/KernelSU limits,
 # touches thermal trips, changes GPU clocks, or raises clocks during a session.
+# Explicit 180s --run-prearmed-floor experiment: initial 28% ceiling clipped to
+# Samsung's active minimum vote. This may exceed 28% in practice and MUST
+# be reported as FLOOR_LIMITED. Firmware/kernel thermal policy is untouched.
 # Never return on reaching 80 C: raise throttling instead; root guard owns last-resort runaway/invalid sensors.
 # Runtime physical behavior and watchdog recovery are NOT yet qualified.
 set -u
@@ -52,10 +55,12 @@ policy() {
     done
     # Last-resort safety, not normal thermal management. We cannot guarantee
     # <80 C using frequency caps alone: a runaway still has to reboot-return.
+    hot=0
     if [ "$cpu" -ge 90000 ] || [ "$gpu" -ge 95000 ] ||
        [ "$ddr" -ge 95000 ] || [ "$bat" -ge 480 ] ||
        [ "$lrp" -ge 500 ] || [ "$ap" -ge 700 ]; then
-        return 2
+        [ "${FLOOR_MODE:-0}" = 1 ] || return 2
+        hot=1
     fi
     level=1
     if [ "$cpu" -ge 55000 ] || [ "$gpu" -ge 60000 ] ||
@@ -73,6 +78,7 @@ policy() {
     if [ "$cpu" -ge 80000 ] || [ "$gpu" -ge 85000 ] ||
        [ "$ddr" -ge 85000 ] || [ "$bat" -ge 440 ] ||
        [ "$lrp" -ge 470 ] || [ "$ap" -ge 650 ]; then level=6; fi
+    [ "$hot" != 1 ] || level=6
     [ "$prev" -le "$level" ] || level=$prev
     case "$level" in
         1) pct=60 ;; 2) pct=40 ;; 3) pct=28 ;;
@@ -177,11 +183,17 @@ framework_down_for_cpu_cap() {
 # The only nonroot write mode uses disposable synthetic sysfs, NEVER real sysfs.
 # It is for CachyOS tests and cannot name / or a live Android path.
 MODE=${1:-}
+FLOOR_MODE=0
+[ "$MODE" != --run-prearmed-floor ] || FLOOR_MODE=1
 case "$MODE" in
     --policy)
         shift
         policy "$@"; exit $? ;;
-    --fixture-step|--fixture-strict-step)
+    --policy-floor)
+        shift
+        FLOOR_MODE=1
+        policy "$@"; exit $? ;;
+    --fixture-step|--fixture-strict-step|--fixture-floor-step)
         [ "$#" = 3 ] || die fixture_args
         [ "$(id -u)" != 0 ] || die fixture_must_be_unprivileged
         case "$2" in /tmp/oneios-cpu-cap-test.*) ;; *) die fixture_path ;; esac
@@ -189,6 +201,7 @@ case "$MODE" in
         case "$3" in 60|40|28|18|12|8) ;; *) die invalid_fixture_percent ;; esac
         fixture_strict=lenient
         [ "$MODE" != --fixture-strict-step ] || fixture_strict=strict
+        [ "$MODE" != --fixture-floor-step ] || FLOOR_MODE=1
         apply_cap "$2" "$3" "$fixture_strict" || die fixture_policy_failed
         echo "P0_CPU_CAP=FIXTURE_APPLIED pct=$3 strict=$fixture_strict"
         exit 0 ;;
@@ -198,7 +211,7 @@ case "$MODE" in
         policies "" || die host_cpufreq_unavailable
         echo "P0_CPU_CAP=READ_ONLY_POLICY_AVAILABLE_NOT_CERTIFIED"
         exit 0 ;;
-    --run|--run-prearmed)
+    --run|--run-prearmed|--run-prearmed-floor)
         [ "$#" = 3 ] || die args
         [ "$(id -u)" = 0 ] || die root_required
         CTL=$2 GEN=$3
@@ -215,7 +228,7 @@ case "$MODE" in
         BIRTH=$(birth $$)
         [ -n "$BIRTH" ] || die no_pid_birth
         atom thermal.cap.pid "$$ $BIRTH" || die cap_pid_write
-        if [ "$MODE" = --run-prearmed ]; then
+        if [ "$MODE" = --run-prearmed ] || [ "$MODE" = --run-prearmed-floor ]; then
             # Publish trusted PID/birth identity while still read-only.
             # The switch validates this BEFORE it can stop system_server.
             atom thermal.cap.prearmed "v1 $BOOT $GEN $$ $BIRTH" ||
@@ -253,7 +266,12 @@ case "$MODE" in
         # Subsequent cap levels remain monotonic and stricter when hot.
         level=2
         seq=0
-        echo "P0_CPU_CAP=BOOT_STRICT_BASELINE_REQUESTED pct=40 boot=$BOOT generation=$GEN"
+        if [ "$FLOOR_MODE" = 1 ]; then
+            level=3
+            echo "P0_CPU_CAP=EXPERIMENTAL_FLOOR_AWARE_INITIAL_28_PERCENT boot=$BOOT generation=$GEN"
+        else
+            echo "P0_CPU_CAP=BOOT_STRICT_BASELINE_REQUESTED pct=40 boot=$BOOT generation=$GEN"
+        fi
         while [ "$GEN" = "$(cat "$CTL/watchdog.generation" 2>/dev/null)" ]; do
             case "$(cat "$CTL/state" 2>/dev/null)" in
                 returning|returned|failed) exit 0 ;;
@@ -284,7 +302,11 @@ case "$MODE" in
             # vendor performance vote forces scaling_min_freq above the
             # requested ceiling. Abort through the existing independent
             # watcher before a 90 C emergency instead of silently clamping.
-            apply_cap "" "$pct" strict
+            if [ "$FLOOR_MODE" = 1 ]; then
+                apply_cap "" "$pct" lenient
+            else
+                apply_cap "" "$pct" strict
+            fi
             cap_rc=$?
             case "$cap_rc" in
                 0) ;;
@@ -295,7 +317,7 @@ case "$MODE" in
             seq=$((seq+1))
             atom thermal.cap.heartbeat "v1 $BOOT $GEN $$ $BIRTH $seq $now OK $level $pct" ||
                 fault cannot_publish_heartbeat
-            [ "$seq" -ne 1 ] || echo "P0_CPU_CAP=ARMED_INDEPENDENT_ROOT_CAP_NOT_HARDWARE_CERTIFIED pct=$pct"
+            [ "$seq" -ne 1 ] || echo "P0_CPU_CAP=ARMED_INDEPENDENT_ROOT_CAP_NOT_HARDWARE_CERTIFIED pct=$pct floor_aware=$FLOOR_MODE"
             sleep 1
         done
         exit 0 ;;
