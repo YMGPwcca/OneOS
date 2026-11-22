@@ -266,12 +266,26 @@ class SyntheticCpufreqTest(unittest.TestCase):
             with self.subTest(floor0=floor0, floor6=floor6, pct=pct):
                 (self.policies["policy0"] / "scaling_min_freq").write_text(str(floor0))
                 (self.policies["policy6"] / "scaling_min_freq").write_text(str(floor6))
+                if pct == 60:
+                    # The actual samples reported min=max on both clusters.
+                    (self.policies["policy0"] / "scaling_max_freq").write_text(str(floor0))
+                    (self.policies["policy6"] / "scaling_max_freq").write_text(str(floor6))
                 old = {n: self.read(n) for n in self.policies}
                 p = self.apply_strict(pct)
                 self.assertNotEqual(0, p.returncode)
                 self.assertIn("P0_CPU_CAP=UNENFORCEABLE_MIN_VOTE", p.stdout)
                 self.assertIn("P0_CPU_CAP=BLOCKED fixture_policy_failed", p.stderr)
                 self.assertEqual(old, {n: self.read(n) for n in self.policies})
+
+    def test_strict_only_rejects_an_actual_ceiling_conflict(self):
+        # At 60%, 2.112 GHz is below the requested limit on both
+        # clusters; the cap is still enforceable at this temperature.
+        (self.policies["policy0"] / "scaling_min_freq").write_text("2112000")
+        (self.policies["policy6"] / "scaling_min_freq").write_text("2112000")
+        p = self.apply_strict(60)
+        self.assertEqual(0, p.returncode, (p.stdout, p.stderr))
+        self.assertEqual(2160000, self.read("policy0"))
+        self.assertEqual(2200000, self.read("policy6"))
 
     def test_strict_allows_real_throttling_after_minimum_vote_releases(self):
         (self.policies["policy0"] / "scaling_min_freq").write_text("384000")
