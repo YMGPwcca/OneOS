@@ -546,8 +546,12 @@ framework_deadline() {
         elif ! framework_pid_alive "$CTL/framework.watcher"; then
             why="framework watcher lost"
         elif [ "$(cat "$CTL/framework.mode" 2>/dev/null)" = run ] &&
-             { [ "$(cat "$CTL/thermal.required" 2>/dev/null)" != "$WD_GEN" ] ||
-               ! framework_thermal_guard_healthy || ! framework_thermal_cap_healthy; }; then
+             { [ "$(cat "$CTL/thermal.guard.required" 2>/dev/null)" != "$WD_GEN" ] ||
+               ! framework_thermal_guard_healthy ||
+               { [ -e "$CTL/thermal.cap.required" ] &&
+                 ! framework_thermal_cap_healthy; } ||
+               { [ "$(cat "$CTL/state" 2>/dev/null)" = running ] &&
+                 ! framework_thermal_cap_healthy; }; }; then
             why="independent thermal monitor/cap missing, stale, or exceeded emergency threshold"
         elif [ "$tick" -ge "$limit" ]; then
             expired=1
@@ -623,8 +627,15 @@ framework_thermal_cap_healthy() {
 framework_recovery_ready() {
     framework_pid_alive "$CTL/framework.guard" && framework_pid_alive "$CTL/framework.watcher" || return 1
     if [ "$(cat "$CTL/framework.mode" 2>/dev/null)" = run ]; then
-        [ "$(cat "$CTL/thermal.required" 2>/dev/null)" = "$(watchdog_generation)" ] &&
-            framework_thermal_guard_healthy && framework_thermal_cap_healthy || return 1
+        [ "$(cat "$CTL/thermal.guard.required" 2>/dev/null)" = "$(watchdog_generation)" ] &&
+            framework_thermal_guard_healthy || return 1
+        # Cap begins only AFTER confirmed Framework stop, so a failed
+        # pre-stop switch does not leave One UI unexpectedly throttled.
+        if [ -e "$CTL/thermal.cap.required" ] ||
+           [ "$(cat "$CTL/state" 2>/dev/null)" = running ]; then
+            [ "$(cat "$CTL/thermal.cap.required" 2>/dev/null)" = "$(watchdog_generation)" ] &&
+                framework_thermal_cap_healthy || return 1
+        fi
     fi
     [ "$(grep -c . "$CTL/keys/pids" 2>/dev/null)" = 3 ] || return 1
     for reader in $(cat "$CTL/keys/pids"); do
@@ -2153,19 +2164,10 @@ if [ "$FRAMEWORK" = 1 ] && [ "$FW_MODE" = run ] && [ -z "$armed" ]; then
     done
     if ! framework_thermal_guard_healthy; then
         armed="independent root thermal monitor did not start"
-    else
-        "$BB" setsid $SH "$STAGE/oneios_sm8850_thermal_cap.sh" --run "$CTL" "$WD_GEN" \
-            8>&- </dev/null >>"$STAGE/thermal-cap.log" 2>&1 &
-        n=0
-        until framework_thermal_cap_healthy; do
-            [ "$n" -lt 25 ] || break
-            sleep 0.2; n=$((n + 1))
-        done
-        framework_thermal_cap_healthy || armed="independent root CPU throttle failed to arm"
     fi
-    [ -n "$armed" ] || printf '%s\n' "$WD_GEN" > "$CTL/thermal.required" ||
-        armed="could not require independent thermal workers"
-    [ -n "$armed" ] || echo "THERMAL_GUARD=ARMED_ROOT; CPU_THROTTLE=ACTIVE_MONOTONIC_60_40_28_18_12_8; LAST_RESORT_CPU=90C"
+    [ -n "$armed" ] || printf '%s\n' "$WD_GEN" > "$CTL/thermal.guard.required" ||
+        armed="could not require independent thermal guard"
+    [ -n "$armed" ] || echo "THERMAL_GUARD=ARMED_ROOT_BEFORE_FRAMEWORK_STOP; CPU_THROTTLE=ARM_AFTER_FRAMEWORK_STOP; LAST_RESORT_CPU=90C"
 fi
 if [ "$FRAMEWORK" = 1 ] && [ -z "$armed" ]; then
     if fw_start=$(watchdog_now) && framework_pid_alive "$CTL/framework.watcher" &&
@@ -2373,6 +2375,22 @@ if [ "$FRAMEWORK" = 1 ]; then
         [ "$(awk '/^MemAvailable:/ {print $2}' "$P/meminfo")" -ge 5500000 ] ||
             fw_recover "available memory is below the benchmark minimum"
         framework_configure || fw_recover "could not set and verify vm.max_map_count"
+    fi
+    # Restore the normal One UI clocks on any pre-stop refusal: this
+    # worker is only ever started AFTER stop_android_framework succeeded.
+    if [ "$FW_MODE" = run ]; then
+        "$BB" setsid $SH "$STAGE/oneios_sm8850_thermal_cap.sh" --run "$CTL" "$WD_GEN" \
+            8>&- </dev/null >>"$STAGE/thermal-cap.log" 2>&1 &
+        n=0
+        until framework_thermal_cap_healthy; do
+            [ "$n" -lt 25 ] || break
+            sleep 0.2; n=$((n + 1))
+        done
+        framework_thermal_cap_healthy ||
+            fw_recover "independent root CPU thermal throttle could not arm after Framework stop"
+        printf '%s\n' "$WD_GEN" > "$CTL/thermal.cap.required" ||
+            fw_recover "could not mark mandatory CPU thermal throttle"
+        echo "CPU_THROTTLE=ARMED_POST_STOP_MONOTONIC_60_40_28_18_12_8_MIN_FREQ_FLOOR"
     fi
     fw_tick=$(watchdog_now) && printf '%s\n' "$((fw_tick + fw_seconds))" > "$CTL/framework.deadline.tmp" &&
         mv -f "$CTL/framework.deadline.tmp" "$CTL/framework.deadline" ||
