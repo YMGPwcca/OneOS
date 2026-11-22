@@ -69,6 +69,16 @@ class FullRunThermalContract(unittest.TestCase):
         self.assertIn('"$got" -le "$target"', cap)
         self.assertNotIn('> "$pol/scaling_min_freq"', cap)
         self.assertIn('apply_cap "" "$pct" strict', cap)
+        self.assertIn('framework_down_for_cpu_cap() {', cap)
+        self.assertIn('--run-prearmed)', cap)
+        self.assertIn('atom thermal.cap.prearmed "v1 $BOOT $GEN $ $BIRTH"', cap)
+        self.assertIn('if framework_down_for_cpu_cap; then', cap)
+        self.assertIn('P0_CPU_CAP=PREARMED_READ_ONLY', cap)
+        self.assertIn('P0_CPU_CAP=FRAMEWORK_DOWN_VERIFIED_START_STRICT', cap)
+        self.assertLess(
+            cap.index('if framework_down_for_cpu_cap; then'),
+            cap.index('apply_cap "" "$pct" strict'),
+        )
         self.assertIn('fault "unachievable_cpu_cap_floor level=$desired pct=$pct"', cap)
         self.assertIn('P0_CPU_CAP=UNENFORCEABLE_MIN_VOTE', cap)
 
@@ -85,7 +95,19 @@ class FullRunThermalContract(unittest.TestCase):
         self.assertIn('"$CTL/thermal.guard.required"', s)
         self.assertIn('"$CTL/thermal.cap.required"', s)
         self.assertIn('--run "$CTL" "$STAGE/thermal.guard.manifest" "$WD_GEN"', s)
-        self.assertIn('--run "$CTL" "$WD_GEN"', s)
+        self.assertIn('--run-prearmed "$CTL" "$WD_GEN"', s)
+        self.assertNotIn('--run "$CTL" "$WD_GEN"', s)
+        self.assertIn('framework_thermal_cap_prearmed()', s)
+        self.assertIn('thermal.cap.prearm.required', s)
+        self.assertIn('CPU_THROTTLE=PREARMED_ACTIVATED_POST_STOP_STRICT', s)
+        self.assertLess(
+            s.index('CPU_THROTTLE=PREARMED_READ_ONLY_NO_SYSFS_WRITES_BEFORE_FRAMEWORK_STOP'),
+            s.index('if ! stop_android_framework; then'),
+        )
+        self.assertLess(
+            s.index('if ! stop_android_framework; then'),
+            s.index('CPU_THROTTLE=PREARMED_ACTIVATED_POST_STOP_STRICT'),
+        )
         self.assertIn('ONEIOS_GPU_3D_MODE=REQUIRED_FAIL_CLOSED_NO_2D_FALLBACK', s)
 
     def test_wake_boost_settles_before_framework_cutoff(self):
@@ -178,6 +200,59 @@ class FullRunThermalContract(unittest.TestCase):
                     else:
                         self.assertIn("MOCK_ARMED=switch-panel-wake-refused", proc.stdout)
 
+    def test_cpu_cap_framework_down_gate_synthetic(self):
+        # Execute the REAL gate on a fake control directory. No phone,
+        # no root privileges, and no cpufreq writes.
+        source = CAP.read_text()
+        begin = source.index('framework_down_for_cpu_cap() {')
+        end = source.index('\n}', begin) + 2
+        func = source[begin:end]
+        script = textwrap.dedent("""\\
+            #!/bin/sh
+            CTL="$TEST_ROOT/control"
+            getprop() {
+                case "$1" in
+                    init.svc.zygote) printf '%s\\n' "$TEST_ZYGOTE" ;;
+                    init.svc.zygote_next) printf '%s\\n' "$TEST_ZYGOTE_NEXT" ;;
+                    init.svc.zygote_secondary) printf '%s\\n' "$TEST_ZYGOTE_SECONDARY" ;;
+                    *) return 2 ;;
+                esac
+            }
+            pidof() {
+                [ "$1" = system_server ] && [ "$TEST_SYSTEM_SERVER" = 1 ]
+            }
+            __GATE__
+            if framework_down_for_cpu_cap; then
+                echo CPU_CAP_STOP_GATE=PASS
+            else
+                echo CPU_CAP_STOP_GATE=BLOCKED
+            fi
+            """).replace("__GATE__", func)
+        cases = (
+            ("0", "stopped", "stopped", "stopped", "0", "BLOCKED"),
+            ("1", "running", "stopped", "stopped", "0", "BLOCKED"),
+            ("1", "stopped", "running", "stopped", "0", "BLOCKED"),
+            ("1", "stopped", "stopped", "running", "0", "BLOCKED"),
+            ("1", "stopped", "stopped", "stopped", "1", "BLOCKED"),
+            ("1", "stopped", "stopped", "stopped", "0", "PASS"),
+            ("1", "stopped", "stopped", "", "0", "PASS"),
+        )
+        for marker, zygote, znext, secondary, server, result in cases:
+            with self.subTest(marker=marker, zygote=zygote, server=server), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                ctl = root / "control"
+                ctl.mkdir()
+                if marker == "1":
+                    (ctl / "stopped").write_text("test marker\n")
+                env = {**os.environ, "TEST_ROOT": str(root),
+                       "TEST_ZYGOTE": zygote, "TEST_ZYGOTE_NEXT": znext,
+                       "TEST_ZYGOTE_SECONDARY": secondary,
+                       "TEST_SYSTEM_SERVER": server}
+                res = subprocess.run(["sh", "-c", script], env=env,
+                                     capture_output=True, text=True, timeout=5)
+                self.assertEqual(0, res.returncode, (res.stdout, res.stderr))
+                self.assertIn(f"CPU_CAP_STOP_GATE={result}", res.stdout)
+
     def test_thermal_arms_before_framework_stop(self):
         s = SWITCH.read_text()
         self.assertLess(
@@ -186,7 +261,7 @@ class FullRunThermalContract(unittest.TestCase):
         )
         self.assertIn('independent thermal monitor/cap missing, stale', s)
         self.assertIn('root thermal sensor manifest not qualified on current boot', s)
-        self.assertLess(s.index('=== [3/5]'), s.index('CPU_THROTTLE=ARMED_POST_STOP'))
+        self.assertLess(s.index('=== [3/5]'), s.index('CPU_THROTTLE=PREARMED_ACTIVATED_POST_STOP_STRICT'))
 
 
 @unittest.skipIf(os.geteuid() == 0, "root may not use the fixture write mode")
