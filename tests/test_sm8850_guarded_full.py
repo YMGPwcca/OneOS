@@ -62,6 +62,9 @@ class FullRunThermalContract(unittest.TestCase):
         self.assertIn('active_min=$(cat "$pol/scaling_min_freq"', cap)
         self.assertIn('target=$active_min', cap)
         self.assertIn('P0_CPU_CAP=MIN_FLOOR_LIMITED', cap)
+        # Appended thermal-cap logs span multiple boots, so each floor-limited
+        # line must now carry the exact owner boot and watcher generation.
+        self.assertIn('boot=${BOOT:-fixture} generation=${GEN:-fixture}', cap)
         self.assertIn('if [ "$cur" -gt "$target" ]; then', cap)
         self.assertIn('"$got" -le "$target"', cap)
         self.assertNotIn('> "$pol/scaling_min_freq"', cap)
