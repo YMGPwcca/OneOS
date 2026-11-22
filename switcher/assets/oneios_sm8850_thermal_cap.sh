@@ -1,5 +1,5 @@
 #!/system/bin/sh
-# SM8850 OneiOS: throttle-first CPU ceiling for short Framework probe (target <80 C).
+# SM8850 OneiOS: throttle-first CPU ceiling for bounded full takeover (target <80 C).
 # Adapted from fahadalijaved/OneOS oneos_heat_cap, NOT its SKIN=45/47/50
 # thresholds. This worker reads the already-verified root thermal heartbeat.
 #
@@ -90,10 +90,12 @@ policies() {
         case "${pol##*/}" in policy[0-9]*) ;; *) return 1 ;; esac
         hw=$(cat "$pol/cpuinfo_max_freq" 2>/dev/null) || return 1
         mn=$(cat "$pol/cpuinfo_min_freq" 2>/dev/null) || return 1
+        active_min=$(cat "$pol/scaling_min_freq" 2>/dev/null) || return 1
         cur=$(cat "$pol/scaling_max_freq" 2>/dev/null) || return 1
-        uint "$hw" && uint "$mn" && uint "$cur" &&
+        uint "$hw" && uint "$mn" && uint "$active_min" && uint "$cur" &&
           [ "$hw" -ge 200000 ] && [ "$hw" -le 6000000 ] &&
           [ "$mn" -ge 100000 ] && [ "$mn" -le "$hw" ] &&
+          [ "$active_min" -ge "$mn" ] && [ "$active_min" -le "$hw" ] &&
           [ "$cur" -ge "$mn" ] && [ "$cur" -le "$hw" ] &&
           [ -w "$pol/scaling_max_freq" ] || return 1
         policies_found=$((policies_found+1))
@@ -101,8 +103,13 @@ policies() {
     done
     [ "$policies_found" -ge 2 ]
 }
-# Desired cap computed from hardware maximum and clipped to cpuinfo_min_freq;
-# target never raises an existing tighter cap. Real readback must not exceed it.
+# Desired cap computed from hardware maximum and clipped to BOTH the hardware
+# minimum and Samsung's dynamic scaling_min_freq vote. That vote may rise while
+# One UI runs (observed 384000 -> 1228800 kHz on policy0 on SM-S948B).
+# Do NOT modify scaling_min_freq or Samsung's cpufreq_max_limit.
+# A dynamic minimum can prevent the advertised 8% cap from being achieved:
+# report the floor honestly; root thermal guard still owns runaway recovery.
+# A target never raises an existing tighter cap; readback must not exceed it.
 apply_cap() {
     root=$1 pct=$2
     policies "$root" || return 1
@@ -110,14 +117,22 @@ apply_cap() {
         [ -d "$pol" ] || continue
         hw=$(cat "$pol/cpuinfo_max_freq" 2>/dev/null) || return 1
         mn=$(cat "$pol/cpuinfo_min_freq" 2>/dev/null) || return 1
+        active_min=$(cat "$pol/scaling_min_freq" 2>/dev/null) || return 1
         cur=$(cat "$pol/scaling_max_freq" 2>/dev/null) || return 1
+        uint "$hw" && uint "$mn" && uint "$active_min" && uint "$cur" &&
+          [ "$active_min" -ge "$mn" ] && [ "$active_min" -le "$hw" ] || return 1
         target=$((hw / 100 * pct))
         [ "$target" -ge "$mn" ] || target=$mn
+        requested=$target
+        if [ "$target" -lt "$active_min" ]; then
+            target=$active_min
+            echo "P0_CPU_CAP=MIN_FLOOR_LIMITED policy=${pol##*/} pct=$pct requested_khz=$requested scaling_min_khz=$active_min effective_target_khz=$target"
+        fi
         if [ "$cur" -gt "$target" ]; then
             printf '%s\n' "$target" > "$pol/scaling_max_freq" || return 1
-            got=$(cat "$pol/scaling_max_freq" 2>/dev/null) || return 1
-            uint "$got" && [ "$got" -le "$target" ] || return 1
         fi
+        got=$(cat "$pol/scaling_max_freq" 2>/dev/null) || return 1
+        uint "$got" && [ "$got" -le "$target" ] && [ "$got" -ge "$mn" ] || return 1
     done
 }
 # The only nonroot write mode uses disposable synthetic sysfs, NEVER real sysfs.
