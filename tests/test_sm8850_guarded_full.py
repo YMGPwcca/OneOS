@@ -58,8 +58,12 @@ class FullRunThermalContract(unittest.TestCase):
             self.assertIn(token, guard)
         self.assertNotIn("setprop sys.powerctl", guard)
         self.assertIn('target=$mn', cap)
+        self.assertIn('active_min=$(cat "$pol/scaling_min_freq"', cap)
+        self.assertIn('target=$active_min', cap)
+        self.assertIn('P0_CPU_CAP=MIN_FLOOR_LIMITED', cap)
         self.assertIn('if [ "$cur" -gt "$target" ]; then', cap)
         self.assertIn('"$got" -le "$target"', cap)
+        self.assertNotIn('> "$pol/scaling_min_freq"', cap)
 
     def test_bounded_duration_and_affinity(self):
         s = SWITCH.read_text()
@@ -103,6 +107,7 @@ class SyntheticCpufreqTest(unittest.TestCase):
             folder.mkdir(parents=True)
             (folder / "cpuinfo_max_freq").write_text(str(max_hz))
             (folder / "cpuinfo_min_freq").write_text(str(min_hz))
+            (folder / "scaling_min_freq").write_text(str(min_hz))
             (folder / "scaling_max_freq").write_text(str(current))
             self.policies[name] = folder
 
@@ -127,6 +132,35 @@ class SyntheticCpufreqTest(unittest.TestCase):
         self.assertEqual(0, p.returncode, p.stderr)
         self.assertEqual(2160000, self.read("policy0"))
         self.assertEqual(2200000, self.read("policy6"))
+
+    def test_dynamic_samsung_scaling_min_floor_and_recovery(self):
+        # On the actual SM-S948B, policy0 scaling_min varied from 384000
+        # to 1228800 kHz while the vendor max stayed at 2112000 kHz.
+        (self.policies["policy0"] / "scaling_min_freq").write_text("1228800")
+        (self.policies["policy6"] / "scaling_min_freq").write_text("2112000")
+        p = self.apply(8)
+        self.assertEqual(0, p.returncode, p.stderr)
+        self.assertEqual(1228800, self.read("policy0"))
+        self.assertEqual(2112000, self.read("policy6"))
+        self.assertIn("MIN_FLOOR_LIMITED policy=policy0", p.stdout)
+        self.assertIn("MIN_FLOOR_LIMITED policy=policy6", p.stdout)
+        # When Samsung lowers its minimum vote, a subsequent cap tick can
+        # throttle further without ever writing to scaling_min_freq itself.
+        (self.policies["policy0"] / "scaling_min_freq").write_text("384000")
+        (self.policies["policy6"] / "scaling_min_freq").write_text("768000")
+        p = self.apply(8)
+        self.assertEqual(0, p.returncode, p.stderr)
+        self.assertEqual(384000, self.read("policy0"))
+        self.assertEqual(768000, self.read("policy6"))
+
+    def test_invalid_or_missing_active_scaling_min_is_rejected(self):
+        scaling_min = self.policies["policy0"] / "scaling_min_freq"
+        scaling_min.unlink()
+        self.assertNotEqual(0, self.apply(8).returncode)
+        scaling_min.write_text("9999999")
+        self.assertNotEqual(0, self.apply(8).returncode)
+        scaling_min.write_text("100000")
+        self.assertNotEqual(0, self.apply(8).returncode)
 
     def test_invalid_policy_and_live_root_are_blocked(self):
         self.assertNotEqual(0, subprocess.run(
