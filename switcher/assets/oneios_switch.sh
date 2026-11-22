@@ -1981,11 +1981,19 @@ if [ "$FRAMEWORK" = 1 ]; then
                 fi
             done
         fi
-        [ -n "$smoke_proof" ] &&
-            [ "$(getprop ro.boot.bootreason)" = reboot,oneios-sm8850-reboot-return ] ||
-            framework_block "verified original smoke proof missing from current or archived session; full run refused"
+        # Historical smoke evidence is pinned to its OWN boot and recorded
+        # completion. ro.boot.bootreason describes the CURRENT boot, which
+        # may legitimately be an operator-initiated ordinary reboot.
+        # Requiring the old custom reboot reason on every later boot
+        # erroneously invalidates a genuine archived smoke session.
+        # Keep the prior-session proof mandatory; never substitute a
+        # current reboot reason for missing smoke records.
+        [ -n "$smoke_proof" ] ||
+            framework_block "verified original smoke proof missing from root-owned current or archived session; full run refused"
         echo "SM8850_PREVIOUS_REBOOT_SMOKE=VERIFIED_DEADLINE_REQUEST_ONLY"
         echo "SM8850_SMOKE_PROOF_SOURCE=$smoke_proof"
+        echo "SM8850_CURRENT_BOOT_REASON=INFORMATIONAL_ONLY:$(getprop ro.boot.bootreason)"
+        echo "SM8850_MANUAL_REBOOT=DOES_NOT_INVALIDATE_HISTORIC_SMOKE_PROOF"
         echo "UNASSISTED_RETURN_TO_ONEUI=UNVERIFIED"
         echo "SM8850_FULL_RUN=EXPLICIT_RISK_ACCEPTED_WITH_REBOOT_ONLY_RETURN"
         # The 2026-11-20 SM-S948B physical run did execute xnuhost for
