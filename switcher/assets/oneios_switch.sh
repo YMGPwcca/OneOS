@@ -673,6 +673,17 @@ framework_recovery_ready() {
 
 stop_android_framework() {
     [ "$FRAMEWORK" = 0 ] || framework_recovery_ready || return 1
+    if [ "$FRAMEWORK" = 1 ] && [ "${FW_SOFT_THERMAL_OFF:-0}" = 1 ]; then
+        # This is the last Android input action, while system_server exists.
+        # The device's lock screen can auto-sleep ~5s after an earlier pulse.
+        # Never run input AFTER setprop ctl.stop zygote: the InputManager
+        # binder belongs to system_server and is no longer available.
+        if ! timeout 5 input keyevent KEYCODE_WAKEUP >/dev/null 2>&1; then
+            echo "FRAMEWORK_FINAL_WAKE=FAILED_BEFORE_FRAMEWORK_STOP"
+            return 1
+        fi
+        echo "FRAMEWORK_FINAL_WAKE=KEYCODE_WAKEUP_IMMEDIATELY_PRE_STOP"
+    fi
     printf '%s\n' "$(date +%s)" > "$CTL/stopped" || return 1
     setprop ctl.stop zygote
     [ -n "$(getprop init.svc.zygote_secondary)" ] && setprop ctl.stop zygote_secondary
@@ -2289,15 +2300,27 @@ fi
 # Do not change kernel votes, thermal trips, or the CPU-cap fail-safe.
 if [ "$FRAMEWORK" = 1 ] && [ "$FW_MODE" = run ] && [ -z "$armed" ]; then
     if [ "$FW_SOFT_THERMAL_OFF" = 1 ]; then
-        # Only panel wake; no userspace thermal readings or guard gate.
-        # Give Samsung wake boost time to settle, then let the non-fatal
-        # post-stop cap worker handle any remaining minimum-frequency vote.
-        if ! timeout 5 input keyevent KEYCODE_WAKEUP >/dev/null 2>&1; then
-            armed="switch-panel-wake-refused: Android KEYCODE_WAKEUP failed"
-        else
-            sleep 8
-            echo "FRAMEWORK_PANEL_WAKE=EXPERIMENTAL_8S_COOLDOWN_NO_SOFTWARE_THERMAL_GATE"
-        fi
+        # Android lock screen may darken the panel after ~5s. Send
+        # KEYCODE_WAKEUP every 2s while system_server still owns input.
+        # This is a bounded PRE-STOP pulse train, NOT a 180s ADB spammer.
+        # Samsung may boost CPU minimum votes after each pulse; the
+        # experimental 28% cap is best-effort and cannot be certified here.
+        wake_pulses=0
+        while [ "$wake_pulses" -lt 4 ]; do
+            if [ -e "$SESSION/return.request" ] ||
+               [ "$(getprop init.svc.zygote)" != running ] ||
+               ! pidof system_server >/dev/null 2>&1; then
+                armed="switch-panel-wake-refused: One UI input no longer available before Framework stop"
+                break
+            fi
+            if ! timeout 5 input keyevent KEYCODE_WAKEUP >/dev/null 2>&1; then
+                armed="switch-panel-wake-refused: Android KEYCODE_WAKEUP failed at pulse $wake_pulses"
+                break
+            fi
+            wake_pulses=$((wake_pulses + 1))
+            [ "$wake_pulses" -ge 4 ] || sleep 2
+        done
+        [ -n "$armed" ] || echo "FRAMEWORK_PANEL_WAKE=EXPERIMENTAL_4_WAKEUP_PULSES_EVERY_2S_PRE_STOP; FINAL_PULSE=IMMEDIATELY_BEFORE_ZYGOTE_STOP; NO_SOFTWARE_THERMAL_GATE"
     else
     wake_cpu0=/sys/devices/system/cpu/cpufreq/policy0
     wake_cpu6=/sys/devices/system/cpu/cpufreq/policy6
