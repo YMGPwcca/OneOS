@@ -236,7 +236,10 @@ class FullRunThermalContract(unittest.TestCase):
         stop = source.index('if ! stop_android_framework; then')
         self.assertLess(wake, cutoff)
         self.assertLess(cutoff, stop)
-        self.assertEqual(1, source.count('input keyevent KEYCODE_WAKEUP'))
+        # Exactly one wake command in each mutually exclusive mode.
+        self.assertEqual(2, source.count('input keyevent KEYCODE_WAKEUP'))
+        self.assertIn('if [ "$FW_SOFT_THERMAL_OFF" = 1 ]; then', source)
+        self.assertIn('FRAMEWORK_PANEL_WAKE=EXPERIMENTAL_8S_COOLDOWN_NO_SOFTWARE_THERMAL_GATE', source)
         self.assertIn('CPU_MIN_COOLDOWN=THREE_HEALTHY_SAMPLES', source)
         self.assertIn('switch-panel-wake-refused', source)
         self.assertIn('[ "$wake_stable" -ge 3 ]', source)
@@ -262,7 +265,7 @@ class FullRunThermalContract(unittest.TestCase):
         fixture = textwrap.dedent("""\
             #!/bin/sh
             set -eu
-            FRAMEWORK=1 FW_MODE=run armed=
+            FRAMEWORK=1 FW_MODE=run armed= FW_SOFT_THERMAL_OFF="${TEST_SOFT_OFF:-0}"
             SESSION="$TEST_ROOT/session"
             mkdir -p "$SESSION"
             watchdog_uint() {
@@ -270,6 +273,7 @@ class FullRunThermalContract(unittest.TestCase):
                 return 0
             }
             framework_thermal_guard_healthy() {
+                [ "$FW_SOFT_THERMAL_OFF" = 0 ] || { echo UNEXPECTED_THERMAL_GUARD_CALL >&2; return 1; }
                 th_cpu="${TEST_HOT_CPU:-40000}"
                 th_gpu=40000 th_ddr=40000
                 return 0
@@ -279,6 +283,7 @@ class FullRunThermalContract(unittest.TestCase):
             timeout() {
                 [ "$1" = 5 ] && [ "$2" = input ] &&
                     [ "$3" = keyevent ] && [ "$4" = KEYCODE_WAKEUP ] || return 1
+                [ "${TEST_WAKE_FAIL:-0}" = 0 ] || return 1
                 printf '1228800\\n' > "$TEST_ROOT/policy0/scaling_min_freq"
                 printf '883200\\n' > "$TEST_ROOT/policy6/scaling_min_freq"
             }
@@ -318,6 +323,39 @@ class FullRunThermalContract(unittest.TestCase):
                         self.assertIn("MOCK_ARMED=\n", proc.stdout)
                     else:
                         self.assertIn("MOCK_ARMED=switch-panel-wake-refused", proc.stdout)
+
+        # Exact-180s no-userspace-thermal branch must neither call the
+        # software guard nor wait for CPU floor / temperature verification.
+        # This executes the same extracted switch fragment in a fake sysfs.
+        for wake_fails in ("0", "1"):
+            with self.subTest(no_guard_wake_failure=wake_fails), tempfile.TemporaryDirectory() as td:
+                root = Path(td)
+                for policy, floor in (("policy0", 384000), ("policy6", 768000)):
+                    p = root / policy
+                    p.mkdir()
+                    for name in ("cpuinfo_min_freq", "scaling_min_freq"):
+                        (p / name).write_text(str(floor) + "\n")
+                (root / "count").write_text("0\n")
+                proc = subprocess.run(
+                    ["sh", "-c", fixture],
+                    env={**os.environ, "TEST_ROOT": str(root),
+                         "TEST_SOFT_OFF": "1", "TEST_WAKE_FAIL": wake_fails},
+                    capture_output=True, text=True, timeout=10,
+                )
+                self.assertEqual(0, proc.returncode, (proc.stdout, proc.stderr))
+                self.assertNotIn("UNEXPECTED_THERMAL_GUARD_CALL", proc.stderr)
+                self.assertNotIn("CPU_MIN_COOLDOWN=THREE_HEALTHY_SAMPLES", proc.stdout)
+                if wake_fails == "0":
+                    self.assertIn(
+                        "FRAMEWORK_PANEL_WAKE=EXPERIMENTAL_8S_COOLDOWN_NO_SOFTWARE_THERMAL_GATE",
+                        proc.stdout,
+                    )
+                    self.assertIn("MOCK_ARMED=\n", proc.stdout)
+                    self.assertEqual("1", (root / "count").read_text().strip())
+                else:
+                    self.assertIn("FRAMEWORK_PANEL_WAKE=BLOCKED_BEFORE_FRAMEWORK_STOP", proc.stdout)
+                    self.assertIn("MOCK_ARMED=switch-panel-wake-refused", proc.stdout)
+                    self.assertEqual("0", (root / "count").read_text().strip())
 
     def test_cpu_cap_framework_down_gate_synthetic(self):
         # Execute the REAL gate on a fake control directory. No phone,
