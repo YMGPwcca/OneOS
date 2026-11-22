@@ -548,6 +548,8 @@ framework_deadline() {
         elif [ "$(cat "$CTL/framework.mode" 2>/dev/null)" = run ] &&
              { [ "$(cat "$CTL/thermal.guard.required" 2>/dev/null)" != "$WD_GEN" ] ||
                ! framework_thermal_guard_healthy ||
+               [ "$(cat "$CTL/thermal.cap.prearm.required" 2>/dev/null)" != "$WD_GEN" ] ||
+               ! framework_thermal_cap_prearmed ||
                { [ -e "$CTL/thermal.cap.required" ] &&
                  ! framework_thermal_cap_healthy; } ||
                { [ "$(cat "$CTL/state" 2>/dev/null)" = running ] &&
@@ -609,6 +611,15 @@ framework_thermal_guard_healthy() {
     th_now=$(watchdog_now) || return 1
     [ "$th_tick" -le "$th_now" ] && [ $((th_now - th_tick)) -le 6 ]
 }
+framework_thermal_cap_prearmed() {
+    [ ! -e "$CTL/thermal.cap.fault" ] || return 1
+    framework_pid_alive "$CTL/thermal.cap.pid" || return 1
+    read -r pre_ver pre_boot pre_gen pre_pid pre_birth pre_extra < "$CTL/thermal.cap.prearmed" || return 1
+    [ "$pre_ver" = v1 ] && [ -z "$pre_extra" ] &&
+        [ "$pre_boot" = "$(cat "$CTL/boot" 2>/dev/null)" ] &&
+        [ "$pre_gen" = "$(watchdog_generation)" ] &&
+        [ "$pre_pid $pre_birth" = "$(cat "$CTL/thermal.cap.pid" 2>/dev/null)" ]
+}
 framework_thermal_cap_healthy() {
     [ ! -e "$CTL/thermal.cap.fault" ] || return 1
     framework_pid_alive "$CTL/thermal.cap.pid" || return 1
@@ -629,8 +640,12 @@ framework_recovery_ready() {
     if [ "$(cat "$CTL/framework.mode" 2>/dev/null)" = run ]; then
         [ "$(cat "$CTL/thermal.guard.required" 2>/dev/null)" = "$(watchdog_generation)" ] &&
             framework_thermal_guard_healthy || return 1
-        # Cap begins only AFTER confirmed Framework stop, so a failed
-        # pre-stop switch does not leave One UI unexpectedly throttled.
+        # The CPU-cap PROCESS is prearmed before Framework stop but
+        # remains read-only until the independent "Framework down" gate.
+        # Stop admission requires its generation-pinned live PID even
+        # though there is intentionally no active cap heartbeat yet.
+        [ "$(cat "$CTL/thermal.cap.prearm.required" 2>/dev/null)" = "$(watchdog_generation)" ] &&
+            framework_thermal_cap_prearmed || return 1
         if [ -e "$CTL/thermal.cap.required" ] ||
            [ "$(cat "$CTL/state" 2>/dev/null)" = running ]; then
             [ "$(cat "$CTL/thermal.cap.required" 2>/dev/null)" = "$(watchdog_generation)" ] &&
@@ -2167,7 +2182,26 @@ if [ "$FRAMEWORK" = 1 ] && [ "$FW_MODE" = run ] && [ -z "$armed" ]; then
     fi
     [ -n "$armed" ] || printf '%s\n' "$WD_GEN" > "$CTL/thermal.guard.required" ||
         armed="could not require independent thermal guard"
-    [ -n "$armed" ] || echo "THERMAL_GUARD=ARMED_ROOT_BEFORE_FRAMEWORK_STOP; CPU_THROTTLE=ARM_AFTER_FRAMEWORK_STOP; LAST_RESORT_CPU=90C"
+    [ -n "$armed" ] || echo "THERMAL_GUARD=ARMED_ROOT_BEFORE_FRAMEWORK_STOP; CPU_THROTTLE=PREARM_BEFORE_STOP; LAST_RESORT_CPU=90C"
+fi
+if [ "$FRAMEWORK" = 1 ] && [ "$FW_MODE" = run ] && [ -z "$armed" ]; then
+    # Launch the independent root CPU cap before stopping system_server,
+    # but do NOT allow ANY sysfs clock writes while One UI is still alive.
+    # The cap publishes PID/birth immediately, then only monitors until:
+    # stopped marker + stopped zygote(s) + absent system_server.
+    "$BB" setsid $SH "$STAGE/oneios_sm8850_thermal_cap.sh" --run-prearmed "$CTL" "$WD_GEN" \
+        8>&- </dev/null >>"$STAGE/thermal-cap.log" 2>&1 &
+    n=0
+    until framework_thermal_cap_prearmed; do
+        [ "$n" -lt 25 ] || break
+        sleep 0.2; n=$((n + 1))
+    done
+    if ! framework_thermal_cap_prearmed; then
+        armed="independent root CPU cap could not prearm read-only"
+    fi
+    [ -n "$armed" ] || printf '%s\n' "$WD_GEN" > "$CTL/thermal.cap.prearm.required" ||
+        armed="could not require prearmed independent CPU cap"
+    [ -n "$armed" ] || echo "CPU_THROTTLE=PREARMED_READ_ONLY_NO_SYSFS_WRITES_BEFORE_FRAMEWORK_STOP"
 fi
 # SM8850: the Android KEYCODE_WAKEUP request briefly raises both CPU
 # clusters' minimum-frequency votes on real One UI 9 hardware (~8 seconds).
@@ -2445,21 +2479,21 @@ if [ "$FRAMEWORK" = 1 ]; then
             fw_recover "available memory is below the benchmark minimum"
         framework_configure || fw_recover "could not set and verify vm.max_map_count"
     fi
-    # Restore the normal One UI clocks on any pre-stop refusal: this
-    # worker is only ever started AFTER stop_android_framework succeeded.
+    # The prearmed root worker has already been observing Framework state;
+    # it can set its FIRST strict CPU ceiling immediately when
+    # system_server is absent, before app-group drain and watchdog handoff.
+    # Here only confirm its current, enforced heartbeat before guest launch.
     if [ "$FW_MODE" = run ]; then
-        "$BB" setsid $SH "$STAGE/oneios_sm8850_thermal_cap.sh" --run "$CTL" "$WD_GEN" \
-            8>&- </dev/null >>"$STAGE/thermal-cap.log" 2>&1 &
         n=0
         until framework_thermal_cap_healthy; do
             [ "$n" -lt 25 ] || break
             sleep 0.2; n=$((n + 1))
         done
         framework_thermal_cap_healthy ||
-            fw_recover "independent root CPU thermal throttle could not arm after Framework stop"
+            fw_recover "prearmed root CPU throttle did not activate after Framework stop"
         printf '%s\n' "$WD_GEN" > "$CTL/thermal.cap.required" ||
             fw_recover "could not mark mandatory CPU thermal throttle"
-        echo "CPU_THROTTLE=ARMED_POST_STOP_MONOTONIC_60_40_28_18_12_8_MIN_FREQ_FLOOR"
+        echo "CPU_THROTTLE=PREARMED_ACTIVATED_POST_STOP_STRICT_60_40_28_18_12_8"
     fi
     printf '%s\n' "$((fw_tick + fw_seconds))" > "$CTL/framework.deadline.tmp" &&
         mv -f "$CTL/framework.deadline.tmp" "$CTL/framework.deadline" ||
