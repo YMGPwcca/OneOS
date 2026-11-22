@@ -2169,6 +2169,69 @@ if [ "$FRAMEWORK" = 1 ] && [ "$FW_MODE" = run ] && [ -z "$armed" ]; then
         armed="could not require independent thermal guard"
     [ -n "$armed" ] || echo "THERMAL_GUARD=ARMED_ROOT_BEFORE_FRAMEWORK_STOP; CPU_THROTTLE=ARM_AFTER_FRAMEWORK_STOP; LAST_RESORT_CPU=90C"
 fi
+# SM8850: the Android KEYCODE_WAKEUP request briefly raises both CPU
+# clusters' minimum-frequency votes on real One UI 9 hardware (~8 seconds).
+# If system_server is killed within that boost, Samsung's vendor minimum may
+# remain elevated and the post-stop CPU cap cannot enforce a lower ceiling.
+# Do this with One UI still alive, BEFORE the 45s framework-start cutoff.
+# Do not change kernel votes, thermal trips, or the CPU-cap fail-safe.
+if [ "$FRAMEWORK" = 1 ] && [ "$FW_MODE" = run ] && [ -z "$armed" ]; then
+    wake_cpu0=/sys/devices/system/cpu/cpufreq/policy0
+    wake_cpu6=/sys/devices/system/cpu/cpufreq/policy6
+    wake_floor0=$(cat "$wake_cpu0/cpuinfo_min_freq" 2>/dev/null) || wake_floor0=
+    wake_floor6=$(cat "$wake_cpu6/cpuinfo_min_freq" 2>/dev/null) || wake_floor6=
+    if ! watchdog_uint "$wake_floor0" || ! watchdog_uint "$wake_floor6" ||
+       [ "$wake_floor0" -lt 100000 ] || [ "$wake_floor6" -lt 100000 ]; then
+        armed="switch-panel-wake-refused: CPU hardware minimum frequencies unreadable"
+    elif ! timeout 5 input keyevent KEYCODE_WAKEUP >/dev/null 2>&1; then
+        armed="switch-panel-wake-refused: Android KEYCODE_WAKEUP failed"
+    else
+        # Three consecutive guard-healthy observations at/below the *hardware*
+        # CPU minimum and <60 C CPU/GPU/DDR. A boost, stale sample, missing
+        # input service, or high temperature must refuse before Framework stop.
+        wake_ok=0
+        wake_stable=0
+        wake_elapsed=0
+        while [ "$wake_elapsed" -lt 20 ]; do
+            if [ -e "$SESSION/return.request" ] ||
+               [ "$(getprop init.svc.zygote)" != running ] ||
+               ! pidof system_server >/dev/null 2>&1; then
+                break
+            fi
+            if ! framework_thermal_guard_healthy; then
+                break
+            fi
+            wake_min0=$(cat "$wake_cpu0/scaling_min_freq" 2>/dev/null) || break
+            wake_min6=$(cat "$wake_cpu6/scaling_min_freq" 2>/dev/null) || break
+            if ! watchdog_uint "$wake_min0" || ! watchdog_uint "$wake_min6"; then
+                break
+            fi
+            if [ "$wake_min0" -le "$wake_floor0" ] &&
+               [ "$wake_min6" -le "$wake_floor6" ] &&
+               [ "$th_cpu" -lt 60000 ] &&
+               [ "$th_gpu" -lt 60000 ] &&
+               [ "$th_ddr" -lt 60000 ]; then
+                wake_stable=$((wake_stable + 1))
+                if [ "$wake_stable" -ge 3 ]; then
+                    wake_ok=1
+                    break
+                fi
+            else
+                wake_stable=0
+            fi
+            sleep 1
+            wake_elapsed=$((wake_elapsed + 1))
+        done
+        if [ "$wake_ok" = 1 ]; then
+            echo "FRAMEWORK_PANEL_WAKE=ANDROID_KEYCODE_WAKEUP_PRE_STOP; CPU_MIN_COOLDOWN=THREE_HEALTHY_SAMPLES; CPU0_MIN_KHZ=$wake_min0; CPU6_MIN_KHZ=$wake_min6; CPU_PEAK_MC=$th_cpu; TOUCH_PANEL_POWER_NOT_CERTIFIED"
+        else
+            armed="switch-panel-wake-refused: CPU minimum boost or thermal sample not settled before Framework cutoff"
+        fi
+    fi
+    if [ -n "$armed" ]; then
+        echo "FRAMEWORK_PANEL_WAKE=BLOCKED_BEFORE_FRAMEWORK_STOP; REASON=$armed"
+    fi
+fi
 if [ "$FRAMEWORK" = 1 ] && [ -z "$armed" ]; then
     if fw_start=$(watchdog_now) && framework_pid_alive "$CTL/framework.watcher" &&
         printf '%s\n' "$((fw_start + 45))" > "$CTL/framework.cutoff"; then
@@ -2288,21 +2351,6 @@ if [ "$FRAMEWORK" = 1 ] &&
     exit 4
 fi
 [ "$FRAMEWORK" = 0 ] || echo "Watchdog: FRAMEWORK_OWNS -> TRANSFER_PENDING ($WD_TARGET)"
-# The exclusive 8-vCPU bench has bridges=0, so it cannot ask the
-# brightness bridge to wake the Samsung panel/touch IC after system_server
-# is gone. Do not inherit a sleeping/dim One UI screen into the guest.
-# Use Android's own input/power path while it is still healthy, before
-# making any irreversible Framework stop. This is NOT a guest touch proof.
-if [ "$FRAMEWORK" = 1 ] && [ "$FW_MODE" = run ]; then
-    if ! timeout 5 input keyevent KEYCODE_WAKEUP >/dev/null 2>&1; then
-        echo "FRAMEWORK_PANEL_WAKE=BLOCKED_ANDROID_KEYEVENT_FAILED; ONE_UI_NOT_STOPPED"
-        release_stop_lock
-        $SH "$SELF_RETURN" switch-panel-wake-refused
-        exit 4
-    fi
-    sleep 0.5
-    echo "FRAMEWORK_PANEL_WAKE=ANDROID_KEYCODE_WAKEUP_PRE_STOP; TOUCH_PANEL_POWER_NOT_CERTIFIED"
-fi
 if ! stop_android_framework; then
     release_stop_lock
     echo "Framework stop failed. Starting guarded return."
