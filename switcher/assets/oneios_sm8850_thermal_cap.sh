@@ -163,6 +163,17 @@ apply_cap() {
         uint "$got" && [ "$got" -le "$target" ] && [ "$got" -ge "$mn" ] || return 1
     done
 }
+# A prearmed process only observes Android until Framework is REALLY down.
+# The switch writes "stopped" before issuing ctl.stop, so the marker alone
+# MUST NOT be treated as permission to touch cpufreq sysfs.
+# This gate is shared with host-only synthetic tests.
+framework_down_for_cpu_cap() {
+    [ -f "$CTL/stopped" ] && [ ! -L "$CTL/stopped" ] || return 1
+    [ "$(getprop init.svc.zygote)" = stopped ] || return 1
+    [ "$(getprop init.svc.zygote_next)" = stopped ] || return 1
+    case "$(getprop init.svc.zygote_secondary)" in ''|stopped) ;; *) return 1 ;; esac
+    ! pidof system_server >/dev/null 2>&1
+}
 # The only nonroot write mode uses disposable synthetic sysfs, NEVER real sysfs.
 # It is for CachyOS tests and cannot name / or a live Android path.
 MODE=${1:-}
@@ -187,7 +198,7 @@ case "$MODE" in
         policies "" || die host_cpufreq_unavailable
         echo "P0_CPU_CAP=READ_ONLY_POLICY_AVAILABLE_NOT_CERTIFIED"
         exit 0 ;;
-    --run)
+    --run|--run-prearmed)
         [ "$#" = 3 ] || die args
         [ "$(id -u)" = 0 ] || die root_required
         CTL=$2 GEN=$3
@@ -203,7 +214,37 @@ case "$MODE" in
         echo -1000 > /proc/$$/oom_score_adj 2>/dev/null
         BIRTH=$(birth $$)
         [ -n "$BIRTH" ] || die no_pid_birth
-        atom thermal.cap.pid "$$ $BIRTH" || die cap_pid_write
+        atom thermal.cap.pid "$ $BIRTH" || die cap_pid_write
+        if [ "$MODE" = --run-prearmed ]; then
+            # Publish trusted PID/birth identity while still read-only.
+            # The switch validates this BEFORE it can stop system_server.
+            atom thermal.cap.prearmed "v1 $BOOT $GEN $ $BIRTH" ||
+                die cannot_publish_prearmed_pid
+            standby_start=$(tick) || fault standby_monotonic_clock
+            echo "P0_CPU_CAP=PREARMED_READ_ONLY boot=$BOOT generation=$GEN"
+            while [ "$GEN" = "$(cat "$CTL/watchdog.generation" 2>/dev/null)" ]; do
+                case "$(cat "$CTL/state" 2>/dev/null)" in
+                    returning|returned|failed) exit 0 ;;
+                    starting) ;;
+                    *) fault prearmed_invalid_session_state ;;
+                esac
+                [ ! -e "${CTL%/control}/session/return.request" ] || exit 0
+                [ ! -e "$CTL/thermal.guard.fault" ] ||
+                    fault prearmed_root_thermal_guard_fault
+                [ "$BOOT" = "$(cat /proc/sys/kernel/random/boot_id 2>/dev/null)" ] ||
+                    exit 0
+                if framework_down_for_cpu_cap; then
+                    echo "P0_CPU_CAP=FRAMEWORK_DOWN_VERIFIED_START_STRICT boot=$BOOT generation=$GEN"
+                    break
+                fi
+                standby_now=$(tick) || fault standby_monotonic_clock
+                if [ $((standby_now - standby_start)) -ge 40 ]; then
+                    fault prearmed_cap_framework_stop_not_confirmed
+                fi
+                sleep 0.2
+            done
+            [ "$GEN" = "$(cat "$CTL/watchdog.generation" 2>/dev/null)" ] || exit 0
+        fi
         level=0
         seq=0
         while [ "$GEN" = "$(cat "$CTL/watchdog.generation" 2>/dev/null)" ]; do
@@ -212,6 +253,7 @@ case "$MODE" in
                 starting|running) ;;
                 *) fault invalid_session_state ;;
             esac
+            [ ! -e "${CTL%/control}/session/return.request" ] || exit 0
             [ ! -e "$CTL/thermal.guard.fault" ] || fault thermal_guard_fault
             read -r ver hbboot hbgen pid pbirth hseq ht status cpu gpu ddr bat lrp ap extra \
                 < "$CTL/thermal.guard.heartbeat" || fault missing_root_guard_heartbeat
