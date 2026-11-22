@@ -2,8 +2,12 @@
 # SM8850 bounded GPU-3D iOS takeover thermal monitor, independently spawned
 # in init's namespace and root cgroup, NEVER inside xnuhost.
 # This source does not open watchdog, change thresholds, reboot, or stop UI.
-# It publishes fail-closed observations for OneOS's existing reboot-only
-# framework-deadline and watcher, which own all return/recovery actions.
+# Default: fail-closed observations for OneOS's reboot-only recovery.
+# Experimental --run-passive: keep sensor and generation validation plus
+# root-owned telemetry/heartbeats, but do not publish a SOFT overtemperature
+# fault. The cap worker handles an aggressive 28% max-frequency ceiling;
+# Samsung kernel/firmware thermal protection is NEVER modified.
+# Sensor loss, bad identities and failed heartbeats still fail closed.
 # Throttle-first experiment: 80 C is NOT a return point. The conservative
 # 90 C junction threshold is a last-resort runaway escape, NOT a certified
 # SM8850 critical trip. Guard still fails closed on missing sensors.
@@ -108,6 +112,8 @@ atom() {
     mv -f "$CTL/$1.tmp.$$" "$CTL/$1"
 }
 MODE=${1:-}
+PASSIVE=0
+[ "$MODE" != --run-passive ] || PASSIVE=1
 case "$MODE" in
     --check)
         [ "$#" = 2 ] || die usage
@@ -118,7 +124,7 @@ case "$MODE" in
         read_all "$BOOT" "$MAN" || die sensor_or_soft_cutoff
         echo "P0_THERMAL_GUARD=READ_ONLY_CURRENT_BOOT_READY_NOT_CERTIFIED"
         exit 0 ;;
-    --run)
+    --run|--run-passive)
         [ "$#" = 4 ] || die usage
         CTL=$2; MAN=$3; GEN=$4
         [ "$(id -u)" = 0 ] || die root_required
@@ -136,6 +142,7 @@ case "$MODE" in
         [ -n "$BIRTH" ] || die no_pid_birth
         atom thermal.guard.pid "$$ $BIRTH" || die cannot_record_pid
         seq=0
+        [ "$PASSIVE" != 1 ] || echo "P0_THERMAL_GUARD=PASSIVE_SOFT_TRIP_DISABLED SENSOR_READS_AND_HEARTBEATS_ACTIVE"
         while [ "$GEN" = "$(cat "$CTL/watchdog.generation" 2>/dev/null)" ]; do
             case "$(cat "$CTL/state" 2>/dev/null)" in
                 returning|returned|failed) exit 0 ;;
@@ -150,9 +157,16 @@ case "$MODE" in
                     *) reason=missing_or_invalid_sensor
                        detail= ;;
                 esac
-                atom thermal.guard.fault "$BOOT $GEN $$ $BIRTH $reason ${detail}" || :
-                echo "P0_THERMAL_GUARD=FAIL_CLOSED $reason ${detail}"
-                exit 4
+                if [ "$PASSIVE" = 1 ] && [ "$rc" = 2 ]; then
+                    # Experimental no-soft-trip mode: keep samples flowing
+                    # for the CPU cap and the read-only host logger. No
+                    # userspace thermal return is requested at 90C/95C.
+                    echo "P0_THERMAL_GUARD=PASSIVE_OVERRANGE_NO_SOFT_RETURN $detail"
+                else
+                    atom thermal.guard.fault "$BOOT $GEN $ $BIRTH $reason ${detail}" || :
+                    echo "P0_THERMAL_GUARD=FAIL_CLOSED $reason ${detail}"
+                    exit 4
+                fi
             fi
             seq=$((seq+1))
             tick=$(mono_seconds) || {
