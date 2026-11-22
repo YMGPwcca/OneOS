@@ -1475,19 +1475,20 @@ case "$MODE" in
                 die_inner "all 8 SM8850 host cores not accessible (online=$host_online allowed=$host_allowed)"
             echo "ONEIOS_TAKEOVER_CPU=8 host_online=$host_online host_allowed=$host_allowed"
             # Presence in the allowed mask is not per-vCPU affinity proof.
-            # The bench/bridges=0 path keeps touch isolation but does NOT
-            # initialize OneiOS's thermal bridge or the CPU topology bridge.
-            # Never enable bridges=1 as a shortcut: it can mutate unrelated
-            # phone hardware state. Kernel/firmware thermal guards remain.
-            echo "ONEIOS_BENCH_THERMAL_BRIDGE=INACTIVE_ROOT_GUARD_SEPARATE"
-            echo "ONEIOS_CPU_PLACEMENT_BRIDGE=INACTIVE_AFFINITY_BENCH_REQUIRED"
+            # Explicit, admitted SM8850 full-bridges profile: the guest uses
+            # the real CPU topology/cpufreq virtio MMIO, brightness/TSP,
+            # battery and thermal bridge, not the former affinity-only bench.
+            # Radio, haptics and encoder remain separately disabled on this
+            # first integration. The root thermal guard/cap NEVER relax.
+            echo "ONEIOS_BENCH_THERMAL_BRIDGE=ACTIVE_READ_ONLY_ROOT_GUARD_SEPARATE"
+            echo "ONEIOS_CPU_PLACEMENT_BRIDGE=ACTIVE_BRIDGES_1_CPU_PIN_1"
             echo "ONEIOS_GPU_3D=RUNTIME_KGSL_PROOF_REQUIRED"
             echo "ONEIOS_GPU_3D_MODE=REQUIRED_FAIL_CLOSED_NO_2D_FALLBACK"
             ulimit -c 0
             exec "/data/runtime/$R_XNUHOST" --session-abi 1 --mode bench \
                 --runtime /data/runtime --image /data/image --data /data/data --session /data/session \
                 --cpus 8 --ram 4G --set ram-giveback=0 --set ram-prefault=1 --set ram-lock=1 \
-                --set ram-huge=0 --set host-mem-log=5 --set bridges=0 --set panel-bridge=1 --set touch-sleep=0 --set cpu-affinity-bench=1 --set cpu-pin=1 --set wifi=off \
+                --set ram-huge=0 --set host-mem-log=5 --set bridges=1 --set sm8850-full-bridges=1 --set touch-sleep=0 --set cpu-affinity-bench=0 --set cpu-pin=1 --set wifi=off \
                 --set bluetooth=virtual --set haptics=off --set encoder=off --set return-graceful-ms=0 \
                 --gpu 3d --display shm --set touch-exclusive=1 --width 1080 --height 2340 --hz 60 \
                 --boot-args 'debug=0x14e serial=3 -v kt_fixed_zones=120 -no_slto_panic ml-timeout-lock-panic-scale=40 tlto_us=0 armcpu-self-ipi=1 armcpu-spi-ipi=1 use_contiguous_hint=0 interrupt-masked-debug-mode=0 sched_preemption_disable_debug_mode=0 wdt=-1 sheng-smp=1 oneios-data-wait=3000'
@@ -1994,7 +1995,7 @@ if [ "$FRAMEWORK" = 1 ]; then
         # remains bench/bridges=0 for exclusive touch: the OneiOS thermal
         # bridge and CPU topology/affinity bridge are not started here.
         echo "SM8850_FULL_RUN_GUEST_BOOT=PRIOR_PHYSICAL_OBSERVATION_NOT_A_NEW_SESSION_PASS"
-        echo "SM8850_FULL_RUN_THERMAL_BRIDGE=INACTIVE_BENCH_BRIDGES_0_ROOT_MONITOR_MANDATORY"
+        echo "SM8850_FULL_RUN_THERMAL_BRIDGE=ACTIVE_BRIDGES_1_ROOT_MONITOR_MANDATORY"
         echo "SM8850_FULL_RUN_CPU_AFFINITY=REQUIRES_XNUHOST_BENCH_AFFINITY_8_DISTINCT_CORES_LOG"
         echo "SM8850_FULL_RUN_GPU_3D=KGSL_OBSERVED_PRIOR_RUN_AUTO_FALLBACK_POSSIBLE"
         echo "SM8850_FULL_RUN_RECOVERY=DEADLINE_AND_UNASSISTED_RETURN_NOT_FULLY_VERIFIED"
@@ -2014,8 +2015,8 @@ if [ "$FRAMEWORK" = 1 ]; then
         # A stage-only OneOS update must NOT point the next live run at an
         # older xnuhost binary that lacks panel-bridge=1; fail before the
         # independent APFS Data clone can be consumed.
-        grep -Fq 'PANEL_BRIDGE=ACTIVE_ONLY_BRIGHTNESS_TSP' "$X" 2>/dev/null ||
-            framework_block "staged xnuhost lacks isolated panel bridge; rebuild and upgrade the native runtime before rearming Data"
+        grep -Fq 'SM8850_FULL_BRIDGES=ACTIVE' "$X" 2>/dev/null ||
+            framework_block "staged xnuhost lacks full bridges=1 Framework profile; rebuild and upgrade the native runtime before rearming Data"
         cap=$(awk '/^CapEff:/ {print $2}' "$P/$$/status")
         [ "$((0x${cap:-0} & 16384))" -ne 0 ] || framework_block "CAP_IPC_LOCK is absent"
         [ "$(df -Pk "$STAGE" | awk 'NR==2 {print $4}')" -ge 31457280 ] ||
