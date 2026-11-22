@@ -87,20 +87,32 @@ class FullRunThermalContract(unittest.TestCase):
                 self.assertEqual(expected, p.stdout.strip())
         self.assertEqual(2, policy(90000).returncode)
 
-    def test_no_soft_trip_only_on_explicit_180s_bridge_run(self):
+    def test_no_userspace_guard_or_cap_abort_only_on_explicit_180s(self):
         switch = SWITCH.read_text()
-        guard = GUARD.read_text()
         cap = CAP.read_text()
         self.assertIn('I_ACCEPT_SOFT_GUARD_OFF_180S', switch)
         self.assertIn('[ "$FW_DURATION" = 180 ]', switch)
-        self.assertIn('--run-passive "$CTL" "$STAGE/thermal.guard.manifest"', switch)
-        self.assertIn('--run-prearmed-floor "$CTL" "$WD_GEN"', switch)
-        self.assertIn('PASSIVE_OVERRANGE_NO_SOFT_RETURN', guard)
-        self.assertIn('PASSIVE_MONITOR_NO_SOFT_OVERHEAT_REBOOT', switch)
-        self.assertIn('apply_cap "" "$pct" lenient', cap)
-        self.assertIn('apply_cap "" "$pct" strict', cap)
-        self.assertIn('level=3', cap)
+        self.assertIn('SM8850_SOFT_THERMAL_GUARD=OFF_NOT_SPAWNED', switch)
+        self.assertIn('THERMAL_GUARD=OFF_NO_PROCESS_NO_HEARTBEAT_NO_SOFT_RETURN', switch)
+        self.assertIn('CPU_THROTTLE=POST_STOP_BEST_EFFORT_28_PERCENT_NO_FATAL_CAP_ERROR', switch)
+        self.assertIn('sm8850_no_userspace_thermal() {', switch)
+        self.assertIn('! sm8850_no_userspace_thermal', switch)
+        self.assertIn("printf 'disabled-180s\\n'", switch)
+        self.assertIn('--run-best-effort "$CTL" "$WD_GEN"', switch)
+        self.assertIn('P0_CPU_CAP=BEST_EFFORT_APPLY_FAILED_NO_RETURN', cap)
+        self.assertIn('apply_cap "" 28 lenient', cap)
+        # A new fixed-frequency helper has NO thermal guard heartbeat.
+        helper = cap.split('    --run-best-effort)', 1)[1].split(
+            '    --run|--run-prearmed|--run-prearmed-floor)', 1)[0]
+        self.assertNotIn('thermal.guard.heartbeat', helper)
+        self.assertNotIn('thermal.cap.fault', helper)
+        self.assertNotIn('fault ', helper)
+        self.assertIn('framework_down_for_cpu_cap', helper)
         self.assertNotIn('> "$pol/scaling_min_freq"', cap)
+        # The protected mode must still exist and remain strict.
+        self.assertIn('apply_cap "" "$pct" strict', cap)
+        self.assertIn('framework_thermal_guard_healthy', switch)
+        self.assertIn('framework_thermal_cap_healthy', switch)
 
     def test_root_guard_is_fullrun_only(self):
         guard = GUARD.read_text()
