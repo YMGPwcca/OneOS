@@ -2364,6 +2364,10 @@ if [ "$FRAMEWORK" = 1 ]; then
         [ "$(timeout 3 service check input)" = 'Service input: not found' ] ||
         fw_recover "Android input services did not stop with system_server"
     grep -E '^(MemAvailable|SwapFree):' "$P/meminfo"
+    # Capture the verified stop/drain milestone NOW, before the independent
+    # CPU cap worker is started. Worker startup must never extend a 300s
+    # request by several seconds.
+    fw_tick=$(watchdog_now) || fw_recover "cannot timestamp verified Framework stop"
     fw_seconds=10
     [ "$FRAMEWORK_REBOOT" != 1 ] || fw_seconds=20
     if [ "$FW_MODE" = run ]; then
@@ -2392,7 +2396,7 @@ if [ "$FRAMEWORK" = 1 ]; then
             fw_recover "could not mark mandatory CPU thermal throttle"
         echo "CPU_THROTTLE=ARMED_POST_STOP_MONOTONIC_60_40_28_18_12_8_MIN_FREQ_FLOOR"
     fi
-    fw_tick=$(watchdog_now) && printf '%s\n' "$((fw_tick + fw_seconds))" > "$CTL/framework.deadline.tmp" &&
+    printf '%s\n' "$((fw_tick + fw_seconds))" > "$CTL/framework.deadline.tmp" &&
         mv -f "$CTL/framework.deadline.tmp" "$CTL/framework.deadline" ||
         fw_recover "could not arm the phase deadline"
     echo "Framework stopped, app groups drained and Android input absent at uptime $fw_tick. Deadline: $((fw_tick + fw_seconds))"
