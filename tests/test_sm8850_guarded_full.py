@@ -69,10 +69,10 @@ class FullRunThermalContract(unittest.TestCase):
         self.assertIn('--set bridges=0 --set cpu-affinity-bench=1 --set cpu-pin=1', s)
         self.assertIn('framework_thermal_guard_healthy()', s)
         self.assertIn('framework_thermal_cap_healthy()', s)
-        self.assertIn('"$CTL/thermal.required"', s)
+        self.assertIn('"$CTL/thermal.guard.required"', s)
+        self.assertIn('"$CTL/thermal.cap.required"', s)
         self.assertIn('--run "$CTL" "$STAGE/thermal.guard.manifest" "$WD_GEN"', s)
         self.assertIn('--run "$CTL" "$WD_GEN"', s)
-        self.assertIn('PHYSICAL_KEYS', s.upper() + " PHYSICAL_KEYS")  # static-only
         self.assertIn('ONEIOS_GPU_3D_MODE=REQUIRED_FAIL_CLOSED_NO_2D_FALLBACK', s)
 
     def test_thermal_arms_before_framework_stop(self):
@@ -83,6 +83,7 @@ class FullRunThermalContract(unittest.TestCase):
         )
         self.assertIn('independent thermal monitor/cap missing, stale', s)
         self.assertIn('root thermal sensor manifest not qualified on current boot', s)
+        self.assertLess(s.index('=== [3/5]'), s.index('CPU_THROTTLE=ARMED_POST_STOP'))
 
 
 if __name__ == "__main__":
