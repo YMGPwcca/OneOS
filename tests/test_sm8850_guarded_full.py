@@ -71,7 +71,7 @@ class FullRunThermalContract(unittest.TestCase):
         self.assertIn('apply_cap "" "$pct" strict', cap)
         self.assertIn('framework_down_for_cpu_cap() {', cap)
         self.assertIn('--run-prearmed)', cap)
-        self.assertIn('atom thermal.cap.prearmed "v1 $BOOT $GEN $ $BIRTH"', cap)
+        self.assertIn('atom thermal.cap.prearmed "v1 $BOOT $GEN $$ $BIRTH"', cap)
         self.assertIn('if framework_down_for_cpu_cap; then', cap)
         self.assertIn('P0_CPU_CAP=PREARMED_READ_ONLY', cap)
         self.assertIn('P0_CPU_CAP=FRAMEWORK_DOWN_VERIFIED_START_STRICT', cap)
