@@ -1829,6 +1829,20 @@ if [ "$FRAMEWORK" = 1 ]; then
         [ "${#FW_DURATION}" -le 3 ] && [ "$FW_DURATION" -ge 60 ] && [ "$FW_DURATION" -le 600 ] ||
             framework_block "Framework duration must be 60..600 seconds"
     fi
+    # User-requested, one-session-only no-soft-thermal-trip experiment.
+    # No persistent property, Android thermal node, firmware limit or
+    # watchdog policy is changed. Only accepted for 180s full bridges=1.
+    FW_SOFT_THERMAL_OFF=0
+    if [ "$FW_MODE" = run ] &&
+       [ "${ONEIOS_SM8850_EXPERIMENT_NO_SOFT_THERMAL:-}" = I_ACCEPT_SOFT_GUARD_OFF_180S ]; then
+        [ "$FW_DURATION" = 180 ] ||
+            framework_block "passive thermal trial is restricted to 180 seconds"
+        FW_SOFT_THERMAL_OFF=1
+        echo "SM8850_SOFT_THERMAL_GUARD=PASSIVE_MONITOR_NO_SOFT_OVERHEAT_REBOOT"
+        echo "SM8850_CPU_UNDERCLOCK=FLOOR_AWARE_28_PERCENT_MAX_REQUEST"
+        echo "SM8850_KERNEL_FIRMWARE_THERMAL_PROTECTION=UNCHANGED"
+        echo "WARNING=FLOOR_LIMITED_CEILING_MAY_EXCEED_28_PERCENT"
+    fi
     [ "$APP" = 0 ] && framework_identity || framework_block "experimental profile requires SM-S948B/m3q/SM8850 firmware S948BXXS4BZIG with SELinux enforcing"
     if [ "$MODE" = --framework-session ]; then
         [ "$3" = I_ACCEPT_SM8850_FRAMEWORK_TAKEOVER ] || framework_block "explicit SM8850 framework takeover acknowledgement required"
@@ -2123,6 +2137,10 @@ if [ "$FRAMEWORK" = 1 ]; then
     if [ "$FW_MODE" = run ]; then
         printf '%s\n' "$FW_DURATION" > "$CTL/framework.duration" ||
             framework_setup_failed "could not record bounded duration"
+        if [ "$FW_SOFT_THERMAL_OFF" = 1 ]; then
+            printf 'monitor-only\n' > "$CTL/framework.soft-thermal" ||
+                framework_setup_failed "could not record explicitly accepted passive thermal mode"
+        fi
     fi
     if [ "$FRAMEWORK_REBOOT" = 1 ]; then
         printf 'reboot\n' > "$CTL/framework.return" ||
@@ -2184,8 +2202,13 @@ if [ "$FRAMEWORK" = 1 ] && [ "$FW_MODE" = run ] && [ -z "$armed" ]; then
     # Arm both root-side workers BEFORE Framework stops. Their PIDs,
     # birth tokens, heartbeat and emergency faults stay OUTSIDE the guest
     # cgroup. A failed admission never proceeds to stop system_server.
-    "$BB" setsid $SH "$STAGE/oneios_sm8850_thermal_takeover_guard.sh" --run "$CTL" "$STAGE/thermal.guard.manifest" "$WD_GEN" \
-        8>&- </dev/null >>"$STAGE/thermal-guard.log" 2>&1 &
+    if [ "$FW_SOFT_THERMAL_OFF" = 1 ]; then
+        "$BB" setsid $SH "$STAGE/oneios_sm8850_thermal_takeover_guard.sh" --run-passive "$CTL" "$STAGE/thermal.guard.manifest" "$WD_GEN" \
+            8>&- </dev/null >>"$STAGE/thermal-guard.log" 2>&1 &
+    else
+        "$BB" setsid $SH "$STAGE/oneios_sm8850_thermal_takeover_guard.sh" --run "$CTL" "$STAGE/thermal.guard.manifest" "$WD_GEN" \
+            8>&- </dev/null >>"$STAGE/thermal-guard.log" 2>&1 &
+    fi
     n=0
     until framework_thermal_guard_healthy; do
         [ "$n" -lt 25 ] || break
@@ -2196,15 +2219,26 @@ if [ "$FRAMEWORK" = 1 ] && [ "$FW_MODE" = run ] && [ -z "$armed" ]; then
     fi
     [ -n "$armed" ] || printf '%s\n' "$WD_GEN" > "$CTL/thermal.guard.required" ||
         armed="could not require independent thermal guard"
-    [ -n "$armed" ] || echo "THERMAL_GUARD=ARMED_ROOT_BEFORE_FRAMEWORK_STOP; CPU_THROTTLE=PREARM_BEFORE_STOP; LAST_RESORT_CPU=90C"
+    if [ -z "$armed" ]; then
+        if [ "$FW_SOFT_THERMAL_OFF" = 1 ]; then
+            echo "THERMAL_GUARD=PASSIVE_ROOT_TELEMETRY_NO_SOFT_CUTOFF; CPU_THROTTLE=FLOOR_AWARE_28PCT; KERNEL_GUARDS=UNCHANGED"
+        else
+            echo "THERMAL_GUARD=ARMED_ROOT_BEFORE_FRAMEWORK_STOP; CPU_THROTTLE=PREARM_BEFORE_STOP; LAST_RESORT_CPU=90C"
+        fi
+    fi
 fi
 if [ "$FRAMEWORK" = 1 ] && [ "$FW_MODE" = run ] && [ -z "$armed" ]; then
     # Launch the independent root CPU cap before stopping system_server,
     # but do NOT allow ANY sysfs clock writes while One UI is still alive.
     # The cap publishes PID/birth immediately, then only monitors until:
     # stopped marker + stopped zygote(s) + absent system_server.
-    "$BB" setsid $SH "$STAGE/oneios_sm8850_thermal_cap.sh" --run-prearmed "$CTL" "$WD_GEN" \
-        8>&- </dev/null >>"$STAGE/thermal-cap.log" 2>&1 &
+    if [ "$FW_SOFT_THERMAL_OFF" = 1 ]; then
+        "$BB" setsid $SH "$STAGE/oneios_sm8850_thermal_cap.sh" --run-prearmed-floor "$CTL" "$WD_GEN" \
+            8>&- </dev/null >>"$STAGE/thermal-cap.log" 2>&1 &
+    else
+        "$BB" setsid $SH "$STAGE/oneios_sm8850_thermal_cap.sh" --run-prearmed "$CTL" "$WD_GEN" \
+            8>&- </dev/null >>"$STAGE/thermal-cap.log" 2>&1 &
+    fi
     n=0
     until framework_thermal_cap_prearmed; do
         [ "$n" -lt 25 ] || break
@@ -2507,7 +2541,11 @@ if [ "$FRAMEWORK" = 1 ]; then
             fw_recover "prearmed root CPU throttle did not activate after Framework stop"
         printf '%s\n' "$WD_GEN" > "$CTL/thermal.cap.required" ||
             fw_recover "could not mark mandatory CPU thermal throttle"
-        echo "CPU_THROTTLE=PREARMED_ACTIVATED_POST_STOP_STRICT_60_40_28_18_12_8"
+        if [ "$FW_SOFT_THERMAL_OFF" = 1 ]; then
+            echo "CPU_THROTTLE=PREARMED_ACTIVATED_POST_STOP_FLOOR_AWARE_28_18_12_8"
+        else
+            echo "CPU_THROTTLE=PREARMED_ACTIVATED_POST_STOP_STRICT_60_40_28_18_12_8"
+        fi
     fi
     printf '%s\n' "$((fw_tick + fw_seconds))" > "$CTL/framework.deadline.tmp" &&
         mv -f "$CTL/framework.deadline.tmp" "$CTL/framework.deadline" ||
