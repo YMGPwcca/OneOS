@@ -245,8 +245,15 @@ case "$MODE" in
             done
             [ "$GEN" = "$(cat "$CTL/watchdog.generation" 2>/dev/null)" ] || exit 0
         fi
-        level=0
+        # SM8850 full-guest boot is an immediate CPU burst, not an idle
+        # workload. 60% at the first sample was too permissive for the
+        # previously observed 95 C pre-xnuhost thermal event. Start at
+        # level 2 (40%) on the first validated post-stop heartbeat.
+        # Do NOT lower scaling_min_freq or relax vendor/firmware protection.
+        # Subsequent cap levels remain monotonic and stricter when hot.
+        level=2
         seq=0
+        echo "P0_CPU_CAP=BOOT_STRICT_BASELINE_REQUESTED pct=40 boot=$BOOT generation=$GEN"
         while [ "$GEN" = "$(cat "$CTL/watchdog.generation" 2>/dev/null)" ]; do
             case "$(cat "$CTL/state" 2>/dev/null)" in
                 returning|returned|failed) exit 0 ;;
