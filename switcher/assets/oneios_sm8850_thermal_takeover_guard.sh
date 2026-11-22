@@ -163,7 +163,7 @@ case "$MODE" in
                     # userspace thermal return is requested at 90C/95C.
                     echo "P0_THERMAL_GUARD=PASSIVE_OVERRANGE_NO_SOFT_RETURN $detail"
                 else
-                    atom thermal.guard.fault "$BOOT $GEN $ $BIRTH $reason ${detail}" || :
+                    atom thermal.guard.fault "$BOOT $GEN $$ $BIRTH $reason ${detail}" || :
                     echo "P0_THERMAL_GUARD=FAIL_CLOSED $reason ${detail}"
                     exit 4
                 fi
