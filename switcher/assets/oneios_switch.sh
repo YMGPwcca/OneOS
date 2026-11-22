@@ -1410,15 +1410,15 @@ case "$MODE" in
             # initialize OneiOS's thermal bridge or the CPU topology bridge.
             # Never enable bridges=1 as a shortcut: it can mutate unrelated
             # phone hardware state. Kernel/firmware thermal guards remain.
-            echo "ONEIOS_BENCH_THERMAL_BRIDGE=INACTIVE"
-            echo "ONEIOS_CPU_PLACEMENT_BRIDGE=INACTIVE"
+            echo "ONEIOS_BENCH_THERMAL_BRIDGE=INACTIVE_ROOT_GUARD_SEPARATE"
+            echo "ONEIOS_CPU_PLACEMENT_BRIDGE=INACTIVE_AFFINITY_BENCH_REQUIRED"
             echo "ONEIOS_GPU_3D=RUNTIME_KGSL_PROOF_REQUIRED"
             echo "ONEIOS_GPU_3D_MODE=REQUIRED_FAIL_CLOSED_NO_2D_FALLBACK"
             ulimit -c 0
             exec "/data/runtime/$R_XNUHOST" --session-abi 1 --mode bench \
                 --runtime /data/runtime --image /data/image --data /data/data --session /data/session \
                 --cpus 8 --ram 4G --set ram-giveback=0 --set ram-prefault=1 --set ram-lock=1 \
-                --set ram-huge=0 --set host-mem-log=5 --set bridges=0 --set wifi=off \
+                --set ram-huge=0 --set host-mem-log=5 --set bridges=0 --set cpu-affinity-bench=1 --set cpu-pin=1 --set wifi=off \
                 --set bluetooth=virtual --set haptics=off --set encoder=off --set return-graceful-ms=0 \
                 --gpu 3d --display shm --set touch-exclusive=1 --width 1080 --height 2340 --hz 60 \
                 --boot-args 'debug=0x14e serial=3 -v kt_fixed_zones=120 -no_slto_panic ml-timeout-lock-panic-scale=40 tlto_us=0 armcpu-self-ipi=1 armcpu-spi-ipi=1 use_contiguous_hint=0 interrupt-masked-debug-mode=0 sched_preemption_disable_debug_mode=0 wdt=-1 sheng-smp=1 oneios-data-wait=3000'
@@ -1745,6 +1745,20 @@ if [ "$FRAMEWORK" = 1 ]; then
     esac
     FW_MODE=$2
     [ "$FW_MODE" != reboot-smoke ] || FW_MODE=smoke
+    # Bounded, operator-selected duration measured from Framework stop.
+    FW_DURATION=600
+    if [ "$FW_MODE" = run ]; then
+        if [ "$MODE" = --framework-check ]; then
+            [ "$#" -le 3 ] || framework_block "unexpected duration arguments"
+            FW_DURATION=${3:-600}
+        else
+            [ "$#" -le 6 ] || framework_block "unexpected duration arguments"
+            FW_DURATION=${6:-600}
+        fi
+        case "$FW_DURATION" in ''|0*|*[!0-9]*) framework_block "invalid numeric Framework duration" ;; esac
+        [ "${#FW_DURATION}" -le 3 ] && [ "$FW_DURATION" -ge 60 ] && [ "$FW_DURATION" -le 600 ] ||
+            framework_block "Framework duration must be 60..600 seconds"
+    fi
     [ "$APP" = 0 ] && framework_identity || framework_block "experimental profile requires SM-S948B/m3q/SM8850 firmware S948BXXS4BZIG with SELinux enforcing"
     if [ "$MODE" = --framework-session ]; then
         [ "$3" = I_ACCEPT_SM8850_FRAMEWORK_TAKEOVER ] || framework_block "explicit SM8850 framework takeover acknowledgement required"
@@ -1912,7 +1926,7 @@ if [ "$FRAMEWORK" = 1 ]; then
         # bridge and CPU topology/affinity bridge are not started here.
         echo "SM8850_FULL_RUN_GUEST_BOOT=PRIOR_PHYSICAL_OBSERVATION_NOT_A_NEW_SESSION_PASS"
         echo "SM8850_FULL_RUN_THERMAL_BRIDGE=INACTIVE_BENCH_BRIDGES_0"
-        echo "SM8850_FULL_RUN_CPU_AFFINITY=NOT_PROVEN_BY_MASK_0_7"
+        echo "SM8850_FULL_RUN_CPU_AFFINITY=REQUIRES_XNUHOST_BENCH_AFFINITY_8_DISTINCT_CORES_LOG"
         echo "SM8850_FULL_RUN_GPU_3D=KGSL_OBSERVED_PRIOR_RUN_AUTO_FALLBACK_POSSIBLE"
         echo "SM8850_FULL_RUN_RECOVERY=DEADLINE_AND_UNASSISTED_RETURN_NOT_FULLY_VERIFIED"
         root_only "$STAGE/data" && root_only "$STAGE/data/data.img" && root_only "$STAGE/data/unique-chip-id" &&
@@ -2016,6 +2030,10 @@ if [ "$FRAMEWORK" = 1 ]; then
     mkdir "$CTL/captures" || framework_setup_failed "could not prepare screenshot directory"
     printf '%s\n' "$FW_MODE" > "$CTL/framework.mode" || framework_setup_failed "could not record framework mode"
     printf '%s\n' "$FW_LAUNCH" > "$CTL/framework.launch" || framework_setup_failed "could not record framework log identifier"
+    if [ "$FW_MODE" = run ]; then
+        printf '%s\n' "$FW_DURATION" > "$CTL/framework.duration" ||
+            framework_setup_failed "could not record bounded duration"
+    fi
     if [ "$FRAMEWORK_REBOOT" = 1 ]; then
         printf 'reboot\n' > "$CTL/framework.return" ||
             framework_setup_failed "cannot record mandatory reboot-only return"
@@ -2270,10 +2288,11 @@ if [ "$FRAMEWORK" = 1 ]; then
     fw_seconds=10
     [ "$FRAMEWORK_REBOOT" != 1 ] || fw_seconds=20
     if [ "$FW_MODE" = run ]; then
-        # Exactly ten minutes from verified Framework stop, not from ADB
-        # launch. The independent framework-deadline guard stays active
-        # even if xnuhost hangs or USB disconnects.
-        fw_seconds=600
+        # Exactly the requested 60..600s from verified Framework stop.
+        # Independent framework-deadline survives guest/USB failures.
+        fw_seconds=$FW_DURATION
+        [ "$(cat "$CTL/framework.duration" 2>/dev/null)" = "$FW_DURATION" ] ||
+            fw_recover "bounded duration marker missing or mismatched"
         [ "$(awk '/^MemAvailable:/ {print $2}' "$P/meminfo")" -ge 5500000 ] ||
             fw_recover "available memory is below the benchmark minimum"
         framework_configure || fw_recover "could not set and verify vm.max_map_count"
