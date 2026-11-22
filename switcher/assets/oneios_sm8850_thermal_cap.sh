@@ -111,8 +111,30 @@ policies() {
 # report the floor honestly; root thermal guard still owns runaway recovery.
 # A target never raises an existing tighter cap; readback must not exceed it.
 apply_cap() {
-    root=$1 pct=$2
+    root=$1 pct=$2 strict=${3:-lenient}
+    case "$strict" in lenient|strict) ;; *) return 1 ;; esac
     policies "$root" || return 1
+
+    # A Samsung PM QoS / performance minimum may rise independently of
+    # scaling_max_freq. In LIVE mode, a claimed 28%/40% cap is unsafe if
+    # the minimum vote exceeds that cap. Fail closed before writing anything.
+    # The original lenient mode remains available ONLY for synthetic
+    # tests of the clamping algorithm; never use it for the live worker.
+    if [ "$strict" = strict ]; then
+        for pol in "$root"/sys/devices/system/cpu/cpufreq/policy*; do
+            [ -d "$pol" ] || continue
+            hw=$(cat "$pol/cpuinfo_max_freq" 2>/dev/null) || return 1
+            mn=$(cat "$pol/cpuinfo_min_freq" 2>/dev/null) || return 1
+            active_min=$(cat "$pol/scaling_min_freq" 2>/dev/null) || return 1
+            requested=$((hw / 100 * pct))
+            [ "$requested" -ge "$mn" ] || requested=$mn
+            if [ "$active_min" -gt "$requested" ]; then
+                echo "P0_CPU_CAP=UNENFORCEABLE_MIN_VOTE policy=${pol##*/} pct=$pct requested_khz=$requested scaling_min_khz=$active_min boot=${BOOT:-fixture} generation=${GEN:-fixture}"
+                return 2
+            fi
+        done
+    fi
+
     for pol in "$root"/sys/devices/system/cpu/cpufreq/policy*; do
         [ -d "$pol" ] || continue
         hw=$(cat "$pol/cpuinfo_max_freq" 2>/dev/null) || return 1
@@ -125,6 +147,12 @@ apply_cap() {
         [ "$target" -ge "$mn" ] || target=$mn
         requested=$target
         if [ "$target" -lt "$active_min" ]; then
+            # Re-check in case the vendor vote rose after the strict first
+            # pass. Do not silently report heartbeat OK on an impossible cap.
+            if [ "$strict" = strict ]; then
+                echo "P0_CPU_CAP=UNENFORCEABLE_MIN_VOTE policy=${pol##*/} pct=$pct requested_khz=$requested scaling_min_khz=$active_min boot=${BOOT:-fixture} generation=${GEN:-fixture}"
+                return 2
+            fi
             target=$active_min
             echo "P0_CPU_CAP=MIN_FLOOR_LIMITED policy=${pol##*/} pct=$pct requested_khz=$requested scaling_min_khz=$active_min effective_target_khz=$target boot=${BOOT:-fixture} generation=${GEN:-fixture}"
         fi
@@ -142,14 +170,16 @@ case "$MODE" in
     --policy)
         shift
         policy "$@"; exit $? ;;
-    --fixture-step)
+    --fixture-step|--fixture-strict-step)
         [ "$#" = 3 ] || die fixture_args
         [ "$(id -u)" != 0 ] || die fixture_must_be_unprivileged
         case "$2" in /tmp/oneios-cpu-cap-test.*) ;; *) die fixture_path ;; esac
         [ -d "$2" ] && [ ! -L "$2" ] || die fixture_root
         case "$3" in 60|40|28|18|12|8) ;; *) die invalid_fixture_percent ;; esac
-        apply_cap "$2" "$3" || die fixture_policy_failed
-        echo "P0_CPU_CAP=FIXTURE_APPLIED pct=$3"
+        fixture_strict=lenient
+        [ "$MODE" != --fixture-strict-step ] || fixture_strict=strict
+        apply_cap "$2" "$3" "$fixture_strict" || die fixture_policy_failed
+        echo "P0_CPU_CAP=FIXTURE_APPLIED pct=$3 strict=$fixture_strict"
         exit 0 ;;
     --check)
         [ "$#" = 1 ] || die args
@@ -201,7 +231,17 @@ case "$MODE" in
             pct=${choice#*:}
             # Only write to sysfs on a level change. Re-validate every tick
             # that no cluster has escaped the currently demanded cap.
-            apply_cap "" "$pct" || fault cpufreq_write_or_readback
+            # A heartbeat is NOT proof of a working thermal ceiling if a
+            # vendor performance vote forces scaling_min_freq above the
+            # requested ceiling. Abort through the existing independent
+            # watcher before a 90 C emergency instead of silently clamping.
+            apply_cap "" "$pct" strict
+            cap_rc=$?
+            case "$cap_rc" in
+                0) ;;
+                2) fault "unachievable_cpu_cap_floor level=$desired pct=$pct" ;;
+                *) fault cpufreq_write_or_readback ;;
+            esac
             level=$desired
             seq=$((seq+1))
             atom thermal.cap.heartbeat "v1 $BOOT $GEN $$ $BIRTH $seq $now OK $level $pct" ||
