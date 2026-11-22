@@ -383,8 +383,12 @@ class FullRunThermalContract(unittest.TestCase):
         self.assertIn('FRAMEWORK_FINAL_WAKE=KEYCODE_WAKEUP_IMMEDIATELY_PRE_STOP', body)
         self.assertLess(body.index('input keyevent KEYCODE_WAKEUP'),
                         body.index('> "$CTL/stopped"'))
+        # Match the actual shell statement, not the earlier comment
+        # "Never run input AFTER setprop ctl.stop zygote".
+        stop_command = '\n    setprop ctl.stop zygote\n'
+        self.assertEqual(1, body.count(stop_command))
         self.assertLess(body.index('> "$CTL/stopped"'),
-                        body.index('setprop ctl.stop zygote'))
+                        body.index(stop_command))
     def test_cpu_cap_framework_down_gate_synthetic(self):
         # Execute the REAL gate on a fake control directory. No phone,
         # no root privileges, and no cpufreq writes.
