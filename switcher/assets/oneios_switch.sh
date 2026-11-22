@@ -1487,7 +1487,7 @@ case "$MODE" in
             exec "/data/runtime/$R_XNUHOST" --session-abi 1 --mode bench \
                 --runtime /data/runtime --image /data/image --data /data/data --session /data/session \
                 --cpus 8 --ram 4G --set ram-giveback=0 --set ram-prefault=1 --set ram-lock=1 \
-                --set ram-huge=0 --set host-mem-log=5 --set bridges=0 --set cpu-affinity-bench=1 --set cpu-pin=1 --set wifi=off \
+                --set ram-huge=0 --set host-mem-log=5 --set bridges=0 --set panel-bridge=1 --set touch-sleep=0 --set cpu-affinity-bench=1 --set cpu-pin=1 --set wifi=off \
                 --set bluetooth=virtual --set haptics=off --set encoder=off --set return-graceful-ms=0 \
                 --gpu 3d --display shm --set touch-exclusive=1 --width 1080 --height 2340 --hz 60 \
                 --boot-args 'debug=0x14e serial=3 -v kt_fixed_zones=120 -no_slto_panic ml-timeout-lock-panic-scale=40 tlto_us=0 armcpu-self-ipi=1 armcpu-spi-ipi=1 use_contiguous_hint=0 interrupt-masked-debug-mode=0 sched_preemption_disable_debug_mode=0 wdt=-1 sheng-smp=1 oneios-data-wait=3000'
@@ -2011,6 +2011,11 @@ if [ "$FRAMEWORK" = 1 ]; then
             framework_block "the independent APFS Data snapshot is missing or unsafe"
         [ -w "$P/sys/vm/max_map_count" ] || framework_block "vm.max_map_count cannot be restored"
         [ -x "$STAGE/runtime/bin/oneios-display" ] || framework_block "the benchmark display helper is missing"
+        # A stage-only OneOS update must NOT point the next live run at an
+        # older xnuhost binary that lacks panel-bridge=1; fail before the
+        # independent APFS Data clone can be consumed.
+        grep -Fq 'PANEL_BRIDGE=ACTIVE_ONLY_BRIGHTNESS_TSP' "$X" 2>/dev/null ||
+            framework_block "staged xnuhost lacks isolated panel bridge; rebuild and upgrade the native runtime before rearming Data"
         cap=$(awk '/^CapEff:/ {print $2}' "$P/$$/status")
         [ "$((0x${cap:-0} & 16384))" -ne 0 ] || framework_block "CAP_IPC_LOCK is absent"
         [ "$(df -Pk "$STAGE" | awk 'NR==2 {print $4}')" -ge 31457280 ] ||
