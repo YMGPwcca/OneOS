@@ -2288,6 +2288,21 @@ if [ "$FRAMEWORK" = 1 ] &&
     exit 4
 fi
 [ "$FRAMEWORK" = 0 ] || echo "Watchdog: FRAMEWORK_OWNS -> TRANSFER_PENDING ($WD_TARGET)"
+# The exclusive 8-vCPU bench has bridges=0, so it cannot ask the
+# brightness bridge to wake the Samsung panel/touch IC after system_server
+# is gone. Do not inherit a sleeping/dim One UI screen into the guest.
+# Use Android's own input/power path while it is still healthy, before
+# making any irreversible Framework stop. This is NOT a guest touch proof.
+if [ "$FRAMEWORK" = 1 ] && [ "$FW_MODE" = run ]; then
+    if ! timeout 5 input keyevent KEYCODE_WAKEUP >/dev/null 2>&1; then
+        echo "FRAMEWORK_PANEL_WAKE=BLOCKED_ANDROID_KEYEVENT_FAILED; ONE_UI_NOT_STOPPED"
+        release_stop_lock
+        $SH "$SELF_RETURN" switch-panel-wake-refused
+        exit 4
+    fi
+    sleep 0.5
+    echo "FRAMEWORK_PANEL_WAKE=ANDROID_KEYCODE_WAKEUP_PRE_STOP; TOUCH_PANEL_POWER_NOT_CERTIFIED"
+fi
 if ! stop_android_framework; then
     release_stop_lock
     echo "Framework stop failed. Starting guarded return."
