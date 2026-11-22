@@ -2274,6 +2274,17 @@ fi
 # Do this with One UI still alive, BEFORE the 45s framework-start cutoff.
 # Do not change kernel votes, thermal trips, or the CPU-cap fail-safe.
 if [ "$FRAMEWORK" = 1 ] && [ "$FW_MODE" = run ] && [ -z "$armed" ]; then
+    if [ "$FW_SOFT_THERMAL_OFF" = 1 ]; then
+        # Only panel wake; no userspace thermal readings or guard gate.
+        # Give Samsung wake boost time to settle, then let the non-fatal
+        # post-stop cap worker handle any remaining minimum-frequency vote.
+        if ! timeout 5 input keyevent KEYCODE_WAKEUP >/dev/null 2>&1; then
+            armed="switch-panel-wake-refused: Android KEYCODE_WAKEUP failed"
+        else
+            sleep 8
+            echo "FRAMEWORK_PANEL_WAKE=EXPERIMENTAL_8S_COOLDOWN_NO_SOFTWARE_THERMAL_GATE"
+        fi
+    else
     wake_cpu0=/sys/devices/system/cpu/cpufreq/policy0
     wake_cpu6=/sys/devices/system/cpu/cpufreq/policy6
     wake_floor0=$(cat "$wake_cpu0/cpuinfo_min_freq" 2>/dev/null) || wake_floor0=
@@ -2327,6 +2338,7 @@ if [ "$FRAMEWORK" = 1 ] && [ "$FW_MODE" = run ] && [ -z "$armed" ]; then
         else
             armed="switch-panel-wake-refused: CPU floor or thermal sample unsettled (CPU0_MIN=${wake_min0:-unreadable}, CPU6_MIN=${wake_min6:-unreadable}, CPU_MC=${th_cpu:-unreadable}, elapsed=${wake_elapsed}s)"
         fi
+    fi
     fi
     if [ -n "$armed" ]; then
         echo "FRAMEWORK_PANEL_WAKE=BLOCKED_BEFORE_FRAMEWORK_STOP; REASON=$armed"
@@ -2548,18 +2560,22 @@ if [ "$FRAMEWORK" = 1 ]; then
     # system_server is absent, before app-group drain and watchdog handoff.
     # Here only confirm its current, enforced heartbeat before guest launch.
     if [ "$FW_MODE" = run ]; then
-        n=0
-        until framework_thermal_cap_healthy; do
-            [ "$n" -lt 25 ] || break
-            sleep 0.2; n=$((n + 1))
-        done
-        framework_thermal_cap_healthy ||
-            fw_recover "prearmed root CPU throttle did not activate after Framework stop"
-        printf '%s\n' "$WD_GEN" > "$CTL/thermal.cap.required" ||
-            fw_recover "could not mark mandatory CPU thermal throttle"
         if [ "$FW_SOFT_THERMAL_OFF" = 1 ]; then
-            echo "CPU_THROTTLE=PREARMED_ACTIVATED_POST_STOP_FLOOR_AWARE_28_18_12_8"
+            # Optional non-fatal 28% cap: no guard heartbeat, no cap-health
+            # dependency and no reboot on cap write/readback failure.
+            "$BB" setsid $SH "$STAGE/oneios_sm8850_thermal_cap.sh" --run-best-effort "$CTL" "$WD_GEN" \
+                8>&- </dev/null >>"$STAGE/thermal-cap.log" 2>&1 &
+            echo "CPU_THROTTLE=POST_STOP_BEST_EFFORT_28_PERCENT_NO_FATAL_CAP_ERROR"
         else
+            n=0
+            until framework_thermal_cap_healthy; do
+                [ "$n" -lt 25 ] || break
+                sleep 0.2; n=$((n + 1))
+            done
+            framework_thermal_cap_healthy ||
+                fw_recover "prearmed root CPU throttle did not activate after Framework stop"
+            printf '%s\n' "$WD_GEN" > "$CTL/thermal.cap.required" ||
+                fw_recover "could not mark mandatory CPU thermal throttle"
             echo "CPU_THROTTLE=PREARMED_ACTIVATED_POST_STOP_STRICT_60_40_28_18_12_8"
         fi
     fi
