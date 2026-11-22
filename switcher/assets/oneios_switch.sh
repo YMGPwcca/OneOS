@@ -531,6 +531,17 @@ framework_apps_empty() {
     done
 }
 
+# This opt-in is pinned to the current session and its exact 180s duration.
+# Recovery deadline and watchdog remain active; only OneOS software thermal
+# monitor/cap health dependencies are omitted in this experiment.
+sm8850_no_userspace_thermal() {
+    [ "$FRAMEWORK" = 1 ] &&
+    [ "$(cat "$CTL/framework.soft-thermal" 2>/dev/null)" = disabled-180s ] &&
+    [ "$(cat "$CTL/framework.mode" 2>/dev/null)" = run ] &&
+    [ "$(cat "$CTL/framework.duration" 2>/dev/null)" = 180 ] &&
+    [ "$(cat "$CTL/boot" 2>/dev/null)" = "$(boot_id)" ]
+}
+
 framework_deadline() {
     [ "$FRAMEWORK" = 1 ] && [ -n "$1" ] && [ "$(watchdog_generation)" = "$1" ] || return 0
     WD_GEN=$1
@@ -546,6 +557,7 @@ framework_deadline() {
         elif ! framework_pid_alive "$CTL/framework.watcher"; then
             why="framework watcher lost"
         elif [ "$(cat "$CTL/framework.mode" 2>/dev/null)" = run ] &&
+             ! sm8850_no_userspace_thermal &&
              { [ "$(cat "$CTL/thermal.guard.required" 2>/dev/null)" != "$WD_GEN" ] ||
                ! framework_thermal_guard_healthy ||
                [ "$(cat "$CTL/thermal.cap.prearm.required" 2>/dev/null)" != "$WD_GEN" ] ||
@@ -637,7 +649,7 @@ framework_thermal_cap_healthy() {
 }
 framework_recovery_ready() {
     framework_pid_alive "$CTL/framework.guard" && framework_pid_alive "$CTL/framework.watcher" || return 1
-    if [ "$(cat "$CTL/framework.mode" 2>/dev/null)" = run ]; then
+    if [ "$(cat "$CTL/framework.mode" 2>/dev/null)" = run ] && ! sm8850_no_userspace_thermal; then
         [ "$(cat "$CTL/thermal.guard.required" 2>/dev/null)" = "$(watchdog_generation)" ] &&
             framework_thermal_guard_healthy || return 1
         # The CPU-cap PROCESS is prearmed before Framework stop but
@@ -1838,8 +1850,8 @@ if [ "$FRAMEWORK" = 1 ]; then
         [ "$FW_DURATION" = 180 ] ||
             framework_block "passive thermal trial is restricted to 180 seconds"
         FW_SOFT_THERMAL_OFF=1
-        echo "SM8850_SOFT_THERMAL_GUARD=PASSIVE_MONITOR_NO_SOFT_OVERHEAT_REBOOT"
-        echo "SM8850_CPU_UNDERCLOCK=FLOOR_AWARE_28_PERCENT_MAX_REQUEST"
+        echo "SM8850_SOFT_THERMAL_GUARD=OFF_NOT_SPAWNED"
+        echo "SM8850_CPU_CAP_FAILURE=NONFATAL_BEST_EFFORT_28_PERCENT"
         echo "SM8850_KERNEL_FIRMWARE_THERMAL_PROTECTION=UNCHANGED"
         echo "WARNING=FLOOR_LIMITED_CEILING_MAY_EXCEED_28_PERCENT"
     fi
@@ -2021,13 +2033,22 @@ if [ "$FRAMEWORK" = 1 ]; then
         echo "SM8850_FULL_RUN_CPU_AFFINITY=REQUIRES_XNUHOST_BENCH_AFFINITY_8_DISTINCT_CORES_LOG"
         echo "SM8850_FULL_RUN_GPU_3D=KGSL_OBSERVED_PRIOR_RUN_AUTO_FALLBACK_POSSIBLE"
         echo "SM8850_FULL_RUN_RECOVERY=DEADLINE_AND_UNASSISTED_RETURN_NOT_FULLY_VERIFIED"
-        for th_file in oneios_sm8850_thermal_takeover_guard.sh oneios_sm8850_thermal_cap.sh thermal.guard.manifest; do
-            root_only "$STAGE/$th_file" || framework_block "untrusted or missing independent thermal asset $th_file"
-        done
-        $SH "$STAGE/oneios_sm8850_thermal_takeover_guard.sh" --check "$STAGE/thermal.guard.manifest" ||
-            framework_block "root thermal sensor manifest not qualified on current boot"
-        $SH "$STAGE/oneios_sm8850_thermal_cap.sh" --check ||
-            framework_block "root CPU cap policy nodes not writable or unverifiable"
+        if [ "$FW_SOFT_THERMAL_OFF" = 1 ]; then
+            # No software thermal monitor or mandatory CPU-cap worker.
+            # Best-effort fixed 28% cap is applied only once Framework is DOWN.
+            root_only "$STAGE/oneios_sm8850_thermal_cap.sh" ||
+                framework_block "untrusted optional underclock helper"
+            echo "SM8850_SOFTWARE_THERMAL_MONITOR=DISABLED_FOR_180S"
+            echo "SM8850_CPU_CAP_ADMISSION=OPTIONAL_NO_FAULT_RETURN"
+        else
+            for th_file in oneios_sm8850_thermal_takeover_guard.sh oneios_sm8850_thermal_cap.sh thermal.guard.manifest; do
+                root_only "$STAGE/$th_file" || framework_block "untrusted or missing independent thermal asset $th_file"
+            done
+            $SH "$STAGE/oneios_sm8850_thermal_takeover_guard.sh" --check "$STAGE/thermal.guard.manifest" ||
+                framework_block "root thermal sensor manifest not qualified on current boot"
+            $SH "$STAGE/oneios_sm8850_thermal_cap.sh" --check ||
+                framework_block "root CPU cap policy nodes not writable or unverifiable"
+        fi
         root_only "$STAGE/data" && root_only "$STAGE/data/data.img" && root_only "$STAGE/data/unique-chip-id" &&
             [ "$(stat -c '%s:%h' "$STAGE/data/data.img")" = 8589934592:1 ] &&
             [ "$(stat -c '%s:%h' "$STAGE/data/unique-chip-id")" = 8:1 ] ||
@@ -2138,8 +2159,8 @@ if [ "$FRAMEWORK" = 1 ]; then
         printf '%s\n' "$FW_DURATION" > "$CTL/framework.duration" ||
             framework_setup_failed "could not record bounded duration"
         if [ "$FW_SOFT_THERMAL_OFF" = 1 ]; then
-            printf 'monitor-only\n' > "$CTL/framework.soft-thermal" ||
-                framework_setup_failed "could not record explicitly accepted passive thermal mode"
+            printf 'disabled-180s\n' > "$CTL/framework.soft-thermal" ||
+                framework_setup_failed "could not record explicitly accepted no-software-guard mode"
         fi
     fi
     if [ "$FRAMEWORK_REBOOT" = 1 ]; then
@@ -2203,28 +2224,24 @@ if [ "$FRAMEWORK" = 1 ] && [ "$FW_MODE" = run ] && [ -z "$armed" ]; then
     # birth tokens, heartbeat and emergency faults stay OUTSIDE the guest
     # cgroup. A failed admission never proceeds to stop system_server.
     if [ "$FW_SOFT_THERMAL_OFF" = 1 ]; then
-        "$BB" setsid $SH "$STAGE/oneios_sm8850_thermal_takeover_guard.sh" --run-passive "$CTL" "$STAGE/thermal.guard.manifest" "$WD_GEN" \
-            8>&- </dev/null >>"$STAGE/thermal-guard.log" 2>&1 &
+        # Intentional: no thermal guard process is started, and no
+        # temperature fault/heartbeat is required by the independent watcher.
+        echo "THERMAL_GUARD=OFF_NO_PROCESS_NO_HEARTBEAT_NO_SOFT_RETURN"
+        echo "CPU_CAP=NONFATAL_FIXED_28_PERCENT_AFTER_FRAMEWORK_STOP"
     else
         "$BB" setsid $SH "$STAGE/oneios_sm8850_thermal_takeover_guard.sh" --run "$CTL" "$STAGE/thermal.guard.manifest" "$WD_GEN" \
             8>&- </dev/null >>"$STAGE/thermal-guard.log" 2>&1 &
-    fi
-    n=0
-    until framework_thermal_guard_healthy; do
-        [ "$n" -lt 25 ] || break
-        sleep 0.2; n=$((n + 1))
-    done
-    if ! framework_thermal_guard_healthy; then
-        armed="independent root thermal monitor did not start"
-    fi
-    [ -n "$armed" ] || printf '%s\n' "$WD_GEN" > "$CTL/thermal.guard.required" ||
-        armed="could not require independent thermal guard"
-    if [ -z "$armed" ]; then
-        if [ "$FW_SOFT_THERMAL_OFF" = 1 ]; then
-            echo "THERMAL_GUARD=PASSIVE_ROOT_TELEMETRY_NO_SOFT_CUTOFF; CPU_THROTTLE=FLOOR_AWARE_28PCT; KERNEL_GUARDS=UNCHANGED"
-        else
-            echo "THERMAL_GUARD=ARMED_ROOT_BEFORE_FRAMEWORK_STOP; CPU_THROTTLE=PREARM_BEFORE_STOP; LAST_RESORT_CPU=90C"
+        n=0
+        until framework_thermal_guard_healthy; do
+            [ "$n" -lt 25 ] || break
+            sleep 0.2; n=$((n + 1))
+        done
+        if ! framework_thermal_guard_healthy; then
+            armed="independent root thermal monitor did not start"
         fi
+        [ -n "$armed" ] || printf '%s\n' "$WD_GEN" > "$CTL/thermal.guard.required" ||
+            armed="could not require independent thermal guard"
+        [ -n "$armed" ] || echo "THERMAL_GUARD=ARMED_ROOT_BEFORE_FRAMEWORK_STOP; CPU_THROTTLE=PREARM_BEFORE_STOP; LAST_RESORT_CPU=90C"
     fi
 fi
 if [ "$FRAMEWORK" = 1 ] && [ "$FW_MODE" = run ] && [ -z "$armed" ]; then
@@ -2233,23 +2250,22 @@ if [ "$FRAMEWORK" = 1 ] && [ "$FW_MODE" = run ] && [ -z "$armed" ]; then
     # The cap publishes PID/birth immediately, then only monitors until:
     # stopped marker + stopped zygote(s) + absent system_server.
     if [ "$FW_SOFT_THERMAL_OFF" = 1 ]; then
-        "$BB" setsid $SH "$STAGE/oneios_sm8850_thermal_cap.sh" --run-prearmed-floor "$CTL" "$WD_GEN" \
-            8>&- </dev/null >>"$STAGE/thermal-cap.log" 2>&1 &
+        echo "CPU_CAP=NO_PREARM_NO_HEALTH_DEPENDENCY; BEST_EFFORT_POST_STOP_ONLY"
     else
         "$BB" setsid $SH "$STAGE/oneios_sm8850_thermal_cap.sh" --run-prearmed "$CTL" "$WD_GEN" \
             8>&- </dev/null >>"$STAGE/thermal-cap.log" 2>&1 &
+        n=0
+        until framework_thermal_cap_prearmed; do
+            [ "$n" -lt 25 ] || break
+            sleep 0.2; n=$((n + 1))
+        done
+        if ! framework_thermal_cap_prearmed; then
+            armed="independent root CPU cap could not prearm read-only"
+        fi
+        [ -n "$armed" ] || printf '%s\n' "$WD_GEN" > "$CTL/thermal.cap.prearm.required" ||
+            armed="could not require prearmed independent CPU cap"
+        [ -n "$armed" ] || echo "CPU_THROTTLE=PREARMED_READ_ONLY_NO_SYSFS_WRITES_BEFORE_FRAMEWORK_STOP"
     fi
-    n=0
-    until framework_thermal_cap_prearmed; do
-        [ "$n" -lt 25 ] || break
-        sleep 0.2; n=$((n + 1))
-    done
-    if ! framework_thermal_cap_prearmed; then
-        armed="independent root CPU cap could not prearm read-only"
-    fi
-    [ -n "$armed" ] || printf '%s\n' "$WD_GEN" > "$CTL/thermal.cap.prearm.required" ||
-        armed="could not require prearmed independent CPU cap"
-    [ -n "$armed" ] || echo "CPU_THROTTLE=PREARMED_READ_ONLY_NO_SYSFS_WRITES_BEFORE_FRAMEWORK_STOP"
 fi
 # SM8850: the Android KEYCODE_WAKEUP request briefly raises both CPU
 # clusters' minimum-frequency votes on real One UI 9 hardware (~8 seconds).
