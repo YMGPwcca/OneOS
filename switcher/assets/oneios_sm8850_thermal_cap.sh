@@ -211,6 +211,47 @@ case "$MODE" in
         policies "" || die host_cpufreq_unavailable
         echo "P0_CPU_CAP=READ_ONLY_POLICY_AVAILABLE_NOT_CERTIFIED"
         exit 0 ;;
+    --run-best-effort)
+        # Explicit 180s no-software-thermal-guard experiment. Only the
+        # post-stop helper requests 28% scaling_max_freq. It has NO thermal
+        # sensor reader, guard heartbeat, or authority to request reboot.
+        # A vendor min vote or sysfs error is logged, not a fatal cap fault.
+        [ "$#" = 3 ] || die args
+        [ "$(id -u)" = 0 ] || die root_required
+        CTL=$2; GEN=$3
+        [ "$CTL" = /data/adb/oneios-m3q-framework/control ] || die control_path
+        [ -d "$CTL" ] && [ ! -L "$CTL" ] &&
+          [ "$(stat -c %u "$CTL" 2>/dev/null)" = 0 ] || die untrusted_control
+        BOOT=$(cat "$CTL/boot" 2>/dev/null) || die boot_unknown
+        [ "$BOOT" = "$(cat /proc/sys/kernel/random/boot_id)" ] &&
+          [ "$GEN" = "$(cat "$CTL/watchdog.generation" 2>/dev/null)" ] &&
+          [ "$(cat "$CTL/framework.mode" 2>/dev/null)" = run ] &&
+          [ "$(cat "$CTL/framework.duration" 2>/dev/null)" = 180 ] &&
+          [ "$(cat "$CTL/framework.soft-thermal" 2>/dev/null)" = disabled-180s ] ||
+            die untrusted_experimental_session
+        framework_down_for_cpu_cap || die framework_not_stopped
+        echo $ > /sys/fs/cgroup/cgroup.procs 2>/dev/null
+        echo -1000 > /proc/$/oom_score_adj 2>/dev/null
+        echo "P0_CPU_CAP=BEST_EFFORT_FIXED_28_PERCENT_NO_THERMAL_GUARD_NO_REBOOT"
+        seq=0
+        while [ "$GEN" = "$(cat "$CTL/watchdog.generation" 2>/dev/null)" ]; do
+            [ "$BOOT" = "$(cat /proc/sys/kernel/random/boot_id 2>/dev/null)" ] || exit 0
+            case "$(cat "$CTL/state" 2>/dev/null)" in
+                starting|running) ;;
+                *) exit 0 ;;
+            esac
+            [ ! -e "${CTL%/control}/session/return.request" ] || exit 0
+            seq=$((seq + 1))
+            if apply_cap "" 28 lenient; then
+                printf '%s\n' "seq=$seq boot=$BOOT gen=$GEN pct=28 status=APPLIED_OR_ALREADY_TIGHTER" > "$CTL/cpu.best-effort.status" || :
+                [ $((seq % 10)) -ne 1 ] || echo "P0_CPU_CAP=BEST_EFFORT_28_PERCENT_OK seq=$seq"
+            else
+                printf '%s\n' "seq=$seq boot=$BOOT gen=$GEN pct=28 status=UNVERIFIED_NO_RETURN" > "$CTL/cpu.best-effort.status" || :
+                echo "P0_CPU_CAP=BEST_EFFORT_APPLY_FAILED_NO_RETURN seq=$seq"
+            fi
+            sleep 1
+        done
+        exit 0 ;;
     --run|--run-prearmed|--run-prearmed-floor)
         [ "$#" = 3 ] || die args
         [ "$(id -u)" = 0 ] || die root_required
