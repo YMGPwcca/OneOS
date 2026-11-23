@@ -68,6 +68,10 @@ Exact source: OneOS `f5c1b4a` + OneiOS `f244b5c`, full-bridges/8-vCPU/KGSL/180s,
 
 **Done:** reliable idempotent/one-shot stage semantics without implicit guest execution.
 
+## Parallel performance roadmap (not a change to root-side safety findings)
+
+The operator has prioritized **XNUHost CPU/VM attribution and eventual 60 FPS** over additional thermal/recovery implementation work. The new [OneOS 60 FPS companion backlog](SM8850_60FPS_PERFORMANCE_COMPANION.md) links the 29-item [OneiOS workstream](https://github.com/YMGPwcca/OneiOS/blob/feat/sm8850-xnuhost-perf-p0/docs/SM8850_60FPS_XNUHOST_PERFORMANCE_TRACKER.md). The original five `OOS-P0-*` findings above remain open and factually unchanged. This is **priority tracking only**, not a modification to existing thermal scripts, fixed-duration reboot mechanism or a statement that physical-session risks are resolved.
+
 ## Work order
 
 **STOP:** OOS-P0-01 and OOS-P0-02 before any new invasive phone session; implement OOS-P0-04 alongside them to avoid losing the proof. OOS-P0-03/05 maintain trusted admission and APFS integrity. No item is closed by this documentation commit.
