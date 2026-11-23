@@ -135,3 +135,18 @@ Recovery, independent watchdog qualification and the previous
 CPU >100 C measurements are unchanged; this fix is NOT a new thermal
 safety certification. Verify local CI and stage matching OneOS revision
 before any further experiment.
+
+
+## 2026-11-24 addendum: latest **uncapped** 180s experiment supersedes historical “source only” profile descriptions above
+
+The previous sections describe **historical** configurations, including `bridges=0`/600s and a separate experimental 28% root CPU cap. The **later actual physical** 180s run pinned OneOS `f5c1b4a44fc45d78987694a230f7ffabb213e99c` plus OneiOS `f244b5cdfdedd592cc68bcbbb0770762def9e140`, chose **bridges=1, 8 guest vCPUs, GPU3D, root software thermal guard OFF and root CPU cap OFF**, while kernel/vendor/firmware controls were not intentionally modified.
+
+- Stage-only and fresh APFS one-shot clone rearm **PASS** without Framework stop. F2FS sparse copy was used after unsupported FICLONE, with verified `data.img`/`unique-chip-id` and archived consumed Data.
+- **Explicit, read-only actual-profile preflight PASS:** `SM8850_SOFT_THERMAL_GUARD=OFF_NOT_SPAWNED`, `SM8850_CPU_CAP=DISABLED_NO_ROOT_WORKER`, `NO_USERSPACE_THERMAL_180S_PREFLIGHT=PASS_NO_FRAMEWORK_STOP_NO_DATA_CONSUMPTION`.
+- **Live guest observed:** real Framework takeover, iOS ready, first frame, brightness physical change with slight slider stutter, KGSL 3D. The current archived session `7434ae27f8e84b76806f7a4b506e90c9` includes exact-paired nonempty XNUHost/display logs; no logged EPROTO, BackBoardD exit or SpringBoard exit in this session.
+- **Unsafe thermal:** earlier host-side passive telemetry summary cited a CPU internal junction **104.8°C** around T+61s (raw thermal series not re-parsed into the GitHub note). The absent root guard/cap provides **no** root-side software heat abort.
+- **Return only partially witnessed:** host observed a new normal Android boot with reason `reboot,oneios-sm8850-reboot-return` but `BOUNDED_TAKEOVER_RESULT=POST_REBOOT_OBSERVED_SESSION_CAUSE_NOT_PROVEN` and host exit **4**. The original authenticated root requester, independent watchdog and unattended One UI return remain **UNVERIFIED**.
+
+The earlier 28%-capped 180s experiment with `GPU_COMMAND EPROTO` and BackBoardD/SpringBoard respring belongs to another session. No controlled A/B performance gain or definitive GPU patch cure is established.
+
+**Current source-of-truth:** [OneOS root-policy findings](SM8850_180S_UNCAPPED_ROOT_POLICY_2026_11_24.md), [root-side P0 issue tracker](SM8850_180S_UNCAPPED_ROOT_TRACKER_2026_11_24.md) and [OneiOS detailed per-frame/CPU findings](https://github.com/YMGPwcca/OneiOS/blob/feat/oneios-sm8850-m3q/docs/SM8850_180S_UNCAPPED_SESSION_FINDINGS_2026_11_24.md). **Do not rerun the no-guard/no-cap takeover; P0 thermal and independent recovery remain BLOCKED.**
