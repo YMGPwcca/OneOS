@@ -2,7 +2,7 @@
 
 > **P0 safety finding; NOT a qualified recovery or thermal profile.** The 2026-11-23 UTC physical run used an explicitly opted-in **180s, 8-vCPU, GPU3D, full-bridges** iOS guest. Root software thermal guard and the root CPU-frequency cap worker were **OFF**. A previously summarized internal CPU thermal zone reached **104.8 °C**. No new physical test or watchdog certification is claimed by this document. **Do not repeat guard-OFF/cap-OFF takeover to collect more performance data.**
 
-[OneiOS full archive/performance report](https://github.com/YMGPwcca/OneiOS/blob/feat/oneios-sm8850-m3q/docs/SM8850_180S_UNCAPPED_SESSION_FINDINGS_2026_11_24.md) · [OneOS watchdog limits](oneios-watchdog-recovery.md) · [Prior OneiOS thermal-mode mismatch](https://github.com/YMGPwcca/OneiOS/blob/feat/oneios-sm8850-m3q/docs/SM8850_MODE_HANDOFF_2026_11_23.md)
+[Five P0 root engineering tasks](SM8850_180S_UNCAPPED_ROOT_TRACKER_2026_11_24.md) · [OneiOS full archive/performance report](https://github.com/YMGPwcca/OneiOS/blob/feat/oneios-sm8850-m3q/docs/SM8850_180S_UNCAPPED_SESSION_FINDINGS_2026_11_24.md) · [OneOS watchdog limits](oneios-watchdog-recovery.md) · [Prior OneiOS thermal-mode mismatch](https://github.com/YMGPwcca/OneiOS/blob/feat/oneios-sm8850-m3q/docs/SM8850_MODE_HANDOFF_2026_11_23.md)
 
 ## Ownership, exact revisions and evidence quality
 
