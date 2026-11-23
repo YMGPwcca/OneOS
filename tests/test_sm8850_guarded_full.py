@@ -114,6 +114,18 @@ class FullRunThermalContract(unittest.TestCase):
         self.assertIn('framework_thermal_guard_healthy', switch)
         self.assertIn('framework_thermal_cap_healthy', switch)
 
+    def test_detached_live_no_guard_requires_explicit_profile_argument(self):
+        source = SWITCH.read_text()
+        self.assertIn('[ "$#" -le 4 ] || framework_block "unexpected duration/profile arguments"', source)
+        self.assertIn('[ "$#" -le 7 ] || framework_block "unexpected duration/profile arguments"', source)
+        self.assertIn('FW_PROFILE_ARG=${4:-}', source)
+        self.assertIn('FW_PROFILE_ARG=${7:-}', source)
+        self.assertIn('no-soft-guard env was set but live thermal profile token is missing', source)
+        self.assertIn('SM8850_LIVE_THERMAL_PROFILE=NO_SOFT_GUARD_EXPLICIT_180S', source)
+        self.assertIn('SM8850_LIVE_THERMAL_PROFILE=ROOT_GUARD_DEFAULT', source)
+        self.assertLess(source.index('FW_PROFILE_ARG=${7:-}'),
+                        source.index('APFS_DATA_CLONE=CONSUMED_ONE_SHOT_BEFORE_FRAMEWORK_STOP'))
+
     def test_no_guard_requires_new_xnuhost_before_consuming_apfs_data(self):
         switch = SWITCH.read_text()
         old = "SM8850_FULL_BRIDGES=ACTIVE"

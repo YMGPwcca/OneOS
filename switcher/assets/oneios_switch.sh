@@ -1846,10 +1846,14 @@ if [ "$FRAMEWORK" = 1 ]; then
     FW_DURATION=600
     if [ "$FW_MODE" = run ]; then
         if [ "$MODE" = --framework-check ]; then
-            [ "$#" -le 3 ] || framework_block "unexpected duration arguments"
+            # Optional fourth argument pins the no-soft-guard experiment,
+            # independent of whether su preserves command-scoped environment.
+            [ "$#" -le 4 ] || framework_block "unexpected duration/profile arguments"
             FW_DURATION=${3:-600}
         else
-            [ "$#" -le 6 ] || framework_block "unexpected duration arguments"
+            # Optional seventh argument pins the live thermal profile. A
+            # missing/mismatched token MUST NOT silently select another mode.
+            [ "$#" -le 7 ] || framework_block "unexpected duration/profile arguments"
             FW_DURATION=${6:-600}
         fi
         case "$FW_DURATION" in ''|0*|*[!0-9]*) framework_block "invalid numeric Framework duration" ;; esac
@@ -1860,15 +1864,51 @@ if [ "$FRAMEWORK" = 1 ]; then
     # No persistent property, Android thermal node, firmware limit or
     # watchdog policy is changed. Only accepted for 180s full bridges=1.
     FW_SOFT_THERMAL_OFF=0
-    if [ "$FW_MODE" = run ] &&
-       [ "${ONEIOS_SM8850_EXPERIMENT_NO_SOFT_THERMAL:-}" = I_ACCEPT_SOFT_GUARD_OFF_180S ]; then
-        [ "$FW_DURATION" = 180 ] ||
-            framework_block "passive thermal trial is restricted to 180 seconds"
-        FW_SOFT_THERMAL_OFF=1
-        echo "SM8850_SOFT_THERMAL_GUARD=OFF_NOT_SPAWNED"
-        echo "SM8850_CPU_CAP_FAILURE=NONFATAL_BEST_EFFORT_28_PERCENT"
-        echo "SM8850_KERNEL_FIRMWARE_THERMAL_PROTECTION=UNCHANGED"
-        echo "WARNING=FLOOR_LIMITED_CEILING_MAY_EXCEED_28_PERCENT"
+    if [ "$FW_MODE" = run ]; then
+        # A preflight may still use the historical command-scoped env flag.
+        # The detached live session MUST carry its thermal selection as a
+        # positional argument: su -> setsid -> sh -c can lose the env flag.
+        # Otherwise a no-guard preflight can silently launch the guarded
+        # CPU-floor/60C wake gate, exactly as seen on SM-S948B 2026-11-23.
+        case "${ONEIOS_SM8850_EXPERIMENT_NO_SOFT_THERMAL:-}" in
+            ''|I_ACCEPT_SOFT_GUARD_OFF_180S) ;;
+            *) framework_block "unrecognized thermal profile environment" ;;
+        esac
+        if [ "$MODE" = --framework-check ]; then
+            FW_PROFILE_ARG=${4:-}
+            [ "$#" -lt 4 ] || [ "$FW_PROFILE_ARG" = I_ACCEPT_SOFT_GUARD_OFF_180S ] ||
+                framework_block "invalid explicit preflight thermal profile"
+        else
+            FW_PROFILE_ARG=${7:-}
+            [ "$#" -lt 7 ] || [ "$FW_PROFILE_ARG" = I_ACCEPT_SOFT_GUARD_OFF_180S ] ||
+                framework_block "invalid explicit live thermal profile"
+        fi
+        if [ "$FW_PROFILE_ARG" = I_ACCEPT_SOFT_GUARD_OFF_180S ]; then
+            FW_SOFT_THERMAL_OFF=1
+        elif [ "$MODE" = --framework-check ] &&
+             [ "${ONEIOS_SM8850_EXPERIMENT_NO_SOFT_THERMAL:-}" = I_ACCEPT_SOFT_GUARD_OFF_180S ]; then
+            # Backward-compatible read-only preflight; the new host sends
+            # both the explicit token and the env flag for cross-checking.
+            FW_SOFT_THERMAL_OFF=1
+        elif [ "$MODE" = --framework-session ] &&
+             [ "${ONEIOS_SM8850_EXPERIMENT_NO_SOFT_THERMAL:-}" = I_ACCEPT_SOFT_GUARD_OFF_180S ]; then
+            framework_block "no-soft-guard env was set but live thermal profile token is missing"
+        fi
+        if [ "$FW_SOFT_THERMAL_OFF" = 1 ]; then
+            [ "$FW_DURATION" = 180 ] ||
+                framework_block "passive thermal trial is restricted to 180 seconds"
+            echo "SM8850_SOFT_THERMAL_GUARD=OFF_NOT_SPAWNED"
+            echo "SM8850_CPU_CAP_FAILURE=NONFATAL_BEST_EFFORT_28_PERCENT"
+            echo "SM8850_KERNEL_FIRMWARE_THERMAL_PROTECTION=UNCHANGED"
+            echo "WARNING=FLOOR_LIMITED_CEILING_MAY_EXCEED_28_PERCENT"
+        fi
+        if [ "$MODE" = --framework-session ]; then
+            if [ "$FW_SOFT_THERMAL_OFF" = 1 ]; then
+                echo "SM8850_LIVE_THERMAL_PROFILE=NO_SOFT_GUARD_EXPLICIT_180S"
+            else
+                echo "SM8850_LIVE_THERMAL_PROFILE=ROOT_GUARD_DEFAULT"
+            fi
+        fi
     fi
     [ "$APP" = 0 ] && framework_identity || framework_block "experimental profile requires SM-S948B/m3q/SM8850 firmware S948BXXS4BZIG with SELinux enforcing"
     if [ "$MODE" = --framework-session ]; then

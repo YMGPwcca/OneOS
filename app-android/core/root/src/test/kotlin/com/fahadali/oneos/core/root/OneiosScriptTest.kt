@@ -2935,6 +2935,24 @@ class OneiosScriptTest {
         assertEquals(notes, OneiosLogs.returns(f.returnLog.lines()))
     }
 
+    @Test
+    fun sm8850DetachedThermalModeMustUseExplicitSessionArgument() {
+        val sw = switchScript.readText()
+        // A standalone --framework-check may inherit env, but detached su
+        // + setsid + sh -c must not silently lose a no-soft-thermal choice.
+        assertTrue(sw.contains("[ \"\$#\" -le 4 ] || framework_block \"unexpected duration/profile arguments\""))
+        assertTrue(sw.contains("[ \"\$#\" -le 7 ] || framework_block \"unexpected duration/profile arguments\""))
+        assertTrue(sw.contains("FW_PROFILE_ARG=\${7:-}"))
+        assertTrue(sw.contains("FW_PROFILE_ARG=\${4:-}"))
+        assertTrue(sw.contains("no-soft-guard env was set but live thermal profile token is missing"))
+        assertTrue(sw.contains("SM8850_LIVE_THERMAL_PROFILE=NO_SOFT_GUARD_EXPLICIT_180S"))
+        assertTrue(sw.contains("SM8850_LIVE_THERMAL_PROFILE=ROOT_GUARD_DEFAULT"))
+        assertTrue(sw.indexOf("FW_PROFILE_ARG=\${7:-}") <
+                   sw.indexOf("APFS_DATA_CLONE=CONSUMED_ONE_SHOT_BEFORE_FRAMEWORK_STOP"))
+        assertTrue(sw.indexOf("FW_PROFILE_ARG=\${7:-}") <
+                   sw.indexOf("if ! stop_android_framework; then"))
+    }
+
     private companion object {
         const val XNUHOST = 5000
         const val INIT_NS = "mnt:[1]"

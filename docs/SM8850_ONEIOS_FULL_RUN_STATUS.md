@@ -100,3 +100,38 @@ verified by another destructive full run.
 
 **Documentation updates are not evidence of another physical test.** Do not
 run a new reboot-smoke or full takeover solely to populate this ledger.
+
+
+## 2026-11-23: rejected live 180s takeover (One UI never stopped)
+
+The host requested the **explicit 180-second no-userspace-thermal** mode.
+The preflight and host console stated software thermal guard OFF, but the
+detached device-side `--framework-session run` entered the *guarded* branch.
+The preserved `launches/a0e6b35a369b4f3b95e79ab62429f0f0/switch.log`
+contains `THERMAL_GUARD=ARMED_ROOT_BEFORE_FRAMEWORK_STOP`, followed by:
+
+```text
+FRAMEWORK_PANEL_WAKE=BLOCKED_BEFORE_FRAMEWORK_STOP
+REASON=switch-panel-wake-refused: CPU floor or thermal sample unsettled
+CPU0_MIN=3628800 CPU6_MIN=4185600 CPU_MC=61500 elapsed=20s
+```
+
+The independent OneOS return reported
+`inplace ... One UI was never stopped`; the same boot and
+`system_server` remained alive. The guest had **not** launched. The APFS
+Data clone was nevertheless marked consumed before stage initialization
+and must be rearmed for any future trial. Exit 4 is the intentional
+recovery/refusal result, not a GPU failure.
+
+**Correction:** a detached live session now selects the no-soft-guard mode
+only with a 7th exact positional
+`I_ACCEPT_SOFT_GUARD_OFF_180S` token. The read-only preflight can
+also take the same token as its 4th argument. The old env flag is
+supported for legacy preflight, but no longer silently selects no-guard
+in a detached live session without the explicit token. A mismatch
+fails before one-shot APFS consumption and before Framework stop.
+The switch logs `SM8850_LIVE_THERMAL_PROFILE` with the effective mode.
+Recovery, independent watchdog qualification and the previous
+CPU >100 C measurements are unchanged; this fix is NOT a new thermal
+safety certification. Verify local CI and stage matching OneOS revision
+before any further experiment.
