@@ -1898,9 +1898,9 @@ if [ "$FRAMEWORK" = 1 ]; then
             [ "$FW_DURATION" = 180 ] ||
                 framework_block "passive thermal trial is restricted to 180 seconds"
             echo "SM8850_SOFT_THERMAL_GUARD=OFF_NOT_SPAWNED"
-            echo "SM8850_CPU_CAP_FAILURE=NONFATAL_BEST_EFFORT_28_PERCENT"
+            echo "SM8850_CPU_CAP=DISABLED_NO_ROOT_WORKER"
             echo "SM8850_KERNEL_FIRMWARE_THERMAL_PROTECTION=UNCHANGED"
-            echo "WARNING=FLOOR_LIMITED_CEILING_MAY_EXCEED_28_PERCENT"
+            echo "WARNING=NO_ROOT_THERMAL_GUARD_OR_CPU_CAP_HIGH_HEAT_RISK"
         fi
         if [ "$MODE" = --framework-session ]; then
             if [ "$FW_SOFT_THERMAL_OFF" = 1 ]; then
@@ -2086,7 +2086,7 @@ if [ "$FRAMEWORK" = 1 ]; then
         echo "SM8850_FULL_RUN_GUEST_BOOT=PRIOR_PHYSICAL_OBSERVATION_NOT_A_NEW_SESSION_PASS"
         if [ "$FW_SOFT_THERMAL_OFF" = 1 ]; then
             echo "SM8850_FULL_RUN_THERMAL_BRIDGE=NO_ROOT_THERMAL_GUARD; HOST_READ_ONLY_TELEMETRY_ONLY"
-            echo "SM8850_FULL_RUN_CPU_CAP=BEST_EFFORT_NONFATAL_28_PERCENT"
+            echo "SM8850_FULL_RUN_CPU_CAP=DISABLED_NO_ROOT_WORKER"
         else
             echo "SM8850_FULL_RUN_THERMAL_BRIDGE=ACTIVE_BRIDGES_1_ROOT_MONITOR_MANDATORY"
         fi
@@ -2094,12 +2094,10 @@ if [ "$FRAMEWORK" = 1 ]; then
         echo "SM8850_FULL_RUN_GPU_3D=KGSL_OBSERVED_PRIOR_RUN_AUTO_FALLBACK_POSSIBLE"
         echo "SM8850_FULL_RUN_RECOVERY=DEADLINE_AND_UNASSISTED_RETURN_NOT_FULLY_VERIFIED"
         if [ "$FW_SOFT_THERMAL_OFF" = 1 ]; then
-            # No software thermal monitor or mandatory CPU-cap worker.
-            # Best-effort fixed 28% cap is applied only once Framework is DOWN.
-            root_only "$STAGE/oneios_sm8850_thermal_cap.sh" ||
-                framework_block "untrusted optional underclock helper"
+            # Exact 180s experimental mode only: no root thermal guard and
+            # no root CPU cap worker; kernel/vendor thermal policy is unchanged.
             echo "SM8850_SOFTWARE_THERMAL_MONITOR=DISABLED_FOR_180S"
-            echo "SM8850_CPU_CAP_ADMISSION=OPTIONAL_NO_FAULT_RETURN"
+            echo "SM8850_CPU_CAP_ADMISSION=DISABLED_NO_ROOT_WORKER"
         else
             for th_file in oneios_sm8850_thermal_takeover_guard.sh oneios_sm8850_thermal_cap.sh thermal.guard.manifest; do
                 root_only "$STAGE/$th_file" || framework_block "untrusted or missing independent thermal asset $th_file"
@@ -2292,7 +2290,7 @@ if [ "$FRAMEWORK" = 1 ] && [ "$FW_MODE" = run ] && [ -z "$armed" ]; then
         # Intentional: no thermal guard process is started, and no
         # temperature fault/heartbeat is required by the independent watcher.
         echo "THERMAL_GUARD=OFF_NO_PROCESS_NO_HEARTBEAT_NO_SOFT_RETURN"
-        echo "CPU_CAP=NONFATAL_FIXED_28_PERCENT_AFTER_FRAMEWORK_STOP"
+        echo "CPU_CAP=DISABLED_NO_ROOT_WORKER"
     else
         "$BB" setsid $SH "$STAGE/oneios_sm8850_thermal_takeover_guard.sh" --run "$CTL" "$STAGE/thermal.guard.manifest" "$WD_GEN" \
             8>&- </dev/null >>"$STAGE/thermal-guard.log" 2>&1 &
@@ -2315,7 +2313,7 @@ if [ "$FRAMEWORK" = 1 ] && [ "$FW_MODE" = run ] && [ -z "$armed" ]; then
     # The cap publishes PID/birth immediately, then only monitors until:
     # stopped marker + stopped zygote(s) + absent system_server.
     if [ "$FW_SOFT_THERMAL_OFF" = 1 ]; then
-        echo "CPU_CAP=NO_PREARM_NO_HEALTH_DEPENDENCY; BEST_EFFORT_POST_STOP_ONLY"
+        echo "CPU_CAP=NO_PREARM_NO_HEALTH_DEPENDENCY; NO_POST_STOP_WORKER"
     else
         "$BB" setsid $SH "$STAGE/oneios_sm8850_thermal_cap.sh" --run-prearmed "$CTL" "$WD_GEN" \
             8>&- </dev/null >>"$STAGE/thermal-cap.log" 2>&1 &
@@ -2642,11 +2640,9 @@ if [ "$FRAMEWORK" = 1 ]; then
     # Here only confirm its current, enforced heartbeat before guest launch.
     if [ "$FW_MODE" = run ]; then
         if [ "$FW_SOFT_THERMAL_OFF" = 1 ]; then
-            # Optional non-fatal 28% cap: no guard heartbeat, no cap-health
-            # dependency and no reboot on cap write/readback failure.
-            "$BB" setsid $SH "$STAGE/oneios_sm8850_thermal_cap.sh" --run-best-effort "$CTL" "$WD_GEN" \
-                8>&- </dev/null >>"$STAGE/thermal-cap.log" 2>&1 &
-            echo "CPU_THROTTLE=POST_STOP_BEST_EFFORT_28_PERCENT_NO_FATAL_CAP_ERROR"
+            # Explicit no-guard 180s: no root CPU cap worker is launched.
+            # The kernel/vendor/firmware may still throttle the CPU.
+            echo "CPU_THROTTLE=OFF_NO_ROOT_CAP_WORKER"
         else
             n=0
             until framework_thermal_cap_healthy; do

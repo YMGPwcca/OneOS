@@ -94,11 +94,15 @@ class FullRunThermalContract(unittest.TestCase):
         self.assertIn('[ "$FW_DURATION" = 180 ]', switch)
         self.assertIn('SM8850_SOFT_THERMAL_GUARD=OFF_NOT_SPAWNED', switch)
         self.assertIn('THERMAL_GUARD=OFF_NO_PROCESS_NO_HEARTBEAT_NO_SOFT_RETURN', switch)
-        self.assertIn('CPU_THROTTLE=POST_STOP_BEST_EFFORT_28_PERCENT_NO_FATAL_CAP_ERROR', switch)
+        self.assertIn('CPU_THROTTLE=OFF_NO_ROOT_CAP_WORKER', switch)
         self.assertIn('sm8850_no_userspace_thermal() {', switch)
         self.assertIn('! sm8850_no_userspace_thermal', switch)
         self.assertIn("printf 'disabled-180s\\n'", switch)
-        self.assertIn('--run-best-effort "$CTL" "$WD_GEN"', switch)
+        self.assertNotIn('--run-best-effort "$CTL" "$WD_GEN"', switch)
+        self.assertIn('SM8850_CPU_CAP=DISABLED_NO_ROOT_WORKER', switch)
+        self.assertIn('SM8850_CPU_CAP_ADMISSION=DISABLED_NO_ROOT_WORKER', switch)
+        self.assertLess(switch.index('SM8850_CPU_CAP=DISABLED_NO_ROOT_WORKER'),
+                        switch.index('APFS_DATA_CLONE=CONSUMED_ONE_SHOT_BEFORE_FRAMEWORK_STOP'))
         self.assertIn('P0_CPU_CAP=BEST_EFFORT_APPLY_FAILED_NO_RETURN', cap)
         self.assertIn('apply_cap "" 28 lenient', cap)
         # A new fixed-frequency helper has NO thermal guard heartbeat.
