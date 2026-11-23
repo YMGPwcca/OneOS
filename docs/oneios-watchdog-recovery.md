@@ -64,3 +64,17 @@ Prioritize the saved logs and local CachyOS tests. When available, read `/proc/<
 ---
 
 **Next:** [Physical experiment status](SM8850_ONEIOS_FULL_RUN_STATUS.md) · [OneiOS safety backlog](https://github.com/YMGPwcca/OneiOS/blob/feat/oneios-sm8850-m3q/docs/TODO.md)
+
+
+## 2026-11-24 later 180s uncapped recovery observation
+
+**Latest executed profile:** 180s full bridges, GPU3D, root software thermal guard OFF, root cap OFF, OneOS `f5c1b4a` and OneiOS `f244b5c`; exact launch session `7434ae27f8e84b76806f7a4b506e90c9`. The preflight's legacy `a:82` and `WATCHDOG_QUALIFICATION=UNVERIFIED_REBOOT_ONLY` were **not upgraded** to certified by a later normal reboot.
+
+- Post-run host saw a new boot with `reboot,oneios-sm8850-reboot-return` and `sys.boot_completed=1`, but reported `BOUNDED_TAKEOVER_RESULT=POST_REBOOT_OBSERVED_SESSION_CAUSE_NOT_PROVEN` / exit **4**.
+- Root-owned exact deadline/return requester and independently unassisted recovery remain **UNVERIFIED**. The fact the phone reached One UI is not proof the watchdog fired or that the user never intervened.
+- The host passive CPU-zone peak was previously summarized as **104.8°C** (raw sample series not re-parsed here); there was **no** independent root thermal abort in the chosen mode.
+- A later read-only collect recovered the exact token-matched current logs (XNUHost **339,854 bytes**, display **10,203 bytes**) plus 16 distinct archived sessions. Existing log recovery does not itself establish original reboot requester.
+
+**Blocker:** qualify root-side fail-closed thermal monitor and independent reboot-return provenance. Preserve original logs; **do not** open the watchdog character device merely to inspect it, and do **not** repeat unguarded hot tests.
+
+See [new root findings](SM8850_180S_UNCAPPED_ROOT_POLICY_2026_11_24.md), [five tracked P0 work items](SM8850_180S_UNCAPPED_ROOT_TRACKER_2026_11_24.md) and [companion OneiOS session findings](https://github.com/YMGPwcca/OneiOS/blob/feat/oneios-sm8850-m3q/docs/SM8850_180S_UNCAPPED_SESSION_FINDINGS_2026_11_24.md).
