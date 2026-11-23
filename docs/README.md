@@ -14,6 +14,8 @@
 | Document | Focus |
 | :--- | :--- |
 | [SM8850_ONEIOS_FULL_RUN_STATUS](SM8850_ONEIOS_FULL_RUN_STATUS.md) | Current physical evidence · ~600 s guest, KGSL, heat and recovery limits |
+| [SM8850 180S UNCAPPED ROOT POLICY](SM8850_180S_UNCAPPED_ROOT_POLICY_2026_11_24.md) | **Latest 180s experiment:** no root guard/cap, high CPU sensor temperature, reboot provenance **not verified** |
+| [SM8850 180S ROOT TRACKER](SM8850_180S_UNCAPPED_ROOT_TRACKER_2026_11_24.md) | Detailed OOS-P0 thermal, watchdog, mode, recovery and archive tasks |
 | [SM8850_PORT](SM8850_PORT.md) | Exact SM8850 device scope and app/root-only boundary |
 | [oneios](oneios.md) | iOS 27 root-only experiment, compatibility limits and session flow |
 | [oneios watchdog recovery](oneios-watchdog-recovery.md) | Legacy watchdog provenance and unverified recovery requirements |
