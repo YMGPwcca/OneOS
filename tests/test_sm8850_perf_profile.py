@@ -74,8 +74,34 @@ class PerfProfile(unittest.TestCase):
 
     def test_metadata_and_exec_are_wired(self):
         self.assertIn('printf \'%s\\n\' "$FW_PERF_PROFILE" > "$CTL/framework.perf-profile"', SOURCE)
-        self.assertLess(SOURCE.index('> "$CTL/framework.perf-profile"'),
-                        SOURCE.index('APFS_DATA_CLONE=CONSUMED_ONE_SHOT_BEFORE_FRAMEWORK_STOP'))
+        # The one-shot claim precedes archiving old control/session data.
+        # Do not move that safety boundary or write the new profile into
+        # the previous session's control directory just to satisfy a test.
+        claim = SOURCE.index('APFS_DATA_CLONE=CONSUMED_ONE_SHOT_BEFORE_FRAMEWORK_STOP')
+        archive = SOURCE.index('archive=$(mktemp -d "$STAGE/logs/session.XXXXXX")', claim)
+        create = SOURCE.index('mkdir -p "$CTL/base" "$CTL/keys" "$SESSION/tmp"', archive)
+        launch = SOURCE.index('> "$CTL/framework.launch"', create)
+        perf = SOURCE.index('> "$CTL/framework.perf-profile"', launch)
+        cpu = SOURCE.index('> "$CTL/framework.cpu-profile"', perf)
+        stop = SOURCE.index('if ! stop_android_framework; then', cpu)
+        inner = SOURCE.index('--inner 8>&- </dev/null >>"$SESSION/xnuhost.log"', stop)
+        self.assertLess(claim, archive)
+        self.assertLess(archive, create)
+        self.assertLess(create, launch)
+        self.assertLess(launch, perf)
+        self.assertLess(perf, cpu)
+        self.assertLess(cpu, stop)
+        self.assertLess(stop, inner)
+        # The profile token and native capabilities must be checked before
+        # Data is claimed; a metadata write failure aborts before stop.
+        for anchor in ('# END FRAMEWORK_CPU_PROFILE_ARGS',
+                       '# END FRAMEWORK_PERF_PROFILE_ARGS',
+                       "grep -Fq 'SM8850_CPU_PROFILE=PRIME_FIRST_ACTIVE'",
+                       "grep -Fq 'frame-trace'",
+                       "grep -Fq 'perf-task: enabled'"):
+            self.assertLess(SOURCE.index(anchor), claim)
+        self.assertIn('framework_setup_failed "could not record CPU placement profile"', SOURCE)
+        self.assertIn('printf "failed\\n" > "$CTL/state"\n    exit 4', SOURCE)
         self.assertIn('--hz 60 "$@"', SOURCE)
         self.assertIn('framework_setup_failed "could not record performance instrumentation profile"', SOURCE)
 
