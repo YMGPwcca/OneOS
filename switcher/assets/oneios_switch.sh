@@ -1511,13 +1511,31 @@ case "$MODE" in
             echo "ONEIOS_CPU_PLACEMENT_BRIDGE=ACTIVE_BRIDGES_1_CPU_PIN_1"
             echo "ONEIOS_GPU_3D=RUNTIME_KGSL_PROOF_REQUIRED"
             echo "ONEIOS_GPU_3D_MODE=REQUIRED_FAIL_CLOSED_NO_2D_FALLBACK"
+            # Root-owned, session-local control metadata survives detach and
+            # namespace creation. Never inherit a previous session's choice.
+            # BEGIN FRAMEWORK_PERF_RUNTIME_ARGS
+            perf_profile=$(cat /data/control/framework.perf-profile 2>/dev/null) ||
+                die_inner "missing full-session performance profile"
+            case "$perf_profile" in
+                off) set -- ;;
+                frame) set -- --set frame-trace=1 ;;
+                task) set -- --set perf-task=1 ;;
+                frame-task) set -- --set frame-trace=1 --set perf-task=1 ;;
+                *) die_inner "invalid full-session performance profile" ;;
+            esac
+            if [ "$perf_profile" != off ]; then
+                unset ONEIOS_GPU_TRACE
+                echo "ONEIOS_PERF_VERBOSE_GPU_TRACE=OFF"
+            fi
+            echo "ONEIOS_PERF_PROFILE=$perf_profile"
+            # END FRAMEWORK_PERF_RUNTIME_ARGS
             ulimit -c 0
             exec "/data/runtime/$R_XNUHOST" --session-abi 1 --mode bench \
                 --runtime /data/runtime --image /data/image --data /data/data --session /data/session \
                 --cpus 8 --ram 4G --set ram-giveback=0 --set ram-prefault=1 --set ram-lock=1 \
                 --set ram-huge=0 --set host-mem-log=5 --set bridges=1 --set sm8850-full-bridges=1 --set touch-sleep=0 --set cpu-affinity-bench=0 --set cpu-pin=1 --set wifi=off \
                 --set bluetooth=virtual --set haptics=off --set encoder=off --set return-graceful-ms=0 \
-                --gpu 3d --display shm --set touch-exclusive=1 --width 1080 --height 2340 --hz 60 \
+                --gpu 3d --display shm --set touch-exclusive=1 --width 1080 --height 2340 --hz 60 "$@" \
                 --boot-args 'debug=0x14e serial=3 -v kt_fixed_zones=120 -no_slto_panic ml-timeout-lock-panic-scale=40 tlto_us=0 armcpu-self-ipi=1 armcpu-spi-ipi=1 use_contiguous_hint=0 interrupt-masked-debug-mode=0 sched_preemption_disable_debug_mode=0 wdt=-1 sheng-smp=1 oneios-data-wait=3000'
             die_inner "could not exec the GPU-3D benchmark runtime"
         fi
@@ -1859,7 +1877,31 @@ if [ "$FRAMEWORK" = 1 ]; then
         case "$FW_SMOKE_SECONDS" in 20|30) ;; *) framework_block "reboot-smoke duration must be 20 or 30 seconds" ;; esac
         echo "SM8850_FRAMEWORK_SMOKE_SECONDS=$FW_SMOKE_SECONDS"
     fi
+    FW_PERF_PROFILE=off
     if [ "$FW_MODE" = run ]; then
+        # Optional final performance token, independent of the existing thermal
+        # profile. Strip only a recognized token at the final argument position;
+        # the original duration, thermal and risk validation remains unchanged.
+        # BEGIN FRAMEWORK_PERF_PROFILE_ARGS
+        FW_PERF_ARG=
+        case "$MODE:$#" in
+            --framework-check:4) FW_PERF_ARG=$4 ;;
+            --framework-check:5) FW_PERF_ARG=$5 ;;
+            --framework-session:7) FW_PERF_ARG=$7 ;;
+            --framework-session:8) FW_PERF_ARG=$8 ;;
+        esac
+        case "$FW_PERF_ARG" in
+            perf-off|perf-frame|perf-task|perf-frame-task)
+                FW_PERF_PROFILE=${FW_PERF_ARG#perf-}
+                case "$MODE:$#" in
+                    --framework-check:4) set -- "$1" "$2" "$3" ;;
+                    --framework-check:5) set -- "$1" "$2" "$3" "$4" ;;
+                    --framework-session:7) set -- "$1" "$2" "$3" "$4" "$5" "$6" ;;
+                    --framework-session:8) set -- "$1" "$2" "$3" "$4" "$5" "$6" "$7" ;;
+                esac ;;
+        esac
+        # END FRAMEWORK_PERF_PROFILE_ARGS
+        echo "SM8850_PERF_PROFILE=$FW_PERF_PROFILE"
         if [ "$MODE" = --framework-check ]; then
             # Optional fourth argument pins the no-soft-guard experiment,
             # independent of whether su preserves command-scoped environment.
@@ -2236,6 +2278,8 @@ if [ "$FRAMEWORK" = 1 ]; then
     if [ "$FW_MODE" = run ]; then
         printf '%s\n' "$FW_DURATION" > "$CTL/framework.duration" ||
             framework_setup_failed "could not record bounded duration"
+        printf '%s\n' "$FW_PERF_PROFILE" > "$CTL/framework.perf-profile" ||
+            framework_setup_failed "could not record performance instrumentation profile"
         if [ "$FW_SOFT_THERMAL_OFF" = 1 ]; then
             printf 'disabled-180s\n' > "$CTL/framework.soft-thermal" ||
                 framework_setup_failed "could not record explicitly accepted no-software-guard mode"
