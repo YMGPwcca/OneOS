@@ -28,6 +28,23 @@ class PerfProfile(unittest.TestCase):
                                            check=True, capture_output=True, text=True)
                         self.assertEqual([profile, *args], p.stdout.splitlines())
 
+    def test_cpu_profile_combines_with_thermal_and_perf_tokens(self):
+        body = 'MODE=$1\nFW_CPU_PROFILE=default\nFW_PERF_PROFILE=off\n' + block("FRAMEWORK_CPU_PROFILE_ARGS") + block("FRAMEWORK_PERF_PROFILE_ARGS")
+        body += '\nprintf "%s\\n" "$FW_CPU_PROFILE" "$FW_PERF_PROFILE" "$@"'
+        for mode, original in (("--framework-check", ["run", "180"]),
+                               ("--framework-session", ["run", "ACK", "SESSION", "RISK", "180"])):
+            for thermal in ([], ["I_ACCEPT_SOFT_GUARD_OFF_180S"]):
+                for perf in ([], ["perf-frame-task"]):
+                    for cpu in ([], ["cpu-prime-first"]):
+                        args = [mode, *original, *thermal]
+                        p = subprocess.run(["sh", "-c", body, "test", *args, *perf, *cpu],
+                                           check=True, capture_output=True, text=True)
+                        self.assertEqual(["prime-first" if cpu else "default",
+                                          "frame-task" if perf else "off", *args], p.stdout.splitlines())
+        self.assertIn('prime-first) set -- "$@" --set sm8850-prime-first=1', SOURCE)
+        self.assertLess(SOURCE.index("grep -Fq 'SM8850_CPU_PROFILE=PRIME_FIRST_ACTIVE'"),
+                        SOURCE.index('APFS_DATA_CLONE=CONSUMED_ONE_SHOT_BEFORE_FRAMEWORK_STOP'))
+
     def test_unknown_token_is_not_stripped(self):
         body = 'MODE=$1\nFW_PERF_PROFILE=off\n' + block("FRAMEWORK_PERF_PROFILE_ARGS")
         body += '\nprintf "%s\\n" "$FW_PERF_PROFILE" "$@"'

@@ -1529,6 +1529,14 @@ case "$MODE" in
             fi
             echo "ONEIOS_PERF_PROFILE=$perf_profile"
             # END FRAMEWORK_PERF_RUNTIME_ARGS
+            cpu_profile=$(cat /data/control/framework.cpu-profile 2>/dev/null) ||
+                die_inner "missing full-session CPU profile"
+            case "$cpu_profile" in
+                default) ;;
+                prime-first) set -- "$@" --set sm8850-prime-first=1 ;;
+                *) die_inner "invalid full-session CPU profile" ;;
+            esac
+            echo "ONEIOS_CPU_PROFILE_REQUESTED=$cpu_profile"
             ulimit -c 0
             exec "/data/runtime/$R_XNUHOST" --session-abi 1 --mode bench \
                 --runtime /data/runtime --image /data/image --data /data/data --session /data/session \
@@ -1878,7 +1886,32 @@ if [ "$FRAMEWORK" = 1 ]; then
         echo "SM8850_FRAMEWORK_SMOKE_SECONDS=$FW_SMOKE_SECONDS"
     fi
     FW_PERF_PROFILE=off
+    FW_CPU_PROFILE=default
     if [ "$FW_MODE" = run ]; then
+        # CPU placement is independent of instrumentation and thermal choice.
+        # BEGIN FRAMEWORK_CPU_PROFILE_ARGS
+        cpu_arg=
+        case "$MODE:$#" in
+            --framework-check:4) cpu_arg=$4 ;;
+            --framework-check:5) cpu_arg=$5 ;;
+            --framework-check:6) cpu_arg=$6 ;;
+            --framework-session:7) cpu_arg=$7 ;;
+            --framework-session:8) cpu_arg=$8 ;;
+            --framework-session:9) cpu_arg=$9 ;;
+        esac
+        if [ "$cpu_arg" = cpu-prime-first ]; then
+            FW_CPU_PROFILE=prime-first
+            case "$MODE:$#" in
+                --framework-check:4) set -- "$1" "$2" "$3" ;;
+                --framework-check:5) set -- "$1" "$2" "$3" "$4" ;;
+                --framework-check:6) set -- "$1" "$2" "$3" "$4" "$5" ;;
+                --framework-session:7) set -- "$1" "$2" "$3" "$4" "$5" "$6" ;;
+                --framework-session:8) set -- "$1" "$2" "$3" "$4" "$5" "$6" "$7" ;;
+                --framework-session:9) set -- "$1" "$2" "$3" "$4" "$5" "$6" "$7" "$8" ;;
+            esac
+        fi
+        # END FRAMEWORK_CPU_PROFILE_ARGS
+        echo "SM8850_CPU_PROFILE_REQUESTED=$FW_CPU_PROFILE"
         # Optional final performance token, independent of the existing thermal
         # profile. Strip only a recognized token at the final argument position;
         # the original duration, thermal and risk validation remains unchanged.
@@ -2175,6 +2208,18 @@ if [ "$FRAMEWORK" = 1 ]; then
         # independent APFS Data clone can be consumed.
         grep -Fq 'SM8850_FULL_BRIDGES=ACTIVE' "$X" 2>/dev/null ||
             framework_block "staged xnuhost lacks full bridges=1 Framework profile; rebuild and upgrade the native runtime before rearming Data"
+        if [ "$FW_CPU_PROFILE" = prime-first ]; then
+            grep -Fq 'SM8850_CPU_PROFILE=PRIME_FIRST_ACTIVE' "$X" 2>/dev/null ||
+                framework_block "staged xnuhost lacks opt-in Prime-first placement"
+        fi
+        case "$FW_PERF_PROFILE" in frame|frame-task)
+            grep -Fq 'frame-trace' "$X" 2>/dev/null ||
+                framework_block "staged xnuhost lacks frame tracing" ;;
+        esac
+        case "$FW_PERF_PROFILE" in task|frame-task)
+            grep -Fq 'perf-task: enabled' "$X" 2>/dev/null ||
+                framework_block "staged xnuhost lacks task profiling" ;;
+        esac
         if [ "$FW_SOFT_THERMAL_OFF" = 1 ]; then
             grep -Fq 'SM8850_FULL_BRIDGES=ADMITTED_NO_USERSPACE_THERMAL_180S' "$X" 2>/dev/null ||
                 framework_block "staged xnuhost lacks current 180s no-thermal-guard admission; rebuild and stage the native runtime BEFORE rearming APFS Data"
@@ -2280,6 +2325,8 @@ if [ "$FRAMEWORK" = 1 ]; then
             framework_setup_failed "could not record bounded duration"
         printf '%s\n' "$FW_PERF_PROFILE" > "$CTL/framework.perf-profile" ||
             framework_setup_failed "could not record performance instrumentation profile"
+        printf '%s\n' "$FW_CPU_PROFILE" > "$CTL/framework.cpu-profile" ||
+            framework_setup_failed "could not record CPU placement profile"
         if [ "$FW_SOFT_THERMAL_OFF" = 1 ]; then
             printf 'disabled-180s\n' > "$CTL/framework.soft-thermal" ||
                 framework_setup_failed "could not record explicitly accepted no-software-guard mode"
