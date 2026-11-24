@@ -1844,6 +1844,21 @@ if [ "$FRAMEWORK" = 1 ]; then
     [ "$FW_MODE" != reboot-smoke ] || FW_MODE=smoke
     # Bounded, operator-selected duration measured from Framework stop.
     FW_DURATION=600
+    FW_SMOKE_SECONDS=20
+    # Optional fixed 30-second headless CPU measurement window. Ordinary
+    # reboot-smoke remains 20s; retain the initial cutoff, all guards and
+    # full iOS profile. The duration is selected before stopping Framework.
+    if [ "$2" = reboot-smoke ]; then
+        if [ "$MODE" = --framework-check ]; then
+            [ "$#" -le 3 ] || framework_block "unexpected reboot-smoke arguments"
+            FW_SMOKE_SECONDS=${3:-20}
+        else
+            [ "$#" -le 5 ] || framework_block "unexpected reboot-smoke arguments"
+            FW_SMOKE_SECONDS=${5:-20}
+        fi
+        case "$FW_SMOKE_SECONDS" in 20|30) ;; *) framework_block "reboot-smoke duration must be 20 or 30 seconds" ;; esac
+        echo "SM8850_FRAMEWORK_SMOKE_SECONDS=$FW_SMOKE_SECONDS"
+    fi
     if [ "$FW_MODE" = run ]; then
         if [ "$MODE" = --framework-check ]; then
             # Optional fourth argument pins the no-soft-guard experiment,
@@ -2227,6 +2242,10 @@ if [ "$FRAMEWORK" = 1 ]; then
         fi
     fi
     if [ "$FRAMEWORK_REBOOT" = 1 ]; then
+        if [ "$FW_MODE" = smoke ]; then
+            printf '%s\n' "$FW_SMOKE_SECONDS" > "$CTL/framework.duration" ||
+                framework_setup_failed "could not record smoke duration"
+        fi
         printf 'reboot\n' > "$CTL/framework.return" ||
             framework_setup_failed "cannot record mandatory reboot-only return"
     fi
@@ -2454,7 +2473,7 @@ if [ "$FRAMEWORK_REBOOT" = 1 ]; then
         fi
         echo "Legacy watchdog a:82 and normal One UI boot are NOT independently qualified. Explicit-risk experiment."
     else
-        echo "Framework-only smoke: independent 20s deadline requests reboot after Framework stop."
+        echo "Framework-only smoke: independent ${FW_SMOKE_SECONDS}s deadline requests reboot after Framework stop."
     fi
     echo "If frozen, Samsung Side/Power + Volume Down for >7s forces restart; this does NOT verify key watcher."
 else
@@ -2623,7 +2642,11 @@ if [ "$FRAMEWORK" = 1 ]; then
     # request by several seconds.
     fw_tick=$(watchdog_now) || fw_recover "cannot timestamp verified Framework stop"
     fw_seconds=10
-    [ "$FRAMEWORK_REBOOT" != 1 ] || fw_seconds=20
+    if [ "$FRAMEWORK_REBOOT" = 1 ] && [ "$FW_MODE" = smoke ]; then
+        [ "$(cat "$CTL/framework.duration" 2>/dev/null)" = "$FW_SMOKE_SECONDS" ] ||
+            fw_recover "smoke duration marker missing or mismatched"
+        fw_seconds=$FW_SMOKE_SECONDS
+    fi
     if [ "$FW_MODE" = run ]; then
         # Exactly the requested 60..600s from verified Framework stop.
         # Independent framework-deadline survives guest/USB failures.
