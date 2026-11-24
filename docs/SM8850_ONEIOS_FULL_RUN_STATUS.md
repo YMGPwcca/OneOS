@@ -135,3 +135,11 @@ Recovery, independent watchdog qualification and the previous
 CPU >100 C measurements are unchanged; this fix is NOT a new thermal
 safety certification. Verify local CI and stage matching OneOS revision
 before any further experiment.
+
+## 2026-11-25: opt-in performance profiles (source only)
+
+The performance branch `feat/sm8850-xnuhost-perf-p0` is based on the existing 30-second Framework benchmark branch; the old branch is retained. It adds two independent, optional positional tokens to the already admitted full-run protocol. The final token order is existing duration, existing optional thermal token, optional `perf-frame` / `perf-task` / `perf-frame-task` (or `perf-off`), optional `cpu-prime-first`. Omission leaves both performance and placement defaults unchanged. Host runners pass and verify the preflight acknowledgements. Root-owned `control/framework.perf-profile` and `control/framework.cpu-profile` are recorded before Data consumption and carried into the isolated inner process. Opt-in runtime flags are checked against the records by the matching OneiOS binary; no inherited environment is needed. Bounded trace profiles unset the verbose GPU-command environment only for that session.
+
+Prime-first requires a matching native build; the root preflight checks the capability marker before consuming Data. The native implementation independently validates topology and affinity and reports ACTIVE or DEFAULT_FALLBACK. This is a candidate, not a production policy. See the pinned OneiOS performance tracker for the exact mapping, tests and limitations.
+
+The original admission, risk tokens, 180-second branch restriction, root thermal/cap policy, kernel/firmware protection, Data reserve and mandatory reboot-return are unchanged. No extra physical run or watchdog qualification is authorized. Host-only test: `python3 tests/test_sm8850_perf_profile.py -v`. Source committed; CachyOS regression/CI and hardware acceptance pending.
