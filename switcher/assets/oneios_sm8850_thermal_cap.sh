@@ -89,16 +89,33 @@ policy() {
 }
 # Scan the host's policies. No generic cpufreq_max_limit "-1" writes:
 # One UI's old low-power or Samsung vendor vote must never be relaxed.
+# Hot-path sysfs attributes are single-value text files. Read in this shell,
+# rather than spawning a cat subprocess for every field at a low CPU ceiling.
+# Accept a final line without newline (offline fixtures); reject extra lines,
+# empty values and failed opens. Callers still validate type/range/identity.
+read_single_value() {
+    READ_VALUE=
+    READ_TRAILING=
+    IFS= read -r READ_VALUE || [ -n "$READ_VALUE" ] || return 1
+    if IFS= read -r READ_TRAILING || [ -n "$READ_TRAILING" ]; then
+        return 1
+    fi
+    [ -n "$READ_VALUE" ]
+}
 policies() {
     root=$1
     policies_found=0
     for pol in "$root"/sys/devices/system/cpu/cpufreq/policy*; do
         [ -d "$pol" ] || continue
         case "${pol##*/}" in policy[0-9]*) ;; *) return 1 ;; esac
-        hw=$(cat "$pol/cpuinfo_max_freq" 2>/dev/null) || return 1
-        mn=$(cat "$pol/cpuinfo_min_freq" 2>/dev/null) || return 1
-        active_min=$(cat "$pol/scaling_min_freq" 2>/dev/null) || return 1
-        cur=$(cat "$pol/scaling_max_freq" 2>/dev/null) || return 1
+        read_single_value 2>/dev/null < "$pol/cpuinfo_max_freq" || return 1
+        hw=$READ_VALUE
+        read_single_value 2>/dev/null < "$pol/cpuinfo_min_freq" || return 1
+        mn=$READ_VALUE
+        read_single_value 2>/dev/null < "$pol/scaling_min_freq" || return 1
+        active_min=$READ_VALUE
+        read_single_value 2>/dev/null < "$pol/scaling_max_freq" || return 1
+        cur=$READ_VALUE
         uint "$hw" && uint "$mn" && uint "$active_min" && uint "$cur" &&
           [ "$hw" -ge 200000 ] && [ "$hw" -le 6000000 ] &&
           [ "$mn" -ge 100000 ] && [ "$mn" -le "$hw" ] &&
@@ -130,9 +147,12 @@ apply_cap() {
     if [ "$strict" = strict ]; then
         for pol in "$root"/sys/devices/system/cpu/cpufreq/policy*; do
             [ -d "$pol" ] || continue
-            hw=$(cat "$pol/cpuinfo_max_freq" 2>/dev/null) || return 1
-            mn=$(cat "$pol/cpuinfo_min_freq" 2>/dev/null) || return 1
-            active_min=$(cat "$pol/scaling_min_freq" 2>/dev/null) || return 1
+            read_single_value 2>/dev/null < "$pol/cpuinfo_max_freq" || return 1
+            hw=$READ_VALUE
+            read_single_value 2>/dev/null < "$pol/cpuinfo_min_freq" || return 1
+            mn=$READ_VALUE
+            read_single_value 2>/dev/null < "$pol/scaling_min_freq" || return 1
+            active_min=$READ_VALUE
             requested=$((hw / 100 * pct))
             [ "$requested" -ge "$mn" ] || requested=$mn
             if [ "$active_min" -gt "$requested" ]; then
@@ -144,10 +164,14 @@ apply_cap() {
 
     for pol in "$root"/sys/devices/system/cpu/cpufreq/policy*; do
         [ -d "$pol" ] || continue
-        hw=$(cat "$pol/cpuinfo_max_freq" 2>/dev/null) || return 1
-        mn=$(cat "$pol/cpuinfo_min_freq" 2>/dev/null) || return 1
-        active_min=$(cat "$pol/scaling_min_freq" 2>/dev/null) || return 1
-        cur=$(cat "$pol/scaling_max_freq" 2>/dev/null) || return 1
+        read_single_value 2>/dev/null < "$pol/cpuinfo_max_freq" || return 1
+        hw=$READ_VALUE
+        read_single_value 2>/dev/null < "$pol/cpuinfo_min_freq" || return 1
+        mn=$READ_VALUE
+        read_single_value 2>/dev/null < "$pol/scaling_min_freq" || return 1
+        active_min=$READ_VALUE
+        read_single_value 2>/dev/null < "$pol/scaling_max_freq" || return 1
+        cur=$READ_VALUE
         uint "$hw" && uint "$mn" && uint "$active_min" && uint "$cur" &&
           [ "$active_min" -ge "$mn" ] && [ "$active_min" -le "$hw" ] || return 1
         target=$((hw / 100 * pct))
@@ -166,7 +190,8 @@ apply_cap() {
         if [ "$cur" -gt "$target" ]; then
             printf '%s\n' "$target" > "$pol/scaling_max_freq" || return 1
         fi
-        got=$(cat "$pol/scaling_max_freq" 2>/dev/null) || return 1
+        read_single_value 2>/dev/null < "$pol/scaling_max_freq" || return 1
+        got=$READ_VALUE
         uint "$got" && [ "$got" -le "$target" ] && [ "$got" -ge "$mn" ] || return 1
     done
 }
@@ -334,7 +359,7 @@ case "$MODE" in
             done
             now=$(tick) || fault invalid_uptime
             [ "$ht" -le "$now" ] && [ $((now-ht)) -le 3 ] &&
-                [ "$hseq" -gt 0 ] || fault stale_guard_sample
+                [ "$hseq" -gt 0 ] || fault "stale_guard_sample now=$now sample=$ht seq=$hseq"
             choice=$(policy "$level" "$cpu" "$gpu" "$ddr" "$bat" "$lrp" "$ap") ||
                 fault invalid_or_emergency_temperature
             desired=${choice%%:*}

@@ -37,6 +37,19 @@ type_group() {
         *) return 1 ;;
     esac
 }
+# Hot-path sysfs attributes are single-value text files. Read in this shell,
+# rather than spawning a cat subprocess for every field at a low CPU ceiling.
+# Accept a final line without newline (offline fixtures); reject extra lines,
+# empty values and failed opens. Callers still validate type/range/identity.
+read_single_value() {
+    READ_VALUE=
+    READ_TRAILING=
+    IFS= read -r READ_VALUE || [ -n "$READ_VALUE" ] || return 1
+    if IFS= read -r READ_TRAILING || [ -n "$READ_TRAILING" ]; then
+        return 1
+    fi
+    [ -n "$READ_VALUE" ]
+}
 read_all() {
     HEADER_BOOT=$1
     FILE=$2
@@ -59,10 +72,11 @@ read_all() {
             type_group "$typ" "$grp" || return 1
             tfile="/sys/class/thermal/thermal_zone$idx/type"
             vfile="/sys/class/thermal/thermal_zone$idx/temp"
-            [ "$(cat "$tfile" 2>/dev/null)" = "$typ" ] || return 1
-            raw=$(cat "$vfile" 2>/dev/null) || return 1
+            read_single_value 2>/dev/null < "$tfile" && [ "$READ_VALUE" = "$typ" ] || return 1
+            read_single_value 2>/dev/null < "$vfile" || return 1
+            raw=$READ_VALUE
             is_uint "$raw" && [ "$raw" -gt 0 ] && [ "$raw" -le 200000 ] || return 1
-            [ "$(cat "$tfile" 2>/dev/null)" = "$typ" ] || return 1
+            read_single_value 2>/dev/null < "$tfile" && [ "$READ_VALUE" = "$typ" ] || return 1
             case "$grp" in
                 cpu) cpu_count=$((cpu_count+1))
                      if [ "$raw" -gt "$CPU_MAX" ]; then
@@ -83,13 +97,17 @@ read_all() {
         [ "$count" -eq "$claimed" ] && [ "$cpu_count" -gt 0 ] &&
             [ "$gpu_count" -gt 0 ] && [ "$ddr_count" -gt 0 ] || return 1
     } < "$FILE" || return 1
-    BAT=$(cat /sys/class/power_supply/battery/temp 2>/dev/null) || return 1
-    LRP=$(cat /sys/class/power_supply/battery/lrp 2>/dev/null) || return 1
-    AP=$(cat /sys/class/sec/sec-ap-thermistor/temperature 2>/dev/null) || return 1
+    read_single_value 2>/dev/null < /sys/class/power_supply/battery/temp || return 1
+    BAT=$READ_VALUE
+    read_single_value 2>/dev/null < /sys/class/power_supply/battery/lrp || return 1
+    LRP=$READ_VALUE
+    read_single_value 2>/dev/null < /sys/class/sec/sec-ap-thermistor/temperature || return 1
+    AP=$READ_VALUE
     for val in "$BAT" "$LRP" "$AP"; do
         is_uint "$val" && [ "$val" -gt 0 ] && [ "$val" -le 1200 ] || return 1
     done
-    [ "$(cat /proc/sys/kernel/random/boot_id 2>/dev/null)" = "$HEADER_BOOT" ] || return 1
+    read_single_value 2>/dev/null < /proc/sys/kernel/random/boot_id &&
+        [ "$READ_VALUE" = "$HEADER_BOOT" ] || return 1
     # EARLY EXPERIMENT ABORT, not a hardware critical threshold.
     # Preserve the exact exceeded group and real-zone peak with fixed units.
     # These diagnostic tokens are appended to the existing fault record and
@@ -147,6 +165,10 @@ case "$MODE" in
             case "$(cat "$CTL/state" 2>/dev/null)" in
                 returning|returned|failed) exit 0 ;;
             esac
+            # Use the actual completed sample timestamp, never a synthetic heartbeat.
+            # Record scan cost for diagnosing starvation; the freshness limit is unchanged.
+            read -r scan_start _ < /proc/uptime || scan_start=
+            scan_start=${scan_start%%.*}
             if read_all "$BOOT" "$MAN"; then
                 :
             else
@@ -180,7 +202,13 @@ case "$MODE" in
             # Never delay or replace the fail-closed fault branch above.
             case $((seq % 5)) in
                 1)
-                    echo "P0_THERMAL_SAMPLE=OK boot=$BOOT generation=$GEN seq=$seq uptime=$tick cpu_mC=$CPU_MAX cpu_zone=$CPU_MAX_ZONE gpu_mC=$GPU_MAX gpu_zone=$GPU_MAX_ZONE ddr_mC=$DDR_MAX ddr_zone=$DDR_MAX_ZONE bat_dC=$BAT lrp_dC=$LRP board_ap_dC=$AP"
+                    echo "P0_THERMAL_SAMPLE=OK boot=$BOOT generation=$GEN seq=$seq uptime=$tick cpu_mC=$CPU_MAX cpu_zone=$CPU_MAX_ZONE gpu_mC=$GPU_MAX gpu_zone=$GPU_MAX_ZONE ddr_mC=$DDR_MAX ddr_zone=$DDR_MAX_ZONE bat_dC=$BAT lrp_dC=$LRP board_ap_dC=$AP scan_seconds=$(
+                        if is_uint "$scan_start" && [ "$scan_start" -le "$tick" ]; then
+                            printf '%s' "$((tick-scan_start))"
+                        else
+                            printf unknown
+                        fi
+                    )"
                     # Parent OneiOS's thermal bridge reports host CPU and
                     # xnuhost load; bridges=0 cannot use that bridge. Read
                     # cumulative /proc counters from the independent guard

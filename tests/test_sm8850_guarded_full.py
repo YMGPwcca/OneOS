@@ -152,7 +152,7 @@ class FullRunThermalContract(unittest.TestCase):
             self.assertIn(token, guard)
         self.assertNotIn("setprop sys.powerctl", guard)
         self.assertIn('target=$mn', cap)
-        self.assertIn('active_min=$(cat "$pol/scaling_min_freq"', cap)
+        self.assertIn('read_single_value 2>/dev/null < "$pol/scaling_min_freq"', cap)
         self.assertIn('target=$active_min', cap)
         self.assertIn('P0_CPU_CAP=MIN_FLOOR_LIMITED', cap)
         # Appended thermal-cap logs span multiple boots, so each floor-limited
