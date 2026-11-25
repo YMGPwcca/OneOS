@@ -2767,7 +2767,7 @@ if [ "$FRAMEWORK" = 1 ]; then
                 fw_recover "prearmed root CPU throttle did not activate after Framework stop"
             printf '%s\n' "$WD_GEN" > "$CTL/thermal.cap.required" ||
                 fw_recover "could not mark mandatory CPU thermal throttle"
-            echo "CPU_THROTTLE=PREARMED_ACTIVATED_POST_STOP_STRICT_60_40_28_18_12_8"
+            echo "CPU_THROTTLE=PREARMED_ACTIVATED_POST_STOP_STRICT_60_40_28_18_12_8; TARGET_30_70C; CPU_75C_THROTTLE_NOT_RETURN"
         fi
     fi
     printf '%s\n' "$((fw_tick + fw_seconds))" > "$CTL/framework.deadline.tmp" &&

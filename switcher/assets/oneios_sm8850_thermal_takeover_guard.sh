@@ -8,7 +8,7 @@
 # fault. The cap worker handles an aggressive 28% max-frequency ceiling;
 # Samsung kernel/firmware thermal protection is NEVER modified.
 # Sensor loss, bad identities and failed heartbeats still fail closed.
-# Throttle-first experiment: 80 C is NOT a return point. The conservative
+# Throttle-first experiment: 70/75/80 C are NOT return points. The conservative
 # 90 C junction threshold is a last-resort runaway escape, NOT a certified
 # SM8850 critical trip. Guard still fails closed on missing sensors.
 set -u

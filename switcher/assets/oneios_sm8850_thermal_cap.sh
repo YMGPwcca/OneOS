@@ -1,5 +1,5 @@
 #!/system/bin/sh
-# SM8850 OneiOS: throttle-first CPU ceiling for bounded full takeover (target <80 C).
+# SM8850 OneiOS: throttle-first CPU ceiling for bounded full takeover (target 30-70 C).
 # Adapted from fahadalijaved/OneOS oneos_heat_cap, NOT its SKIN=45/47/50
 # thresholds. This worker reads the already-verified root thermal heartbeat.
 #
@@ -8,7 +8,8 @@
 # Explicit 180s --run-prearmed-floor experiment: initial 28% ceiling clipped to
 # Samsung's active minimum vote. This may exceed 28% in practice and MUST
 # be reported as FLOOR_LIMITED. Firmware/kernel thermal policy is untouched.
-# Never return on reaching 80 C: raise throttling instead; root guard owns last-resort runaway/invalid sensors.
+# At 70 C anticipate heat; at 75 C tighten the cap, not return. The existing
+# 90 C runaway / invalid sensor guard and bounded reboot deadline remain separate.
 # Runtime physical behavior and watchdog recovery are NOT yet qualified.
 set -u
 LC_ALL=C
@@ -37,7 +38,7 @@ fault() {
 }
 # Input: previous level, CPU/GPU/DDR milli-C, battery/LRP/boardAP deci-C.
 # Output: level:percent. This is a THROTTLE-FIRST candidate, not validated
-# SM8850 thermal calibration. At 80 C, throttle harder; DO NOT auto-return.
+# SM8850 thermal calibration. At 70 C and 75 C throttle harder; DO NOT auto-return.
 # An independent emergency root guard still owns sensor loss, runaway heat
 # and recovery. Caps are monotonic within one session (no mid-run reboost).
 policy() {
@@ -54,7 +55,7 @@ policy() {
         [ "$n" -gt 0 ] && [ "$n" -le 1200 ] || return 3
     done
     # Last-resort safety, not normal thermal management. We cannot guarantee
-    # <80 C using frequency caps alone: a runaway still has to reboot-return.
+    # 30-70 C using frequency caps alone: a runaway still has to reboot-return.
     hot=0
     if [ "$cpu" -ge 90000 ] || [ "$gpu" -ge 95000 ] ||
        [ "$ddr" -ge 95000 ] || [ "$bat" -ge 480 ] ||
@@ -69,10 +70,10 @@ policy() {
     if [ "$cpu" -ge 65000 ] || [ "$gpu" -ge 70000 ] ||
        [ "$ddr" -ge 70000 ] || [ "$bat" -ge 370 ] ||
        [ "$lrp" -ge 400 ] || [ "$ap" -ge 500 ]; then level=3; fi
-    if [ "$cpu" -ge 72000 ] || [ "$gpu" -ge 75000 ] ||
+    if [ "$cpu" -ge 70000 ] || [ "$gpu" -ge 75000 ] ||
        [ "$ddr" -ge 75000 ] || [ "$bat" -ge 400 ] ||
        [ "$lrp" -ge 430 ] || [ "$ap" -ge 550 ]; then level=4; fi
-    if [ "$cpu" -ge 77000 ] || [ "$gpu" -ge 80000 ] ||
+    if [ "$cpu" -ge 75000 ] || [ "$gpu" -ge 80000 ] ||
        [ "$ddr" -ge 80000 ] || [ "$bat" -ge 420 ] ||
        [ "$lrp" -ge 450 ] || [ "$ap" -ge 600 ]; then level=5; fi
     if [ "$cpu" -ge 80000 ] || [ "$gpu" -ge 85000 ] ||
@@ -210,6 +211,7 @@ case "$MODE" in
         [ "$(id -u)" = 0 ] || die root_required
         policies "" || die host_cpufreq_unavailable
         echo "P0_CPU_CAP=READ_ONLY_POLICY_AVAILABLE_NOT_CERTIFIED"
+        echo "SM8850_CPU_THROTTLE_POLICY=TARGET_30_70_THROTTLE_BY_75_MONOTONIC"
         exit 0 ;;
     --run-best-effort)
         # Explicit 180s no-software-thermal-guard experiment. Only the
@@ -354,6 +356,9 @@ case "$MODE" in
                 2) fault "unachievable_cpu_cap_floor level=$desired pct=$pct" ;;
                 *) fault cpufreq_write_or_readback ;;
             esac
+            if [ "$desired" -ne "$level" ] || [ "$seq" -eq 0 ]; then
+                echo "P0_CPU_THROTTLE=CAP_APPLIED boot=$BOOT generation=$GEN cpu_mC=$cpu from_level=$level level=$desired pct=$pct target_c=30-70 no_reboot_at_75=YES"
+            fi
             level=$desired
             seq=$((seq+1))
             atom thermal.cap.heartbeat "v1 $BOOT $GEN $$ $BIRTH $seq $now OK $level $pct" ||
