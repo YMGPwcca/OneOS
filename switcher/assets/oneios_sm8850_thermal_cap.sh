@@ -127,39 +127,96 @@ policies() {
     done
     [ "$policies_found" -ge 2 ]
 }
-# Desired cap computed from hardware maximum and clipped to BOTH the hardware
-# minimum and Samsung's dynamic scaling_min_freq vote. That vote may rise while
-# One UI runs (observed 384000 -> 1228800 kHz on policy0 on SM-S948B).
-# Do NOT modify scaling_min_freq or Samsung's cpufreq_max_limit.
-# A dynamic minimum can prevent the advertised 8% cap from being achieved:
-# report the floor honestly; root thermal guard still owns runaway recovery.
-# A target never raises an existing tighter cap; readback must not exceed it.
+# The guarded SM8850 candidate treats scaling_min_freq as an effective
+# readback, not an independently owned MIN request. Lower MAX first and
+# require BOTH effective bounds to fit the requested ceiling. Never write MIN.
+# A stock SCMI MAX change may settle asynchronously through the policy worker.
+strict_policy_values() {
+    read_single_value 2>/dev/null < "$1/cpuinfo_max_freq" || return 1
+    hw=$READ_VALUE
+    read_single_value 2>/dev/null < "$1/cpuinfo_min_freq" || return 1
+    mn=$READ_VALUE
+    read_single_value 2>/dev/null < "$1/scaling_min_freq" || return 1
+    active_min=$READ_VALUE
+    read_single_value 2>/dev/null < "$1/scaling_max_freq" || return 1
+    cur=$READ_VALUE
+    uint "$hw" && uint "$mn" && uint "$active_min" && uint "$cur" &&
+        [ "$hw" -ge 200000 ] && [ "$hw" -le 6000000 ] &&
+        [ "$mn" -ge 100000 ] && [ "$mn" -le "$hw" ] &&
+        [ "$active_min" -ge "$mn" ] && [ "$active_min" -le "$hw" ] &&
+        [ "$cur" -ge "$mn" ] && [ "$cur" -le "$hw" ] || return 1
+    target=$((hw / 100 * $2))
+    [ "$target" -ge "$mn" ] || target=$mn
+}
+strict_write_ceiling() {
+    printf '%s\n' "$2" > "$1/scaling_max_freq"
+}
+strict_apply_cap() {
+    strict_base="$1/sys/devices/system/cpu/cpufreq"
+    strict_pct=$2
+    # This branch is SM-S948B/m3q specific. Fail before writes on a
+    # missing or extra CPUFreq policy, rather than verify a partial set.
+    [ "$policies_found" = 2 ] &&
+        [ -d "$strict_base/policy0" ] && [ -d "$strict_base/policy6" ] || return 1
+    strict_conflict=0
+    for pol in "$strict_base/policy0" "$strict_base/policy6"; do
+        strict_policy_values "$pol" "$strict_pct" || return 1
+        if [ "$active_min" -gt "$target" ]; then
+            strict_conflict=1
+            echo "P0_CPU_CAP=MAX_FIRST_MIN_CONFLICT policy=${pol##*/} pct=$strict_pct requested_khz=$target scaling_min_khz=$active_min boot=${BOOT:-fixture} generation=${GEN:-fixture}"
+        fi
+        # Only lower an observed effective maximum; never raise an
+        # already tighter ceiling. This is still a shared sysfs request.
+        if [ "$cur" -gt "$target" ]; then
+            strict_write_ceiling "$pol" "$target" || return 1
+        fi
+    done
+    # Verify all policies AFTER all writes. Do not publish an OK heartbeat
+    # based on a successful write or just the readback of one cluster.
+    # Four observations, at most three 50ms sleeps. This is a bounded
+    # settle allowance, not a grace period for an unenforceable cap.
+    strict_attempt=0
+    while :; do
+        strict_bad=0
+        strict_min_bad=0
+        for pol in "$strict_base/policy0" "$strict_base/policy6"; do
+            strict_policy_values "$pol" "$strict_pct" || return 1
+            if [ "$active_min" -gt "$target" ] ||
+                [ "$cur" -gt "$target" ] || [ "$active_min" -gt "$cur" ]; then
+                strict_bad=1
+                [ "$active_min" -le "$target" ] || strict_min_bad=1
+                if [ "$strict_attempt" = 3 ]; then
+                    echo "P0_CPU_CAP=MAX_FIRST_READBACK_FAILED policy=${pol##*/} pct=$strict_pct requested_khz=$target scaling_min_khz=$active_min scaling_max_khz=$cur boot=${BOOT:-fixture} generation=${GEN:-fixture}"
+                    if [ "$active_min" -gt "$target" ]; then
+                        echo "P0_CPU_CAP=UNENFORCEABLE_MIN_VOTE policy=${pol##*/} pct=$strict_pct requested_khz=$target scaling_min_khz=$active_min boot=${BOOT:-fixture} generation=${GEN:-fixture}"
+                    fi
+                fi
+            fi
+        done
+        if [ "$strict_bad" = 0 ]; then
+            if [ "$strict_conflict" = 1 ]; then
+                echo "P0_CPU_CAP=MAX_FIRST_CONFLICT_READBACK_OK pct=$strict_pct boot=${BOOT:-fixture} generation=${GEN:-fixture}"
+            fi
+            return 0
+        fi
+        if [ "$strict_attempt" = 3 ]; then
+            [ "$strict_min_bad" = 0 ] || return 2
+            return 1
+        fi
+        strict_attempt=$((strict_attempt+1))
+        sleep 0.05 || return 1
+    done
+}
+# Strict mode lowers MAX and verifies the effective MIN/MAX pair, without
+# clipping the requested ceiling up to a vendor floor. The existing
+# separately selected lenient modes retain their explicit floor reporting.
 apply_cap() {
     root=$1 pct=$2 strict=${3:-lenient}
     case "$strict" in lenient|strict) ;; *) return 1 ;; esac
     policies "$root" || return 1
-
-    # A Samsung PM QoS / performance minimum may rise independently of
-    # scaling_max_freq. In LIVE mode, a claimed 28%/40% cap is unsafe if
-    # the minimum vote exceeds that cap. Fail closed before writing anything.
-    # The original lenient mode remains available ONLY for synthetic
-    # tests of the clamping algorithm; never use it for the live worker.
     if [ "$strict" = strict ]; then
-        for pol in "$root"/sys/devices/system/cpu/cpufreq/policy*; do
-            [ -d "$pol" ] || continue
-            read_single_value 2>/dev/null < "$pol/cpuinfo_max_freq" || return 1
-            hw=$READ_VALUE
-            read_single_value 2>/dev/null < "$pol/cpuinfo_min_freq" || return 1
-            mn=$READ_VALUE
-            read_single_value 2>/dev/null < "$pol/scaling_min_freq" || return 1
-            active_min=$READ_VALUE
-            requested=$((hw / 100 * pct))
-            [ "$requested" -ge "$mn" ] || requested=$mn
-            if [ "$active_min" -gt "$requested" ]; then
-                echo "P0_CPU_CAP=UNENFORCEABLE_MIN_VOTE policy=${pol##*/} pct=$pct requested_khz=$requested scaling_min_khz=$active_min boot=${BOOT:-fixture} generation=${GEN:-fixture}"
-                return 2
-            fi
-        done
+        strict_apply_cap "$root" "$pct"
+        return $?
     fi
 
     for pol in "$root"/sys/devices/system/cpu/cpufreq/policy*; do
@@ -178,12 +235,6 @@ apply_cap() {
         [ "$target" -ge "$mn" ] || target=$mn
         requested=$target
         if [ "$target" -lt "$active_min" ]; then
-            # Re-check in case the vendor vote rose after the strict first
-            # pass. Do not silently report heartbeat OK on an impossible cap.
-            if [ "$strict" = strict ]; then
-                echo "P0_CPU_CAP=UNENFORCEABLE_MIN_VOTE policy=${pol##*/} pct=$pct requested_khz=$requested scaling_min_khz=$active_min boot=${BOOT:-fixture} generation=${GEN:-fixture}"
-                return 2
-            fi
             target=$active_min
             echo "P0_CPU_CAP=MIN_FLOOR_LIMITED policy=${pol##*/} pct=$pct requested_khz=$requested scaling_min_khz=$active_min effective_target_khz=$target boot=${BOOT:-fixture} generation=${GEN:-fixture}"
         fi
@@ -364,12 +415,10 @@ case "$MODE" in
                 fault invalid_or_emergency_temperature
             desired=${choice%%:*}
             pct=${choice#*:}
-            # Only write to sysfs on a level change. Re-validate every tick
-            # that no cluster has escaped the currently demanded cap.
-            # A heartbeat is NOT proof of a working thermal ceiling if a
-            # vendor performance vote forces scaling_min_freq above the
-            # requested ceiling. Abort through the existing independent
-            # watcher before a 90 C emergency instead of silently clamping.
+            # Revalidate on every tick. In strict mode a high MIN may be
+            # resolved by a lower MAX, but both effective bounds must pass
+            # before the existing independent watcher sees an OK heartbeat.
+            # Never silently lift the strict ceiling to a vendor floor.
             if [ "$FLOOR_MODE" = 1 ]; then
                 apply_cap "" "$pct" lenient
             else
@@ -381,6 +430,16 @@ case "$MODE" in
                 2) fault "unachievable_cpu_cap_floor level=$desired pct=$pct" ;;
                 *) fault cpufreq_write_or_readback ;;
             esac
+            if [ "$FLOOR_MODE" != 1 ]; then
+                # A bounded QoS settle must not turn a previously fresh
+                # guard sample into an optimistic, newly stamped heartbeat.
+                now=$(tick) || fault invalid_uptime
+                [ "$ht" -le "$now" ] && [ $((now-ht)) -le 3 ] ||
+                    fault "stale_guard_sample now=$now sample=$ht seq=$hseq"
+                [ ! -e "$CTL/thermal.guard.fault" ] || fault thermal_guard_fault
+                [ ! -e "${CTL%/control}/session/return.request" ] || exit 0
+                [ "$GEN" = "$(cat "$CTL/watchdog.generation" 2>/dev/null)" ] || exit 0
+            fi
             if [ "$desired" -ne "$level" ] || [ "$seq" -eq 0 ]; then
                 echo "P0_CPU_THROTTLE=CAP_APPLIED boot=$BOOT generation=$GEN cpu_mC=$cpu from_level=$level level=$desired pct=$pct target_c=30-70 no_reboot_at_75=YES"
             fi

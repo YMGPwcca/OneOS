@@ -535,27 +535,121 @@ class SyntheticCpufreqTest(unittest.TestCase):
         self.assertEqual(384000, self.read("policy0"))
         self.assertEqual(768000, self.read("policy6"))
 
-    def test_strict_rejects_dangerous_samsung_votes_before_any_cap_write(self):
-        # Read-only phone sample 19 and sample 23 (not a synthetic guess):
-        # Samsung raised both minimums to 2.112 GHz, then briefly fixed
-        # the entire policy range near 3.4 / 3.76 GHz on One UI.
+    def set_min(self, name, value):
+        (self.policies[name] / "scaling_min_freq").write_text(str(value))
+
+    def read_min(self, name):
+        return int((self.policies[name] / "scaling_min_freq").read_text())
+
+    def apply_strict_model(self, pct, model):
+        # Source the REAL worker functions, but simulate kernel arbitration
+        # with disposable regular files. The override is in the test only,
+        # never in the shipped worker or the real /sys tree.
+        source = CAP.read_text().split("\nMODE=${1:-}", 1)[0]
+        self.assertIn("strict_apply_cap()", source)
+        script = source + "\n" + textwrap.dedent(model) + "\n" + """
+case "$1" in /tmp/oneios-cpu-cap-test.*) ;; *) exit 99 ;; esac
+[ "$(id -u)" != 0 ] && [ -d "$1" ] && [ ! -L "$1" ] || exit 99
+apply_cap "$1" "$2" strict
+"""
+        return subprocess.run(["sh", "-c", script, "oneios-qos-model",
+                               str(self.root), str(pct)],
+                              capture_output=True, text=True, timeout=7)
+
+    def test_strict_unclamped_minimum_still_fails_closed_after_lowering(self):
+        # Regular files do not implement kernel QoS arbitration. The
+        # requested MAX may be written, but no false success is allowed.
         for floor0, floor6, pct in (
             (2112000, 2112000, 40),
             (3398400, 3763200, 60),
         ):
             with self.subTest(floor0=floor0, floor6=floor6, pct=pct):
-                (self.policies["policy0"] / "scaling_min_freq").write_text(str(floor0))
-                (self.policies["policy6"] / "scaling_min_freq").write_text(str(floor6))
-                if pct == 60:
-                    # The actual samples reported min=max on both clusters.
-                    (self.policies["policy0"] / "scaling_max_freq").write_text(str(floor0))
-                    (self.policies["policy6"] / "scaling_max_freq").write_text(str(floor6))
-                old = {n: self.read(n) for n in self.policies}
+                self.set_min("policy0", floor0)
+                self.set_min("policy6", floor6)
+                for name, value in (("policy0", 3600000), ("policy6", 4742400)):
+                    (self.policies[name] / "scaling_max_freq").write_text(str(value))
                 p = self.apply_strict(pct)
                 self.assertNotEqual(0, p.returncode)
-                self.assertIn("P0_CPU_CAP=UNENFORCEABLE_MIN_VOTE", p.stdout)
-                self.assertIn("P0_CPU_CAP=BLOCKED fixture_policy_failed", p.stderr)
-                self.assertEqual(old, {n: self.read(n) for n in self.policies})
+                self.assertIn("MAX_FIRST_MIN_CONFLICT", p.stdout)
+                self.assertIn("MAX_FIRST_READBACK_FAILED", p.stdout)
+                self.assertIn("UNENFORCEABLE_MIN_VOTE", p.stdout)
+                self.assertIn("BLOCKED fixture_policy_failed", p.stderr)
+                self.assertNotIn("FIXTURE_APPLIED", p.stdout)
+                self.assertEqual(3600000 // 100 * pct, self.read("policy0"))
+                self.assertEqual(4742400 // 100 * pct, self.read("policy6"))
+                self.assertEqual(floor0, self.read_min("policy0"))
+                self.assertEqual(floor6, self.read_min("policy6"))
+
+    def test_strict_max_first_model_accepts_clamped_effective_minimums(self):
+        self.set_min("policy0", 3600000)
+        self.set_min("policy6", 4742400)
+        p = self.apply_strict_model(40, r"""
+            strict_write_ceiling() {
+                printf '%s\n' "$2" > "$1/scaling_max_freq" || return 1
+                read_single_value < "$1/scaling_min_freq" || return 1
+                if [ "$READ_VALUE" -gt "$2" ]; then
+                    printf '%s\n' "$2" > "$1/scaling_min_freq"
+                fi
+            }
+        """)
+        self.assertEqual(0, p.returncode, (p.stdout, p.stderr))
+        self.assertIn("MAX_FIRST_CONFLICT_READBACK_OK", p.stdout)
+        self.assertEqual(1440000, self.read("policy0"))
+        self.assertEqual(1896960, self.read("policy6"))
+        self.assertEqual(self.read("policy0"), self.read_min("policy0"))
+        self.assertEqual(self.read("policy6"), self.read_min("policy6"))
+
+    def test_strict_max_first_model_allows_bounded_settle(self):
+        self.set_min("policy0", 3600000)
+        self.set_min("policy6", 4742400)
+        p = self.apply_strict_model(40, r"""
+            sleep() {
+                [ "$1" = 0.05 ] || return 1
+                for p in "$strict_base/policy0" "$strict_base/policy6"; do
+                    read_single_value < "$p/scaling_max_freq" || return 1
+                    printf '%s\n' "$READ_VALUE" > "$p/scaling_min_freq" || return 1
+                done
+            }
+        """)
+        self.assertEqual(0, p.returncode, (p.stdout, p.stderr))
+        self.assertIn("MAX_FIRST_CONFLICT_READBACK_OK", p.stdout)
+
+    def test_strict_max_first_model_rejects_ignored_write(self):
+        p = self.apply_strict_model(40, "strict_write_ceiling() { return 0; }")
+        self.assertEqual(1, p.returncode, (p.stdout, p.stderr))
+        self.assertIn("MAX_FIRST_READBACK_FAILED", p.stdout)
+        self.assertNotIn("MAX_FIRST_CONFLICT_READBACK_OK", p.stdout)
+        self.assertEqual(3600000, self.read("policy0"))
+
+    def test_strict_max_first_rechecks_first_cluster_after_second_write(self):
+        p = self.apply_strict_model(40, r"""
+            strict_write_ceiling() {
+                printf '%s\n' "$2" > "$1/scaling_max_freq" || return 1
+                case "$1" in
+                    */policy6)
+                        printf '%s\n' 3600000 > "$strict_base/policy0/scaling_max_freq" ;;
+                esac
+            }
+        """)
+        self.assertEqual(1, p.returncode, (p.stdout, p.stderr))
+        self.assertIn("MAX_FIRST_READBACK_FAILED policy=policy0", p.stdout)
+
+    def test_strict_max_first_does_not_raise_tighter_existing_maximum(self):
+        (self.policies["policy0"] / "scaling_max_freq").write_text("998400")
+        p = self.apply_strict(40)
+        self.assertEqual(0, p.returncode, (p.stdout, p.stderr))
+        self.assertEqual(998400, self.read("policy0"))
+        self.assertEqual(1896960, self.read("policy6"))
+
+    def test_strict_max_first_rejects_missing_or_extra_policy_before_write(self):
+        extra = self.policies["policy0"].parent / "policy1"
+        extra.mkdir()
+        for f in self.policies["policy0"].iterdir():
+            (extra / f.name).write_text(f.read_text())
+        old = {n: self.read(n) for n in self.policies}
+        p = self.apply_strict(40)
+        self.assertNotEqual(0, p.returncode)
+        self.assertEqual(old, {n: self.read(n) for n in self.policies})
 
     def test_strict_only_rejects_an_actual_ceiling_conflict(self):
         # At 60%, 2.112 GHz is below the requested limit on both
