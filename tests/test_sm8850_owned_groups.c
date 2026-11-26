@@ -76,15 +76,17 @@ static void cleanup(struct fixture *x)
 /* Simulate the asynchronous kernel event acknowledgement, using atomic
  * replacement of ordinary fixture files. Real cgroupfs is not involved.
  */
-struct ack { int fd; long wanted; };
+struct ack { int fd, parent; long wanted; };
 static void *acknowledge(void *arg)
 {
     struct ack *a = arg;
     for (unsigned i = 0; i < 500; i++) {
         long requested;
         if (!read_number(a->fd, "cgroup.freeze", &requested) && requested == a->wanted) {
-            put(a->fd, "events.next", a->wanted ? "populated 1\nfrozen 1\n" : "populated 1\nfrozen 0\n");
-            CHECK(!renameat(a->fd, "events.next", a->fd, "cgroup.events"));
+            /* Keep the temporary name outside the leaf so it cannot race
+             * the production leaf scan while being renamed into place. */
+            put(a->parent, "events.next", a->wanted ? "populated 1\nfrozen 1\n" : "populated 1\nfrozen 0\n");
+            CHECK(!renameat(a->parent, "events.next", a->fd, "cgroup.events"));
             return NULL;
         }
         usleep(1000);
@@ -105,7 +107,7 @@ static void happy_path(void)
     CHECK(oneios_owned_cpu_set(&x.g, 101) != 0);
     CHECK(!expect_number(x.cp, "cpu.cfs_quota_us", -1));
     CHECK(oneios_owned_thaw(&x.g, 100) != 0);
-    struct ack a = { x.f, 1 }; pthread_t th;
+    struct ack a = { x.f, x.fp, 1 }; pthread_t th;
     CHECK(!pthread_create(&th, NULL, acknowledge, &a));
     /* Only the acknowledgement proves frozen, not the write. */
     int rc = oneios_owned_freeze(&x.g, 1000);

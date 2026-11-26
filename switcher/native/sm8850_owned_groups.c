@@ -286,9 +286,10 @@ static int wait_frozen(struct oneios_owned_groups *g, long wanted, unsigned ms)
         long actual;
         if (verify_groups(g) || expect_number(g->freezer, "cgroup.freeze", wanted) ||
             frozen_event(g->freezer, &actual)) return -1;
-        if (actual == wanted) return 0;
-        if (boot_ms(&now) || now < start) return -1;
+        if (boot_ms(&now)) return -1;
+        if (now < start) return invalid();
         if (now - start >= ms) { errno = ETIMEDOUT; return -1; }
+        if (actual == wanted) return 0;
         unsigned long long remain = ms - (now - start);
         long nap = (long)(remain < 10 ? remain : 10);
         nanosleep(&(struct timespec){ .tv_sec = 0, .tv_nsec = nap * 1000000L }, NULL);

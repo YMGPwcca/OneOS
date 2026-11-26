@@ -97,7 +97,8 @@ eight cores, 20ms period, no fixed frequency ceiling. Closing a handle
 does not change a group or thaw it. A quota/readback failure latches a
 fault without preventing a verified freeze; thaw is explicit, requires
 an acknowledged freeze and verified quota, and is forbidden after a
-fault. Freeze/thaw have a bounded 2s maximum acknowledgement window.
+fault. Freeze/thaw have a bounded 2s maximum acknowledgement polling window;
+blocking kernel syscalls themselves are not proven bounded by that timer.
 A failed thaw attempts to reassert freeze on the same verified group;
 that is not a confirmed freeze.
 
