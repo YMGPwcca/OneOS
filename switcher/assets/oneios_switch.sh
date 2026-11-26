@@ -1401,12 +1401,12 @@ case "$MODE" in
             at "joining isolated guest CPU bandwidth group before publishing PID"
             framework_thermal_cap_healthy || die_inner "CPU budget heartbeat not healthy"
             guest_cpu_group=$(framework_cpu_budget_group "$CTL") || die_inner "CPU bandwidth group identity invalid"
-            printf '%s\n' "$" > "$guest_cpu_group/cgroup.procs" || die_inner "cannot join guest CPU group"
-            awk -F: -v expected="/${guest_cpu_group##*/}" '$2=="cpu" && $3==expected {ok=1} END {exit !ok}' /proc/$/cgroup ||
+            printf '%s\n' "$$" > "$guest_cpu_group/cgroup.procs" || die_inner "cannot join guest CPU group"
+            awk -F: -v expected="/${guest_cpu_group##*/}" '$2=="cpu" && $3==expected {ok=1} END {exit !ok}' /proc/$$/cgroup ||
                 die_inner "guest CPU group membership not verified"
             echo "ONEIOS_CPU_BUDGET_GROUP=$guest_cpu_group MEMBERSHIP=VERIFIED"
         fi
-        echo $ 2>/dev/null > "$CTL/inner.pid"
+        echo $$ 2>/dev/null > "$CTL/inner.pid"
         at "pid $$, mount namespace $(readlink /proc/$$/ns/mnt 2>/dev/null)"
         R_XNUHOST=$(conf "$STAGE/runtime.conf" xnuhost)
         [ -n "$BB" ] && [ -x "$BB" ] || die_inner "no busybox"

@@ -378,7 +378,7 @@ bw_verify() {
         [ "$(cat "$BW_GROUP/cpu.cfs_quota_us")" = "$(sm8850_cpu_quota_us "$BW_PCT")" ] &&
         [ "$(cat /dev/cpuctl/cpu.cfs_quota_us)" = -1 ] &&
         [ "$(cat /dev/cpuctl/cpu.cfs_period_us)" = 100000 ] &&
-        bw_member "/proc/$/cgroup" / || return 1
+        bw_member "/proc/$$/cgroup" / || return 1
     # The guest joins before publishing its PID. Check its leader once
     # known; audit stable threads as well, allowing a thread to exit during
     # a read. Descendants inherit the CPU group; RT enforcement and any
@@ -543,12 +543,12 @@ case "$MODE" in
                 BW_MODE=1
                 # Move only this root worker out of any inherited Android
                 # CPU restriction, not an Android service or parent quota.
-                printf '%s\n' "$" > /dev/cpuctl/cgroup.procs || die cap_root_cpu_group
-                bw_member "/proc/$/cgroup" / || die cap_root_cpu_membership ;;
+                printf '%s\n' "$$" > /dev/cpuctl/cgroup.procs || die cap_root_cpu_group
+                bw_member "/proc/$$/cgroup" / || die cap_root_cpu_membership ;;
             '') policies "" || die cpufreq_unavailable ;;
             *) die unknown_cpu_budget_profile ;;
         esac
-        echo $ > /sys/fs/cgroup/cgroup.procs 2>/dev/null
+        echo $$ > /sys/fs/cgroup/cgroup.procs 2>/dev/null
         echo -1000 > /proc/$$/oom_score_adj 2>/dev/null
         BIRTH=$(birth $$)
         [ -n "$BIRTH" ] || die no_pid_birth
