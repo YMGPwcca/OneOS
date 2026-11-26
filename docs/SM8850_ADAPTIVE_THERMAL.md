@@ -171,3 +171,15 @@ to compare native and Python decisions/state over 8,640 deterministic
 valid samples, including duplicates, auxiliary limits and hysteresis.
 This is an offline parity test; invalid identity/freshness and provider
 failures are checked separately by the native controller fixture.
+
+
+## G24.2 local receipt (2026-11-26)
+
+Operator WSL at OneOS `25ae4473711265d13a5bbde5df1f271ddf7708ae`, OneiOS
+`122c88728c2cd0bc07c5bef06422750b13a25a6b`: host production compile PASS,
+owned-group fixture 330 checks PASS, native controller 239 checks PASS,
+C/Python parity 8,640 samples PASS, both Android ARM64 object compiles
+PASS. DEVICE_ACCESS=NONE; evidence `/tmp/oneios-g242.ijjF7A`.
+No new device qualification. Next implement the actual XNUHost GPU
+ingress/drain path and provider ownership; do not repeat unchanged policy
+tests or weaken the retired-admission block.
