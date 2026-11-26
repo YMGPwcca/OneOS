@@ -2,6 +2,7 @@
  * open real cgroupfs, GPU or vendor frequency interfaces. The actual group
  * primitives have their own filesystem/ACK fixtures. */
 #include "../switcher/native/sm8850_thermal_controller.h"
+#include <inttypes.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -220,8 +221,41 @@ static void refusal_and_missing(void)
     CHECK(oneios_thermal_controller_tick(&x.c, NULL) == ONEIOS_THERMAL_FAULT_QUIESCED);
 }
 
-int main(void)
+/* Batch interface used ONLY by the host parity test. A trajectory starts
+ * with three explicit budgets, followed by valid sample rows. */
+static int policy_trace(void)
 {
+    struct oneios_thermal_policy p = {0};
+    if (scanf("%u %u %u", &p.freq_pct, &p.cpu_pct, &p.floor_pct) != 3) return 2;
+    struct oneios_thermal_sample s = {0};
+    int n;
+    while ((n = scanf("%" SCNu64 " %" SCNu64 " %d %d %d %d %d %d",
+                     &s.seq, &s.ms, &s.cpu_mc, &s.gpu_mc, &s.ddr_mc,
+                     &s.battery_dc, &s.lrp_dc, &s.board_ap_dc)) == 8) {
+        enum oneios_thermal_action a = oneios_thermal_policy_step(&p, &s);
+        const char *label;
+        switch (a) {
+        case ONEIOS_THERMAL_DUPLICATE: label = "NO_NEW_SAMPLE"; break;
+        case ONEIOS_THERMAL_COOL: label = "COOL"; break;
+        case ONEIOS_THERMAL_HOLD: label = "HOLD"; break;
+        case ONEIOS_THERMAL_SOFT: label = "SOFT"; break;
+        case ONEIOS_THERMAL_HARD: label = "HARD"; break;
+        case ONEIOS_THERMAL_RECOVERY_MINIMUM: label = "RECOVERY_MINIMUM"; break;
+        case ONEIOS_THERMAL_QUIESCE: label = "QUIESCE_TEMPERATURE"; break;
+        case ONEIOS_THERMAL_RESUME_MINIMUM: label = "RESUME_MINIMUM"; break;
+        default: return 2;
+        }
+        printf("%s %u %u %d %d %u %" PRIu64 " %" PRIu64 " %" PRIu64 "\n",
+            label, p.freq_pct, p.cpu_pct, (int)p.hard, (int)p.paused,
+            p.cool_samples, p.last_seq, p.last_ms, p.last_change_ms);
+    }
+    return n == EOF ? 0 : 2;
+}
+
+int main(int argc, char **argv)
+{
+    if (argc == 2 && !strcmp(argv[1], "--policy")) return policy_trace();
+    if (argc != 1) return 2;
     normal_and_hard(); pause_and_resume(); stale_duplicate_and_wrong_session();
     failure_paths(); refusal_and_missing();
     printf("THERMAL_CONTROLLER=PASS checks=%u DEVICE_ACCESS=NONE\n", checks);

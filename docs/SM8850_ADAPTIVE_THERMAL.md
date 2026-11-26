@@ -164,3 +164,10 @@ The legacy admission remains blocked. Remaining work: actual independent
 frequency provider, GPU/IO gate+drain provider, session creator/membership
 and independent sensor/runner lifecycle. No new recovery audit or kernel
 work follows from this change.
+
+The host controller fixture also supports a batch pure-policy trace mode.
+Run `python3 tests/test_sm8850_thermal_policy_parity.py HOST_TEST_BINARY`
+to compare native and Python decisions/state over 8,640 deterministic
+valid samples, including duplicates, auxiliary limits and hysteresis.
+This is an offline parity test; invalid identity/freshness and provider
+failures are checked separately by the native controller fixture.

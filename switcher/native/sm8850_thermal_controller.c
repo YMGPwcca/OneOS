@@ -177,7 +177,11 @@ static enum oneios_thermal_result fault(struct oneios_thermal_controller *c)
     (void)set_cpu(c, 10);
     (void)set_freq(c, c->policy.floor_pct);
     if (!session_ok(c)) return c->fault_result;
-    bool drained = c->ops.gpu_quiesce(c->ctx, ONEIOS_THERMAL_ACK_MS) == 0;
+    /* When already paused, do not demand a new ACK from frozen workers.
+     * An independent verified GPU gate/drain can be reused. */
+    bool drained = c->ops.gpu_verify(c->ctx, true) == 0;
+    if (!drained && session_ok(c))
+        drained = c->ops.gpu_quiesce(c->ctx, ONEIOS_THERMAL_ACK_MS) == 0;
     bool frozen = session_ok(c) &&
         oneios_owned_freeze(c->groups, ONEIOS_THERMAL_ACK_MS) == 0;
     if (drained && frozen && session_ok(c) &&
@@ -250,7 +254,9 @@ enum oneios_thermal_result oneios_thermal_controller_tick(
             return fault(c);
         c->paused = false;
         /* The GPU gate stays closed until thaw and current sample verified. */
-        if (!fresh(c, s) || c->ops.gpu_verify(c->ctx, true) ||
+        if (!fresh(c, s) || oneios_owned_groups_verify(c->groups, false) ||
+            c->ops.frequency_verify(c->ctx, next.floor_pct) ||
+            c->ops.gpu_verify(c->ctx, true) || !fresh(c, s) ||
             c->ops.gpu_resume(c->ctx, ONEIOS_THERMAL_ACK_MS))
             return fault(c);
     }
