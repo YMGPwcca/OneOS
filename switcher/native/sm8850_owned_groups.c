@@ -211,6 +211,21 @@ static int frozen_event(int dir, long *value)
     return found ? 0 : invalid();
 }
 
+int oneios_owned_groups_verify(struct oneios_owned_groups *g, bool frozen)
+{
+    if (!g) return invalid();
+    if (g->fault) return refuse();
+    long actual;
+    if (verify_groups(g) || verify_quota(g) ||
+        expect_number(g->freezer, "cgroup.freeze", frozen ? 1 : 0) ||
+        frozen_event(g->freezer, &actual) || actual != (long)frozen ||
+        g->freeze_confirmed != frozen) {
+        g->fault = true;
+        return refuse();
+    }
+    return 0;
+}
+
 /* Consumes parent FDs even on failure. The caller supplies identities from
  * its trusted session creator, not identities discovered by this actuator.
  */

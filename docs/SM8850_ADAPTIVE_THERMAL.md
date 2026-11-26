@@ -117,3 +117,50 @@ library is not staged, invoked by the current root switcher, or an
 admission substitute. A cgroup freeze acknowledges stopped userspace
 execution only; it does not drain GPU work, prove temperature control,
 or authorize resume. No change to legacy recovery paths; no live run.
+
+
+## G24.1 local receipt (2026-11-26)
+
+Operator WSL at OneOS `7fa70488c1681679386d80c6cc6359fd6d5b5f6a`, OneiOS
+`e4db1508b0534c8af2db92a9c8dcba675011b291`: host production compile PASS,
+native owned-group fixture 284 checks PASS, Android ARM64 object compile
+PASS, DEVICE_ACCESS=NONE, evidence `/tmp/oneios-g241.SIUBOr`.
+This is not physical cgroupfs or GPU qualification.
+
+## G24.2 native thermal policy/controller integration — offline candidate
+
+`switcher/native/sm8850_thermal_controller.{c,h}` ports the existing
+45–70 C / hard-80-until-70 policy to native code and connects it to the
+actual owned-group API. It requires explicit trusted providers for
+session/membership verification, BOOTTIME, independently owned frequency
+votes/readback, and GPU submission gating/drain/verification/resume. There
+is no stock-firmware frequency provider or live GPU provider in this
+commit. No no-op fallback or shared-frequency write is implemented.
+
+The coordinator checks exact session identity, freshness (provisional
+2 s maximum sample age), monotonic sequence and conflicting duplicates.
+Reductions precede increases; before increasing or resuming it checks
+freshness and session ownership. Severe temperatures request GPU gate
+closure and drain before CPU freeze, then independently check both. On
+resume, keep the GPU gate closed through verified thaw at minimum
+budgets. On stale/invalid data, readback drift, or actuator failure, latch
+fault, attempt minimum owned limits and bounded quiesce when identity is
+still verified. If the identity is no longer valid do not write anything;
+if drain or freeze cannot be confirmed, report FAULT_UNCONFIRMED rather
+than claiming the guest is quiesced. No thermal-triggered reboot/return.
+Faults do not authorize automatic resume. The 1 s ACK argument is a
+provisional polling/request contract, not proof that a kernel or provider
+call cannot block. An independent runner and bounded provider
+implementations are still required. The CFS/freezer API now also verifies
+current request and ACK without changing them.
+
+Host test: compile the two native sources, run
+`tests/test_sm8850_owned_groups.c` and
+`tests/test_sm8850_thermal_controller.c` (the latter links the controller
+with mock provider and group functions), cross-compile both production
+objects with the pinned Android NDK. No phone access. Controller tests
+are pending local execution and do not prove thermal hardware behavior.
+The legacy admission remains blocked. Remaining work: actual independent
+frequency provider, GPU/IO gate+drain provider, session creator/membership
+and independent sensor/runner lifecycle. No new recovery audit or kernel
+work follows from this change.

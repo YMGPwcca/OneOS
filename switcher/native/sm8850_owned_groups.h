@@ -43,6 +43,11 @@ int oneios_owned_freeze(struct oneios_owned_groups *g, unsigned timeout_ms);
  */
 int oneios_owned_thaw(struct oneios_owned_groups *g, unsigned timeout_ms);
 
+/* Read-only health check of pinned leaves, quota and freezer request/ACK.
+ * A mismatch latches fault. It cannot clear the fault or change state.
+ */
+int oneios_owned_groups_verify(struct oneios_owned_groups *g, bool frozen);
+
 /* Closing handles changes no quotas, no membership, and never thaws. */
 void oneios_owned_groups_close(struct oneios_owned_groups *g);
 #endif

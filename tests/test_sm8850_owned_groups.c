@@ -98,6 +98,7 @@ static void *acknowledge(void *arg)
 static void happy_path(void)
 {
     struct fixture x; setup(&x);
+    CHECK(!oneios_owned_groups_verify(&x.g, false));
     CHECK(!oneios_owned_cpu_set(&x.g, 70));
     CHECK(!expect_number(x.c, "cpu.cfs_quota_us", 112000));
     CHECK(!oneios_owned_cpu_set(&x.g, 100));
@@ -113,12 +114,14 @@ static void happy_path(void)
     int rc = oneios_owned_freeze(&x.g, 1000);
     CHECK(!pthread_join(th, NULL));
     CHECK(!rc && x.g.freeze_confirmed);
+    CHECK(!oneios_owned_groups_verify(&x.g, true));
     CHECK(!oneios_owned_cpu_set(&x.g, 20));
     a.wanted = 0;
     CHECK(!pthread_create(&th, NULL, acknowledge, &a));
     rc = oneios_owned_thaw(&x.g, 1000);
     CHECK(!pthread_join(th, NULL));
     CHECK(!rc && !x.g.freeze_confirmed);
+    CHECK(!oneios_owned_groups_verify(&x.g, false));
     CHECK(!expect_number(x.cp, "cpu.cfs_quota_us", -1));
     cleanup(&x);
 }
@@ -185,8 +188,19 @@ static void resume_timeout_refreezes(void)
     cleanup(&x);
 }
 
+static void unexpected_freeze_latches(void)
+{
+    struct fixture x; setup(&x);
+    put(x.f, "cgroup.freeze", "1\n");
+    CHECK(oneios_owned_groups_verify(&x.g, false) != 0 && x.g.fault);
+    CHECK(!expect_number(x.f, "cgroup.freeze", 1));
+    CHECK(oneios_owned_thaw(&x.g, 100) != 0);
+    cleanup(&x);
+}
+
 int main(void)
 {
+    unexpected_freeze_latches();
     happy_path();
     timeout_is_latched();
     foreign_write_and_drift();
