@@ -1584,6 +1584,14 @@ case "$MODE" in
                 *) die_inner "invalid full-session own-presence profile" ;;
             esac
             echo "ONEIOS_OWN_PRESENCE_REQUESTED=$own_presence"
+            interaction_profile=$(cat /data/control/framework.interaction-profile 2>/dev/null) ||
+                die_inner "missing full-session interaction profile"
+            case "$interaction_profile" in
+                off) ;;
+                swipe-60s) set -- "$@" --input-script @sm8850-swipe-60s ;;
+                *) die_inner "invalid full-session interaction profile" ;;
+            esac
+            echo "ONEIOS_INTERACTION_PROFILE=$interaction_profile"
             ulimit -c 0
             exec "/data/runtime/$R_XNUHOST" --session-abi 1 --mode bench \
                 --runtime /data/runtime --image /data/image --data /data/data --session /data/session \
@@ -1935,7 +1943,22 @@ if [ "$FRAMEWORK" = 1 ]; then
     FW_PERF_PROFILE=off
     FW_CPU_PROFILE=default
     FW_OWN_PRESENCE=0
+    FW_INTERACTION_PROFILE=off
     if [ "$FW_MODE" = run ]; then
+        # BEGIN FRAMEWORK_INTERACTION_ARGS
+        # Consume a fixed final token before the older profile suffixes.
+        interaction_arg=
+        for interaction_arg in "$@"; do :; done
+        if [ "$interaction_arg" = interaction-swipe-60s ]; then
+            FW_INTERACTION_PROFILE=swipe-60s
+            interaction_n=$#
+            for interaction_item in "$@"; do
+                shift
+                interaction_n=$((interaction_n - 1))
+                [ "$interaction_n" = 0 ] || set -- "$@" "$interaction_item"
+            done
+        fi
+        # END FRAMEWORK_INTERACTION_ARGS
         # BEGIN FRAMEWORK_OWN_PRESENCE_ARGS
         # Strip only an explicit, final opt-in token; the rest is validated
         # by the existing CPU/perf/duration/thermal/risk argument parser.
@@ -2055,6 +2078,11 @@ if [ "$FRAMEWORK" = 1 ]; then
             echo "SM8850_KERNEL_FIRMWARE_THERMAL_PROTECTION=UNCHANGED"
             echo "WARNING=NO_ROOT_THERMAL_GUARD_OR_CPU_CAP_HIGH_HEAT_RISK"
         fi
+        if [ "$FW_INTERACTION_PROFILE" != off ]; then
+            [ "$FW_DURATION" = 180 ] && [ "$FW_SOFT_THERMAL_OFF" = 0 ] ||
+                framework_block "interaction requires guarded 180s run"
+            case "$FW_PERF_PROFILE" in frame|frame-task) ;; *) framework_block "interaction requires frame tracing" ;; esac
+        fi
         if [ "$FW_OWN_PRESENCE" = 1 ]; then
             [ "$FW_DURATION" = 180 ] && [ "$FW_SOFT_THERMAL_OFF" = 0 ] ||
                 framework_block "own-presence requires guarded 180s run"
@@ -2128,6 +2156,7 @@ if [ -z "$SELF_NS" ] || [ "$SELF_NS" != "$INIT_NS" ]; then
             [ "$FW_PERF_PROFILE" = off ] || set -- "$@" "perf-$FW_PERF_PROFILE"
             [ "$FW_CPU_PROFILE" = default ] || set -- "$@" cpu-prime-first
             [ "$FW_OWN_PRESENCE" = 0 ] || set -- "$@" own-presence-1
+            [ "$FW_INTERACTION_PROFILE" = off ] || set -- "$@" interaction-swipe-60s
         fi
         exec "$BB" nsenter -t 1 -m -- /system/bin/sh "$SELF" "$@"
     fi
@@ -2292,6 +2321,11 @@ if [ "$FRAMEWORK" = 1 ]; then
                 framework_block "staged kernel lacks readable 0082 own-presence marker"
         fi
         echo "SM8850_OWN_PRESENCE=$FW_OWN_PRESENCE"
+        if [ "$FW_INTERACTION_PROFILE" != off ]; then
+            grep -Fq 'SM8850_INTERACTION_V1' "$X" 2>/dev/null ||
+                framework_block "staged xnuhost lacks bounded interaction profile; build and stage runtime before rearm"
+        fi
+        echo "SM8850_INTERACTION_PROFILE=$FW_INTERACTION_PROFILE"
         if [ "$FW_CPU_PROFILE" = prime-first ]; then
             grep -Fq 'SM8850_CPU_PROFILE=PRIME_FIRST_ACTIVE' "$X" 2>/dev/null ||
                 framework_block "staged xnuhost lacks opt-in Prime-first placement"
@@ -2409,6 +2443,8 @@ if [ "$FRAMEWORK" = 1 ]; then
             framework_setup_failed "could not record CPU placement profile"
         printf '%s\n' "$FW_OWN_PRESENCE" > "$CTL/framework.own-presence" ||
             framework_setup_failed "could not record own-presence profile"
+        printf '%s\n' "$FW_INTERACTION_PROFILE" > "$CTL/framework.interaction-profile" ||
+            framework_setup_failed "could not record interaction profile"
         if [ "$FW_SOFT_THERMAL_OFF" = 0 ] && [ "$FW_DURATION" = 180 ]; then
             printf 'hybrid-v1-180s\n' > "$CTL/framework.cpu-budget" ||
                 framework_setup_failed "could not record isolated CPU bandwidth profile"
