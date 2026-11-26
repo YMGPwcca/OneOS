@@ -33,3 +33,51 @@ merely to run a benchmark. No Android kernel or module work is authorized.
 Offline test: `python3 tools/test_sm8850_adaptive_thermal.py -v` from OneOS.
 No new physical test, watchdog investigation, APFS rearm, or rebuild is
 required for this source change.
+
+## Local offline receipt (2026-11-26)
+
+Operator WSL log at OneOS `42478a784a0e26df88951066a1f36d3ab0ae1502`, OneiOS
+`174fc79f31cd461f223877faee98ba82bda3a23c`: `python3 app/tools/test_sm8850_adaptive_thermal.py -v`
+**9/9 passed**; OneiOS's four Python suites 74/74 passed (35 takeover,
+16 full takeover, 21 guarded duration, 2 interaction); total 83/83.
+No device access. Prior XNUHost native CI passed separately at 143361d
+(19,742 checks, zero failed). This validates the offline model and
+retired-admission regressions, not hardware thermal behavior.
+
+## Next implementation boundary (source inspection, not device qualification)
+
+Reuse rather than duplicate existing lifecycle pieces:
+- `oneios_sm8850_thermal_cap.sh` already creates and verifies a
+  session-token-owned v1 CPU bandwidth cgroup. The adaptive quota can
+  be scoped to that group; the old fixed shared cpufreq vote must not be
+  carried into a replacement.
+- `oneios_switch.sh --inner` places xnuhost and its descendants in
+  `/sys/fs/cgroup/oneios_session` (when available); the display helper
+  joins it separately. The root watcher/key readers/return stay outside.
+  A future bounded quiesce actuator can use a session-owned v2 freezer
+  if supported and verified. Pin identity and membership, check frozen
+  acknowledgement, prevent late joins/launch races, preserve root
+  monitor/deadline control, account for in-flight GPU/IO work and
+  resume/cleanup races. A freezer request alone is not proof of drained GPU
+  work. Do not freeze system services or the root monitor.
+- OneiOS `runtime/xnuhost/src/task.c` already sets per-task scheduler
+  utilization clamps; `cpu.c` has GPU-driven vCPU minimum boosts.
+  A thermal throughput controller must coordinate its own budgets with
+  those boosts, not overwrite unrelated tasks or imply that utilization
+  clamps are an exact hardware frequency cap. Existing affinity and
+  stock thermal protections are unchanged.
+- No independently owned and verified reversible frequency-maximum
+  interface has been demonstrated by these source files. Do not use a
+  read/modify/write of shared `scaling_max_freq` as a substitute: even a
+  readback cannot establish ownership of the vote. No raw PerfLock ID
+  guess, kernel module, kernel audit, or flash is a next task.
+- Keep the no-live-admission marker until a compliant controller exists.
+  Continue userspace implementation and offline tests; a throughput-only
+  design must be identified as such rather than silently advertised as
+  a strict adaptive frequency ceiling. No more repeating completed tests
+  solely for documentation changes.
+
+The cgroup and scheduler paths above are source-supported implementation
+candidates, not proof that every required operation is supported on this
+specific firmware. No stage, rearm, live run, or recovery test follows
+from this receipt.
