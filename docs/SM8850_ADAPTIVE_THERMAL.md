@@ -259,3 +259,45 @@ opcode, units, competing-client aggregation, independent readback,
 expiry/death cleanup, or takeover lifetime is certified yet.
 Legacy admission remains blocked. Do not build a fake provider or
 relax a shared vote while these remain unresolved.
+
+
+### G24.6 targeted PerfLock receipt (2026-11-27 ICT)
+
+Exact operator evidence /tmp/oneios-g246-perflock.sqOJGh.txt at OneiOS
+7fa7f9f815a1df416ae9d4f9a83e62310cc66eb7, OneOS 2332c069eb207de9668fdc3795ef8056db66c03a.
+SM8850 SoC ID 660 selects canoe. Actual target CPU max/min nodes exist
+under /sys/kernel/msm_performance/parameters/, SELinux type
+vendor_sysfs_msm_perf. At the sampled instant all eight max values were
+2147483647 (INT_MAX) and all eight min values zero. The /sys/module
+max path is absent. These are msm_performance node values, not
+per-client handles nor evidence that other thermal constraints are absent.
+
+Firmware perfboostsconfig.xml canoe launch/animation blocks establish
+packed resource IDs: CPU MAX big 0x40804000, MAX prime 0x40804200,
+MIN big 0x40800000, MIN prime 0x40800200. Do not submit the stock launch
+or animation bundles: they also request minimum clocks, scheduler and
+other resources. The MAX values 0xEFFF/0xFFF in those bundles and vendor
+test XML MHz-looking values do not establish finite max conversion,
+sentinel handling, or lower-wins arbitration on this build.
+
+Native perf2-hal-1-0 init class hal, uid 0, cgroup
+/system/uid_0/pid_2109; vendor.perfservice class main, uid system,
+cgroup /system/uid_1000/pid_2680. Both outside the current takeover
+/apps/uid_* kill scope in the sampled stock boot. This is not a proof
+of service availability, binder access or client lifetime after stop.
+Default perf2 diagnostic dump section was empty; no active-handle
+readback demonstrated. No acquire, release or sysfs writes were tested.
+
+Next use the exact firmware's client and server ELF for static ABI,
+packed resource/units and sentinel parsing, MAX comparator and queue
+arbitration, handle/timer/client cleanup and diagnostic-query analysis.
+Read into host only; no vendor binaries checked into either repository,
+no execution or modification of vendor files, no undocumented query or
+resource calls. Generic Qualcomm kernel source and older Android
+callers can explain the architecture, not qualify this proprietary
+build. If static analysis cannot establish noninterference and ownership,
+record the provider as unsupported/unqualified rather than silently
+falling back to shared sysfs writes. Any subsequent stock-One-UI,
+restrictive-only, finite-duration qualification requires an independent
+operator decision, no guest workload, and verified noninterference.
+No admission or live-run change.
