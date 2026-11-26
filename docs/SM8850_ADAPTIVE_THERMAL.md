@@ -213,3 +213,49 @@ vendor library, change any vote, mount, module, property, or service.
 Retain the admission block and existing stock protections. No kernel,
 watchdog, recovery or physical takeover experiment is a prerequisite for
 this inventory.
+
+
+## G24.6 exact-firmware inventory receipt (2026-11-26)
+
+Operator read-only inventory: OneiOS 0d705281ffca5e1c52a9c9a03efcc4be030361d5,
+OneOS b4ecf46783b0ef7e20f8b42c525eea1bf75c82e2; SM-S948B/S948BXXS4BZIG, stock boot complete,
+xnuhost absent. Evidence /tmp/oneios-g246-frequency.nIpqAc.txt.
+Reported FREQUENCY_INVENTORY=READ_ONLY_COMPLETE,
+FREQUENCY_PROVIDER=NOT_QUALIFIED, DEVICE_WRITES=NONE.
+
+- policy0 CPUs 0–5, SCMI/WALT, min 384000 and cpuinfo/effective max
+  3628800 kHz. policy6 CPUs 6–7, SCMI/WALT, min 768000 and
+  cpuinfo/effective max 4742400 kHz. Listed policy6 OPPs end at
+  4396800 kHz, not 4742400; do not assume the advertised max is an
+  available OPP or blindly reuse percent-to-frequency rounding.
+- Qualcomm perf2 HAL and vendor perfservice running in normal One UI.
+  Both vendor and system_ext client ELFs export perf_lock_acq,
+  perf_lock_rel and perf_lock_acq_rel. libqti-perfd exports
+  ActiveRequestList::DumpActive, ResetClientRequests, request timer,
+  resource queue add/remove and apply functions. These symbols indicate
+  infrastructure, NOT a proved max-vote ordering or caller ownership ABI.
+- Firmware commonresourceconfigs maps major 0x2/minor 0x1 to CPU max
+  frequency. targetresourceconfigs overrides its node to
+  /sys/kernel/msm_performance/parameters/cpu_max_freq.
+  The original inventory checked /sys/module/... but missed this
+  overridden path. Its absence from the node receipt is not evidence
+  that the target path does not exist.
+- targetconfig contains canoe/alor variants with six big and two prime
+  cores; need exact SoC selection and full packed resource values, not
+  inferred cluster selectors from generic test comments. The grep-only
+  perfboostsconfig output showed max-frequency resource comments but
+  omitted actual resource pairs. Samsung cpufreq_max_limit read -1;
+  this is a shared limit, not a private handle.
+- Next focused read-only receipt: actual overridden nodes; SoC ID;
+  complete relevant perfboostsconfig blocks; native perf2 init
+  service definition and process cgroup; default binder dump if
+  available. The takeover source stops zygotes/system_server and kills
+  app UID cgroups; a native HAL outside those groups is a candidate
+  for survival, not physical proof. Do not stop any service to test it.
+
+The next receipt must not invoke acquire/release, change a property,
+write sysfs, alter protections, or run a live takeover. No numeric
+opcode, units, competing-client aggregation, independent readback,
+expiry/death cleanup, or takeover lifetime is certified yet.
+Legacy admission remains blocked. Do not build a fake provider or
+relax a shared vote while these remain unresolved.
