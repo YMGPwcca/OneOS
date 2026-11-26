@@ -1575,6 +1575,15 @@ case "$MODE" in
                 *) die_inner "invalid full-session CPU profile" ;;
             esac
             echo "ONEIOS_CPU_PROFILE_REQUESTED=$cpu_profile"
+            own_presence=$(cat /data/control/framework.own-presence 2>/dev/null) ||
+                die_inner "missing full-session own-presence profile"
+            own_boot_arg=
+            case "$own_presence" in
+                0) ;;
+                1) own_boot_arg=' oneios-own-presence=1' ;;
+                *) die_inner "invalid full-session own-presence profile" ;;
+            esac
+            echo "ONEIOS_OWN_PRESENCE_REQUESTED=$own_presence"
             ulimit -c 0
             exec "/data/runtime/$R_XNUHOST" --session-abi 1 --mode bench \
                 --runtime /data/runtime --image /data/image --data /data/data --session /data/session \
@@ -1582,7 +1591,7 @@ case "$MODE" in
                 --set ram-huge=0 --set host-mem-log=5 --set bridges=1 --set sm8850-full-bridges=1 --set touch-sleep=0 --set cpu-affinity-bench=0 --set cpu-pin=1 --set wifi=off \
                 --set bluetooth=virtual --set haptics=off --set encoder=off --set return-graceful-ms=0 \
                 --gpu 3d --display shm --set touch-exclusive=1 --width 1080 --height 2340 --hz 60 "$@" \
-                --boot-args 'debug=0x14e serial=3 -v kt_fixed_zones=120 -no_slto_panic ml-timeout-lock-panic-scale=40 tlto_us=0 armcpu-self-ipi=1 armcpu-spi-ipi=1 use_contiguous_hint=0 interrupt-masked-debug-mode=0 sched_preemption_disable_debug_mode=0 wdt=-1 sheng-smp=1 oneios-data-wait=3000'
+                --boot-args 'debug=0x14e serial=3 -v kt_fixed_zones=120 -no_slto_panic ml-timeout-lock-panic-scale=40 tlto_us=0 armcpu-self-ipi=1 armcpu-spi-ipi=1 use_contiguous_hint=0 interrupt-masked-debug-mode=0 sched_preemption_disable_debug_mode=0 wdt=-1 sheng-smp=1 oneios-data-wait=3000'"$own_boot_arg"
             die_inner "could not exec the GPU-3D benchmark runtime"
         fi
         exec "/data/runtime/$R_XNUHOST" --session-abi $ABI --mode takeover \
@@ -1925,7 +1934,23 @@ if [ "$FRAMEWORK" = 1 ]; then
     fi
     FW_PERF_PROFILE=off
     FW_CPU_PROFILE=default
+    FW_OWN_PRESENCE=0
     if [ "$FW_MODE" = run ]; then
+        # BEGIN FRAMEWORK_OWN_PRESENCE_ARGS
+        # Strip only an explicit, final opt-in token; the rest is validated
+        # by the existing CPU/perf/duration/thermal/risk argument parser.
+        own_arg=
+        for own_arg in "$@"; do :; done
+        if [ "$own_arg" = own-presence-1 ]; then
+            FW_OWN_PRESENCE=1
+            own_n=$#
+            for own_item in "$@"; do
+                shift
+                own_n=$((own_n - 1))
+                [ "$own_n" = 0 ] || set -- "$@" "$own_item"
+            done
+        fi
+        # END FRAMEWORK_OWN_PRESENCE_ARGS
         # CPU placement is independent of instrumentation and thermal choice.
         # BEGIN FRAMEWORK_CPU_PROFILE_ARGS
         cpu_arg=
@@ -2030,6 +2055,10 @@ if [ "$FRAMEWORK" = 1 ]; then
             echo "SM8850_KERNEL_FIRMWARE_THERMAL_PROTECTION=UNCHANGED"
             echo "WARNING=NO_ROOT_THERMAL_GUARD_OR_CPU_CAP_HIGH_HEAT_RISK"
         fi
+        if [ "$FW_OWN_PRESENCE" = 1 ]; then
+            [ "$FW_DURATION" = 180 ] && [ "$FW_SOFT_THERMAL_OFF" = 0 ] ||
+                framework_block "own-presence requires guarded 180s run"
+        fi
         if [ "$MODE" = --framework-session ]; then
             if [ "$FW_SOFT_THERMAL_OFF" = 1 ]; then
                 echo "SM8850_LIVE_THERMAL_PROFILE=NO_SOFT_GUARD_EXPLICIT_180S"
@@ -2093,6 +2122,13 @@ if [ -z "$SELF_NS" ] || [ "$SELF_NS" != "$INIT_NS" ]; then
     if [ "$APP" != 1 ] && [ -z "$ONEIOS_NS_REENTERED" ]; then
         echo "Not in init's mount namespace: running again in init's"
         export ONEIOS_NS_REENTERED=1
+        # The parser consumed the optional profile suffixes. Reconstruct
+        # them in canonical order before re-entering init's namespace.
+        if [ "$FRAMEWORK" = 1 ] && [ "$FW_MODE" = run ]; then
+            [ "$FW_PERF_PROFILE" = off ] || set -- "$@" "perf-$FW_PERF_PROFILE"
+            [ "$FW_CPU_PROFILE" = default ] || set -- "$@" cpu-prime-first
+            [ "$FW_OWN_PRESENCE" = 0 ] || set -- "$@" own-presence-1
+        fi
         exec "$BB" nsenter -t 1 -m -- /system/bin/sh "$SELF" "$@"
     fi
     refuse "not in init's mount namespace (this shell: ${SELF_NS:-unreadable}, init: ${INIT_NS:-unreadable})"
@@ -2251,6 +2287,11 @@ if [ "$FRAMEWORK" = 1 ]; then
         # independent APFS Data clone can be consumed.
         grep -Fq 'SM8850_FULL_BRIDGES=ACTIVE' "$X" 2>/dev/null ||
             framework_block "staged xnuhost lacks full bridges=1 Framework profile; rebuild and upgrade the native runtime before rearming Data"
+        if [ "$FW_OWN_PRESENCE" = 1 ]; then
+            "$BB" grep -aFq 'oneios-own-presence' "$STAGE/image/kernel.kc" 2>/dev/null ||
+                framework_block "staged kernel lacks readable 0082 own-presence marker"
+        fi
+        echo "SM8850_OWN_PRESENCE=$FW_OWN_PRESENCE"
         if [ "$FW_CPU_PROFILE" = prime-first ]; then
             grep -Fq 'SM8850_CPU_PROFILE=PRIME_FIRST_ACTIVE' "$X" 2>/dev/null ||
                 framework_block "staged xnuhost lacks opt-in Prime-first placement"
@@ -2366,6 +2407,8 @@ if [ "$FRAMEWORK" = 1 ]; then
             framework_setup_failed "could not record performance instrumentation profile"
         printf '%s\n' "$FW_CPU_PROFILE" > "$CTL/framework.cpu-profile" ||
             framework_setup_failed "could not record CPU placement profile"
+        printf '%s\n' "$FW_OWN_PRESENCE" > "$CTL/framework.own-presence" ||
+            framework_setup_failed "could not record own-presence profile"
         if [ "$FW_SOFT_THERMAL_OFF" = 0 ] && [ "$FW_DURATION" = 180 ]; then
             printf 'hybrid-v1-180s\n' > "$CTL/framework.cpu-budget" ||
                 framework_setup_failed "could not record isolated CPU bandwidth profile"
