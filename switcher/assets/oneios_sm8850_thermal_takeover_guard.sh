@@ -154,8 +154,14 @@ case "$MODE" in
         [ "$BOOT" = "$(cat /proc/sys/kernel/random/boot_id)" ] || die stale_session
         [ "$GEN" = "$(cat "$CTL/watchdog.generation" 2>/dev/null)" ] || die generation_mismatch
         [ "$(cat "$CTL/framework.mode" 2>/dev/null)" = run ] || die non_run
-        echo $$ > /sys/fs/cgroup/cgroup.procs 2>/dev/null
-        echo -1000 > /proc/$$/oom_score_adj 2>/dev/null
+        if [ "$(cat "$CTL/framework.cpu-budget" 2>/dev/null)" = cfs-v1-180s ]; then
+            # The root monitor must never share the guest CPU quota.
+            printf '%s\n' "$" > /dev/cpuctl/cgroup.procs || die guard_root_cpu_group
+            awk -F: '$2=="cpu" && $3=="/" {ok=1} END {exit !ok}' /proc/$/cgroup ||
+                die guard_root_cpu_membership
+        fi
+        echo $ > /sys/fs/cgroup/cgroup.procs 2>/dev/null
+        echo -1000 > /proc/$/oom_score_adj 2>/dev/null
         BIRTH=$(birth $$)
         [ -n "$BIRTH" ] || die no_pid_birth
         atom thermal.guard.pid "$$ $BIRTH" || die cannot_record_pid

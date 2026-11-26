@@ -257,6 +257,188 @@ framework_down_for_cpu_cap() {
     case "$(getprop init.svc.zygote_secondary)" in ''|stopped) ;; *) return 1 ;; esac
     ! pidof system_server >/dev/null 2>&1
 }
+# BEGIN SM8850_HYSTERESIS_MODEL
+# Pure candidate policy, no device access or clock writes. Source this file.
+# One call per NEW validated thermal heartbeat. Output: state:pct:latch:dwell.
+# pct is an independent guest CPU duty budget, NOT a shared cpufreq MAX vote.
+# The separate sensor/emergency guard remains authoritative.
+sm8850_thermal_hysteresis_step() (
+    [ "$#" = 6 ] || exit 3
+    pct=$1 latch=$2 dwell=$3 cpu=$4 gpu=$5 ddr=$6
+    for n in "$pct" "$latch" "$dwell" "$cpu" "$gpu" "$ddr"; do
+        case "$n" in ''|*[!0-9]*|0[0-9]*) exit 3 ;; esac
+        [ "${#n}" -le 6 ] || exit 3
+    done
+    [ "$pct" -ge 10 ] && [ "$pct" -le 100 ] && [ "$latch" -le 1 ] &&
+        [ "$dwell" -le 4 ] || exit 3
+    for n in "$cpu" "$gpu" "$ddr"; do
+        [ "$n" -gt 0 ] && [ "$n" -le 200000 ] || exit 3
+    done
+    # Use the hottest sampled junction; battery/skin and invalid sensor
+    # limits are independently enforced by the existing root guard.
+    peak=$cpu
+    [ "$gpu" -le "$peak" ] || peak=$gpu
+    [ "$ddr" -le "$peak" ] || peak=$ddr
+    if [ "$peak" -ge 80000 ] || { [ "$latch" = 1 ] && [ "$peak" -gt 70000 ]; }; then
+        printf 'HARD:10:1:0\n'
+        exit 0
+    fi
+    if [ "$latch" = 1 ]; then
+        # Release the hard latch at 70 C, but do not jump to full load.
+        printf 'RECOVERY:10:0:0\n'
+        exit 0
+    fi
+    if [ "$peak" -ge 70000 ]; then
+        step=10
+        [ "$peak" -lt 75000 ] || step=20
+        pct=$((pct - step))
+        [ "$pct" -ge 10 ] || pct=10
+        printf 'SOFT:%s:0:0\n' "$pct"
+    elif [ "$peak" -ge 65000 ]; then
+        printf 'HOLD:%s:0:0\n' "$pct"
+    else
+        dwell=$((dwell + 1))
+        if [ "$dwell" -ge 5 ]; then
+            step=5
+            [ "$peak" -ge 45000 ] || step=10
+            pct=$((pct + step))
+            [ "$pct" -le 100 ] || pct=100
+            dwell=0
+        fi
+        printf 'COOL:%s:0:%s\n' "$pct" "$dwell"
+    fi
+)
+# END SM8850_HYSTERESIS_MODEL
+# BEGIN SM8850_CPU_BANDWIDTH
+sm8850_cpu_quota_us() (
+    [ "$#" = 1 ] || exit 2
+    pct=$1
+    case "$pct" in ''|*[!0-9]*|0[0-9]*) exit 2 ;; esac
+    [ "${#pct}" -le 3 ] && [ "$pct" -ge 10 ] && [ "$pct" -le 100 ] || exit 2
+    # 8 host cores, 20 ms period, integer quota in microseconds.
+    printf '%s\n' "$((1600 * pct))"
+)
+sm8850_cpu_quota_write() {
+    printf '%s\n' "$2" > "$1/cpu.cfs_quota_us"
+}
+sm8850_cpu_quota_apply() (
+    [ "$#" = 2 ] || exit 2
+    group=$1
+    quota=$(sm8850_cpu_quota_us "$2") || exit 2
+    [ -d "$group" ] && [ ! -L "$group" ] || exit 2
+    for node in cpu.cfs_period_us cpu.cfs_quota_us; do
+        [ -f "$group/$node" ] && [ ! -L "$group/$node" ] || exit 2
+    done
+    [ "$(cat "$group/cpu.cfs_period_us")" = 20000 ] || exit 2
+    sm8850_cpu_quota_write "$group" "$quota" || exit 2
+    [ "$(cat "$group/cpu.cfs_period_us")" = 20000 ] &&
+        [ "$(cat "$group/cpu.cfs_quota_us")" = "$quota" ] || exit 2
+    printf 'CPU_BUDGET_PCT=%s QUOTA_US=%s PERIOD_US=20000\n' "$2" "$quota"
+)
+# END SM8850_CPU_BANDWIDTH
+# BEGIN SM8850_CFS_LIFECYCLE
+# No shared cpufreq writes in this exact 180s profile. Only a unique child
+# of the already-mounted v1 CPU hierarchy is controlled. Reboot-only
+# recovery destroys this transient kernel group; never remove foreign groups.
+bw_host_ready() {
+    [ "$(realpath /dev/cpuctl)" = /dev/cpuctl ] &&
+        awk '$2=="/dev/cpuctl" && $3=="cgroup" {n=split($4,a,","); for(i=1;i<=n;i++) if(a[i]=="cpu") ok=1} END {exit !ok}' /proc/mounts &&
+        [ "$(cat /sys/devices/system/cpu/online)" = 0-7 ] &&
+        [ "$(cat /dev/cpuctl/cpu.cfs_quota_us)" = -1 ] &&
+        [ "$(cat /dev/cpuctl/cpu.cfs_period_us)" = 100000 ] &&
+        [ -w /dev/cpuctl ]
+}
+bw_token_valid() {
+    case "$1" in ''|*[!0-9a-f]*) return 1 ;; esac
+    [ "${#1}" = 32 ]
+}
+bw_init() {
+    framework_down_for_cpu_cap && bw_host_ready || return 1
+    BW_TOKEN=$(cat "$CTL/framework.launch") || return 1
+    bw_token_valid "$BW_TOKEN" || return 1
+    BW_GROUP="/dev/cpuctl/oneios_guest.$BW_TOKEN"
+    [ ! -e "$BW_GROUP" ] && [ ! -L "$BW_GROUP" ] || return 1
+    mkdir "$BW_GROUP" || return 1
+    [ "$(realpath "$BW_GROUP")" = "$BW_GROUP" ] &&
+        [ -z "$(cat "$BW_GROUP/cgroup.procs")" ] &&
+        [ "$(cat "$BW_GROUP/cpu.cfs_quota_us")" = -1 ] || return 1
+    BW_ID=$(stat -c '%d:%i' "$BW_GROUP") || return 1
+    printf '20000\n' > "$BW_GROUP/cpu.cfs_period_us" || return 1
+    sm8850_cpu_quota_apply "$BW_GROUP" 40 || return 1
+    atom thermal.cap.group "v1 $BOOT $GEN $BW_TOKEN $BW_ID" || return 1
+    BW_PCT=40 BW_LATCH=0 BW_DWELL=0 BW_HSEQ=0 BW_STATE=START
+}
+bw_member() {
+    awk -F: -v expected="$2" '$2=="cpu" && $3==expected {ok=1} END {exit !ok}' "$1"
+}
+bw_verify() {
+    [ "$(stat -c '%d:%i' "$BW_GROUP" 2>/dev/null)" = "$BW_ID" ] &&
+        [ "$(realpath "$BW_GROUP")" = "$BW_GROUP" ] &&
+        [ "$(cat "$BW_GROUP/cpu.cfs_period_us")" = 20000 ] &&
+        [ "$(cat "$BW_GROUP/cpu.cfs_quota_us")" = "$(sm8850_cpu_quota_us "$BW_PCT")" ] &&
+        [ "$(cat /dev/cpuctl/cpu.cfs_quota_us)" = -1 ] &&
+        [ "$(cat /dev/cpuctl/cpu.cfs_period_us)" = 100000 ] &&
+        bw_member "/proc/$/cgroup" / || return 1
+    # The guest joins before publishing its PID. Check its leader once
+    # known; audit stable threads as well, allowing a thread to exit during
+    # a read. Descendants inherit the CPU group; RT enforcement and any
+    # future explicit task migration remain separate qualification work.
+    bw_pid=$(cat "$CTL/xnuhost.pid" 2>/dev/null || :)
+    if [ -n "$bw_pid" ]; then
+        uint "$bw_pid" && [ "$bw_pid" -gt 1 ] || return 1
+        bw_member "/proc/$bw_pid/cgroup" "/${BW_GROUP##*/}" || return 1
+        for bw_file in /proc/"$bw_pid"/task/[0-9]*/cgroup; do
+            [ -e "$bw_file" ] || continue
+            bw_seen=0
+            if while IFS=: read -r bw_h bw_controller bw_path; do
+                if [ "$bw_controller" = cpu ] && [ "$bw_path" = "/${BW_GROUP##*/}" ]; then
+                    bw_seen=1
+                fi
+            done 2>/dev/null < "$bw_file"; then :; fi
+            [ "$bw_seen" = 1 ] || [ ! -e "$bw_file" ] || return 1
+        done
+    elif [ "$(cat "$CTL/state" 2>/dev/null)" = running ]; then
+        return 1
+    fi
+}
+bw_aux_limit() {
+    # Keep the old early battery/skin/board thresholds. A cold junction
+    # must not authorize more load when non-junction sensors are hot.
+    bw_limit=100
+    if [ "$bat" -ge 340 ] || [ "$lrp" -ge 370 ] || [ "$ap" -ge 450 ]; then bw_limit=40; fi
+    if [ "$bat" -ge 370 ] || [ "$lrp" -ge 400 ] || [ "$ap" -ge 500 ]; then bw_limit=28; fi
+    if [ "$bat" -ge 400 ] || [ "$lrp" -ge 430 ] || [ "$ap" -ge 550 ]; then bw_limit=18; fi
+    if [ "$bat" -ge 420 ] || [ "$lrp" -ge 450 ] || [ "$ap" -ge 600 ]; then bw_limit=12; fi
+    if [ "$bat" -ge 440 ] || [ "$lrp" -ge 470 ] || [ "$ap" -ge 650 ]; then bw_limit=10; fi
+}
+bw_step() {
+    # Validate the already-applied quota BEFORE considering another write.
+    bw_verify || return 1
+    [ "$hseq" -ge "$BW_HSEQ" ] || return 1
+    [ "$hseq" != "$BW_HSEQ" ] || return 0
+    # The existing independent sensor/emergency contract is not replaced.
+    # policy 0 validates all six sensors and refuses last-resort thresholds.
+    policy 0 "$cpu" "$gpu" "$ddr" "$bat" "$lrp" "$ap" >/dev/null || return 1
+    bw_choice=$(sm8850_thermal_hysteresis_step "$BW_PCT" "$BW_LATCH" "$BW_DWELL" "$cpu" "$gpu" "$ddr") || return 1
+    bw_state=${bw_choice%%:*}
+    bw_tail=${bw_choice#*:}
+    bw_next=${bw_tail%%:*}
+    bw_tail=${bw_tail#*:}
+    bw_latch=${bw_tail%%:*}
+    bw_dwell=${bw_tail#*:}
+    bw_aux_limit
+    if [ "$bw_next" -gt "$bw_limit" ]; then bw_next=$bw_limit; bw_dwell=0; fi
+    if [ "$bw_next" != "$BW_PCT" ]; then
+        sm8850_cpu_quota_apply "$BW_GROUP" "$bw_next" || return 1
+    fi
+    if [ "$bw_next" != "$BW_PCT" ] || [ "$bw_state" != "$BW_STATE" ] || [ "$bw_latch" != "$BW_LATCH" ]; then
+        echo "P0_CPU_BUDGET=APPLIED boot=$BOOT generation=$GEN sample=$hseq cpu_mC=$cpu gpu_mC=$gpu ddr_mC=$ddr from_pct=$BW_PCT pct=$bw_next state=$bw_state hard_latch=$bw_latch auxiliary_limit=$bw_limit"
+    fi
+    BW_PCT=$bw_next BW_LATCH=$bw_latch BW_DWELL=$bw_dwell BW_STATE=$bw_state BW_HSEQ=$hseq
+    bw_verify
+}
+# END SM8850_CFS_LIFECYCLE
+
 # The only nonroot write mode uses disposable synthetic sysfs, NEVER real sysfs.
 # It is for CachyOS tests and cannot name / or a live Android path.
 MODE=${1:-}
@@ -281,6 +463,12 @@ case "$MODE" in
         [ "$MODE" != --fixture-floor-step ] || FLOOR_MODE=1
         apply_cap "$2" "$3" "$fixture_strict" || die fixture_policy_failed
         echo "P0_CPU_CAP=FIXTURE_APPLIED pct=$3 strict=$fixture_strict"
+        exit 0 ;;
+    --check-bandwidth)
+        [ "$#" = 1 ] && [ "$(id -u)" = 0 ] || die root_required
+        bw_host_ready || die v1_cpu_bandwidth_unavailable
+        echo "SM8850_CPU_THROTTLE_POLICY=CFS_V1_TARGET_45_70_HARD_80_RELEASE_70"
+        echo "P0_CPU_CAP=READ_ONLY_BANDWIDTH_AVAILABLE_NOT_CERTIFIED"
         exit 0 ;;
     --check)
         [ "$#" = 1 ] || die args
@@ -341,8 +529,20 @@ case "$MODE" in
         [ "$BOOT" = "$(cat /proc/sys/kernel/random/boot_id)" ] &&
           [ "$GEN" = "$(cat "$CTL/watchdog.generation" 2>/dev/null)" ] &&
           [ "$(cat "$CTL/framework.mode" 2>/dev/null)" = run ] || die stale_session
-        policies "" || die cpufreq_unavailable
-        echo $$ > /sys/fs/cgroup/cgroup.procs 2>/dev/null
+        BW_MODE=0
+        case "$(cat "$CTL/framework.cpu-budget" 2>/dev/null || :)" in
+            cfs-v1-180s)
+                [ "$MODE" = --run-prearmed ] && [ "$(cat "$CTL/framework.duration")" = 180 ] &&
+                    bw_host_ready || die bandwidth_profile
+                BW_MODE=1
+                # Move only this root worker out of any inherited Android
+                # CPU restriction, not an Android service or parent quota.
+                printf '%s\n' "$" > /dev/cpuctl/cgroup.procs || die cap_root_cpu_group
+                bw_member "/proc/$/cgroup" / || die cap_root_cpu_membership ;;
+            '') policies "" || die cpufreq_unavailable ;;
+            *) die unknown_cpu_budget_profile ;;
+        esac
+        echo $ > /sys/fs/cgroup/cgroup.procs 2>/dev/null
         echo -1000 > /proc/$$/oom_score_adj 2>/dev/null
         BIRTH=$(birth $$)
         [ -n "$BIRTH" ] || die no_pid_birth
@@ -366,7 +566,11 @@ case "$MODE" in
                 [ "$BOOT" = "$(cat /proc/sys/kernel/random/boot_id 2>/dev/null)" ] ||
                     exit 0
                 if framework_down_for_cpu_cap; then
-                    echo "P0_CPU_CAP=FRAMEWORK_DOWN_VERIFIED_START_STRICT boot=$BOOT generation=$GEN"
+                    if [ "$BW_MODE" = 1 ]; then
+                        echo "P0_CPU_CAP=FRAMEWORK_DOWN_VERIFIED_START_CFS_V1 boot=$BOOT generation=$GEN"
+                    else
+                        echo "P0_CPU_CAP=FRAMEWORK_DOWN_VERIFIED_START_STRICT boot=$BOOT generation=$GEN"
+                    fi
                     break
                 fi
                 standby_now=$(tick) || fault standby_monotonic_clock
@@ -385,7 +589,11 @@ case "$MODE" in
         # Subsequent cap levels remain monotonic and stricter when hot.
         level=2
         seq=0
-        if [ "$FLOOR_MODE" = 1 ]; then
+        if [ "$BW_MODE" = 1 ]; then
+            bw_init || fault isolated_cpu_group_init
+            level=7
+            echo "P0_CPU_BUDGET=BOOT_INITIAL pct=40 group=$BW_GROUP boot=$BOOT generation=$GEN"
+        elif [ "$FLOOR_MODE" = 1 ]; then
             level=3
             echo "P0_CPU_CAP=EXPERIMENTAL_FLOOR_AWARE_INITIAL_28_PERCENT boot=$BOOT generation=$GEN"
         else
@@ -411,6 +619,11 @@ case "$MODE" in
             now=$(tick) || fault invalid_uptime
             [ "$ht" -le "$now" ] && [ $((now-ht)) -le 3 ] &&
                 [ "$hseq" -gt 0 ] || fault "stale_guard_sample now=$now sample=$ht seq=$hseq"
+            if [ "$BW_MODE" = 1 ]; then
+                bw_step || fault isolated_cpu_bandwidth_or_membership
+                desired=7
+                pct=$BW_PCT
+            else
             choice=$(policy "$level" "$cpu" "$gpu" "$ddr" "$bat" "$lrp" "$ap") ||
                 fault invalid_or_emergency_temperature
             desired=${choice%%:*}
@@ -430,6 +643,7 @@ case "$MODE" in
                 2) fault "unachievable_cpu_cap_floor level=$desired pct=$pct" ;;
                 *) fault cpufreq_write_or_readback ;;
             esac
+            fi
             if [ "$FLOOR_MODE" != 1 ]; then
                 # A bounded QoS settle must not turn a previously fresh
                 # guard sample into an optimistic, newly stamped heartbeat.
@@ -440,14 +654,20 @@ case "$MODE" in
                 [ ! -e "${CTL%/control}/session/return.request" ] || exit 0
                 [ "$GEN" = "$(cat "$CTL/watchdog.generation" 2>/dev/null)" ] || exit 0
             fi
-            if [ "$desired" -ne "$level" ] || [ "$seq" -eq 0 ]; then
+            if [ "$BW_MODE" != 1 ] && { [ "$desired" -ne "$level" ] || [ "$seq" -eq 0 ]; }; then
                 echo "P0_CPU_THROTTLE=CAP_APPLIED boot=$BOOT generation=$GEN cpu_mC=$cpu from_level=$level level=$desired pct=$pct target_c=30-70 no_reboot_at_75=YES"
             fi
             level=$desired
             seq=$((seq+1))
             atom thermal.cap.heartbeat "v1 $BOOT $GEN $$ $BIRTH $seq $now OK $level $pct" ||
                 fault cannot_publish_heartbeat
-            [ "$seq" -ne 1 ] || echo "P0_CPU_CAP=ARMED_INDEPENDENT_ROOT_CAP_NOT_HARDWARE_CERTIFIED pct=$pct floor_aware=$FLOOR_MODE"
+            if [ "$seq" = 1 ]; then
+                if [ "$BW_MODE" = 1 ]; then
+                    echo "P0_CPU_BUDGET=ARMED_CFS_V1_NOT_THERMAL_CERTIFIED pct=$pct"
+                else
+                    echo "P0_CPU_CAP=ARMED_INDEPENDENT_ROOT_CAP_NOT_HARDWARE_CERTIFIED pct=$pct floor_aware=$FLOOR_MODE"
+                fi
+            fi
             sleep 1
         done
         exit 0 ;;

@@ -632,6 +632,28 @@ framework_thermal_cap_prearmed() {
         [ "$pre_gen" = "$(watchdog_generation)" ] &&
         [ "$pre_pid $pre_birth" = "$(cat "$CTL/thermal.cap.pid" 2>/dev/null)" ]
 }
+# BEGIN FRAMEWORK_CPU_BUDGET_GROUP
+# The root cap worker owns creation and writes. The guest may only join the
+# exact session group after the verified Framework-down cap heartbeat.
+framework_cpu_budget_group() (
+    ctl=$1
+    [ "$(cat "$ctl/framework.cpu-budget" 2>/dev/null)" = cfs-v1-180s ] &&
+        [ "$(cat "$ctl/framework.duration" 2>/dev/null)" = 180 ] || exit 1
+    read -r bv bb bg bt bi bx < "$ctl/thermal.cap.group" || exit 1
+    [ "$bv" = v1 ] && [ -z "$bx" ] &&
+        [ "$bb" = "$(boot_id)" ] && [ "$bb" = "$(cat "$ctl/boot")" ] &&
+        [ "$bg" = "$(cat "$ctl/watchdog.generation")" ] &&
+        [ "$bt" = "$(cat "$ctl/framework.launch")" ] || exit 1
+    case "$bt" in ''|*[!0-9a-f]*) exit 1 ;; esac
+    [ "${#bt}" = 32 ] || exit 1
+    group="/dev/cpuctl/oneios_guest.$bt"
+    [ -d "$group" ] && [ ! -L "$group" ] &&
+        [ "$(realpath "$group")" = "$group" ] &&
+        [ "$(stat -c '%d:%i' "$group")" = "$bi" ] &&
+        [ "$(cat "$group/cpu.cfs_period_us")" = 20000 ] || exit 1
+    printf '%s\n' "$group"
+)
+# END FRAMEWORK_CPU_BUDGET_GROUP
 framework_thermal_cap_healthy() {
     [ ! -e "$CTL/thermal.cap.fault" ] || return 1
     framework_pid_alive "$CTL/thermal.cap.pid" || return 1
@@ -643,7 +665,14 @@ framework_thermal_cap_healthy() {
         [ "$cp_status" = OK ] || return 1
     for v in "$cp_seq" "$cp_tick" "$cp_level" "$cp_pct"; do watchdog_uint "$v" || return 1; done
     [ "$cp_seq" -gt 0 ] || return 1
-    case "$cp_level:$cp_pct" in 1:60|2:40|3:28|4:18|5:12|6:8) ;; *) return 1 ;; esac
+    case "$(cat "$CTL/framework.cpu-budget" 2>/dev/null || :)" in
+        cfs-v1-180s)
+            [ "$cp_level" = 7 ] && [ "$cp_pct" -ge 10 ] && [ "$cp_pct" -le 100 ] &&
+                framework_cpu_budget_group "$CTL" >/dev/null || return 1 ;;
+        '')
+            case "$cp_level:$cp_pct" in 1:60|2:40|3:28|4:18|5:12|6:8) ;; *) return 1 ;; esac ;;
+        *) return 1 ;;
+    esac
     cp_now=$(watchdog_now) || return 1
     [ "$cp_tick" -le "$cp_now" ] && [ $((cp_now - cp_tick)) -le 4 ]
 }
@@ -1368,7 +1397,16 @@ case "$MODE" in
         at() { AT=$*; echo "oneios inner: $(date +%T) $*"; }
         trap 'echo "oneios inner: $(date +%T) ended with status $? in step: $AT"' EXIT
         die_inner() { echo "oneios inner: $*"; exit 70; }
-        echo $$ 2>/dev/null > "$CTL/inner.pid"
+        if [ "$FRAMEWORK" = 1 ] && [ "$(cat "$CTL/framework.cpu-budget" 2>/dev/null)" = cfs-v1-180s ]; then
+            at "joining isolated guest CPU bandwidth group before publishing PID"
+            framework_thermal_cap_healthy || die_inner "CPU budget heartbeat not healthy"
+            guest_cpu_group=$(framework_cpu_budget_group "$CTL") || die_inner "CPU bandwidth group identity invalid"
+            printf '%s\n' "$" > "$guest_cpu_group/cgroup.procs" || die_inner "cannot join guest CPU group"
+            awk -F: -v expected="/${guest_cpu_group##*/}" '$2=="cpu" && $3==expected {ok=1} END {exit !ok}' /proc/$/cgroup ||
+                die_inner "guest CPU group membership not verified"
+            echo "ONEIOS_CPU_BUDGET_GROUP=$guest_cpu_group MEMBERSHIP=VERIFIED"
+        fi
+        echo $ 2>/dev/null > "$CTL/inner.pid"
         at "pid $$, mount namespace $(readlink /proc/$$/ns/mnt 2>/dev/null)"
         R_XNUHOST=$(conf "$STAGE/runtime.conf" xnuhost)
         [ -n "$BB" ] && [ -x "$BB" ] || die_inner "no busybox"
@@ -2194,8 +2232,13 @@ if [ "$FRAMEWORK" = 1 ]; then
             done
             $SH "$STAGE/oneios_sm8850_thermal_takeover_guard.sh" --check "$STAGE/thermal.guard.manifest" ||
                 framework_block "root thermal sensor manifest not qualified on current boot"
-            $SH "$STAGE/oneios_sm8850_thermal_cap.sh" --check ||
-                framework_block "root CPU cap policy nodes not writable or unverifiable"
+            if [ "$FW_DURATION" = 180 ]; then
+                $SH "$STAGE/oneios_sm8850_thermal_cap.sh" --check-bandwidth ||
+                    framework_block "isolated v1 CPU bandwidth unavailable"
+            else
+                $SH "$STAGE/oneios_sm8850_thermal_cap.sh" --check ||
+                    framework_block "root CPU cap policy nodes not writable or unverifiable"
+            fi
         fi
         root_only "$STAGE/data" && root_only "$STAGE/data/data.img" && root_only "$STAGE/data/unique-chip-id" &&
             [ "$(stat -c '%s:%h' "$STAGE/data/data.img")" = 8589934592:1 ] &&
@@ -2323,6 +2366,10 @@ if [ "$FRAMEWORK" = 1 ]; then
             framework_setup_failed "could not record performance instrumentation profile"
         printf '%s\n' "$FW_CPU_PROFILE" > "$CTL/framework.cpu-profile" ||
             framework_setup_failed "could not record CPU placement profile"
+        if [ "$FW_SOFT_THERMAL_OFF" = 0 ] && [ "$FW_DURATION" = 180 ]; then
+            printf 'cfs-v1-180s\n' > "$CTL/framework.cpu-budget" ||
+                framework_setup_failed "could not record isolated CPU bandwidth profile"
+        fi
         if [ "$FW_SOFT_THERMAL_OFF" = 1 ]; then
             printf 'disabled-180s\n' > "$CTL/framework.soft-thermal" ||
                 framework_setup_failed "could not record explicitly accepted no-software-guard mode"
@@ -2783,7 +2830,11 @@ if [ "$FRAMEWORK" = 1 ]; then
                 fw_recover "prearmed root CPU throttle did not activate after Framework stop"
             printf '%s\n' "$WD_GEN" > "$CTL/thermal.cap.required" ||
                 fw_recover "could not mark mandatory CPU thermal throttle"
-            echo "CPU_THROTTLE=PREARMED_ACTIVATED_POST_STOP_STRICT_60_40_28_18_12_8; TARGET_30_70C; CPU_75C_THROTTLE_NOT_RETURN"
+            if [ "$(cat "$CTL/framework.cpu-budget" 2>/dev/null)" = cfs-v1-180s ]; then
+                echo "CPU_THROTTLE=PREARMED_ACTIVATED_POST_STOP_CFS_V1; TARGET_45_70C; HARD_80C_RELEASE_70C; EMERGENCY_GUARD_SEPARATE"
+            else
+                echo "CPU_THROTTLE=PREARMED_ACTIVATED_POST_STOP_STRICT_60_40_28_18_12_8; TARGET_30_70C; CPU_75C_THROTTLE_NOT_RETURN"
+            fi
         fi
     fi
     printf '%s\n' "$((fw_tick + fw_seconds))" > "$CTL/framework.deadline.tmp" &&
