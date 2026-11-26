@@ -183,3 +183,33 @@ PASS. DEVICE_ACCESS=NONE; evidence `/tmp/oneios-g242.ijjF7A`.
 No new device qualification. Next implement the actual XNUHost GPU
 ingress/drain path and provider ownership; do not repeat unchanged policy
 tests or weaken the retired-admission block.
+
+
+## G24.3–G24.5 local receipts (2026-11-26)
+
+OneiOS G24.3 `cce950cd256db9cf7e49c3e3680a4301e6983719`:
+19,759 native checks, zero failed, Android ARM64 compile/link PASS.
+G24.4 `5c4dc620b90e5ddb7dbbd2a3baed992526f08d9f`: 159 accepted-
+timestamp ledger checks PASS at 40c3472, then full Android patch/build/link
+and the three KGSL drain symbols PASS after the hunk-only fix.
+G24.5 `4b12df8e7f2617238087f9a3adbb322a50211b29`: 19,824 native
+checks / 0 failed; Android ARM64 compile/link and all three combined
+quiesce symbols PASS. Runtime SHA256
+`c36826976b9763d5874412fb89a7e3fb99d23095f58b28180f69105699a7e2e4`.
+Operator local evidence `/tmp/oneios-g245.SNrfRT`. All runs offline,
+DEVICE_ACCESS=NONE. No actual KGSL retirement/thermal or IO qualification.
+
+Next investigate the exact SM-S948B/S948BXXS4BZIG stock frequency-vote
+interface before further controller layers are added. Linux
+scaling_max_freq readback is the aggregate policy limit, not ownership
+of the sysfs user's request (see Linux CPUFreq documentation and
+https://lists.openwall.net/linux-kernel/2026/03/26/2397).
+A handle-based vendor API is only a candidate: existence of acquire/
+release symbols or a MAX_FREQ name does not prove max-vote aggregation,
+ownership, expiry/death handling, service survival after Framework stop,
+or readback. Do not try numeric IDs from other firmware. The OneiOS
+frequency inventory is read-only and deliberately does not execute a
+vendor library, change any vote, mount, module, property, or service.
+Retain the admission block and existing stock protections. No kernel,
+watchdog, recovery or physical takeover experiment is a prerequisite for
+this inventory.
