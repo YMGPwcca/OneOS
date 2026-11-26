@@ -1923,6 +1923,14 @@ if [ "$FRAMEWORK" = 1 ]; then
     esac
     FW_MODE=$2
     [ "$FW_MODE" != reboot-smoke ] || FW_MODE=smoke
+    # The operator withdrew the old hybrid/fixed-frequency and
+    # thermal-emergency-return policy. Refuse BOTH read-only full-run
+    # admission and live sessions before claiming Data or stopping Android.
+    # Existing active-session recovery and separately requested smoke are
+    # deliberately not changed. No environment/risk-token bypass.
+    if [ "$FW_MODE" = run ]; then
+        framework_block "SM8850_THERMAL_POLICY=BLOCKED_LEGACY_RETIRED; adaptive owned ceiling and non-reboot guest quiesce not qualified"
+    fi
     # Bounded, operator-selected duration measured from Framework stop.
     FW_DURATION=600
     FW_SMOKE_SECONDS=20
