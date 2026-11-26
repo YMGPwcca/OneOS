@@ -387,6 +387,12 @@ bw_verify() {
     if [ -n "$bw_pid" ]; then
         uint "$bw_pid" && [ "$bw_pid" -gt 1 ] || return 1
         bw_member "/proc/$bw_pid/cgroup" "/${BW_GROUP##*/}" || return 1
+        bw_ns=$(cat "$CTL/mntns" 2>/dev/null || :)
+        if [ -n "$bw_ns" ]; then
+            [ "$(readlink "/proc/$bw_pid/ns/mnt")" = "$bw_ns" ] || return 1
+        elif [ "$(cat "$CTL/state" 2>/dev/null)" = running ]; then
+            return 1
+        fi
         for bw_file in /proc/"$bw_pid"/task/[0-9]*/cgroup; do
             [ -e "$bw_file" ] || continue
             bw_seen=0
@@ -418,7 +424,7 @@ bw_step() {
     [ "$hseq" != "$BW_HSEQ" ] || return 0
     # The existing independent sensor/emergency contract is not replaced.
     # policy 0 validates all six sensors and refuses last-resort thresholds.
-    policy 0 "$cpu" "$gpu" "$ddr" "$bat" "$lrp" "$ap" >/dev/null || return 1
+    (policy 0 "$cpu" "$gpu" "$ddr" "$bat" "$lrp" "$ap") >/dev/null || return 1
     bw_choice=$(sm8850_thermal_hysteresis_step "$BW_PCT" "$BW_LATCH" "$BW_DWELL" "$cpu" "$gpu" "$ddr") || return 1
     bw_state=${bw_choice%%:*}
     bw_tail=${bw_choice#*:}
