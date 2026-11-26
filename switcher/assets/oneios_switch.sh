@@ -637,7 +637,7 @@ framework_thermal_cap_prearmed() {
 # exact session group after the verified Framework-down cap heartbeat.
 framework_cpu_budget_group() (
     ctl=$1
-    [ "$(cat "$ctl/framework.cpu-budget" 2>/dev/null)" = cfs-v1-180s ] &&
+    [ "$(cat "$ctl/framework.cpu-budget" 2>/dev/null)" = hybrid-v1-180s ] &&
         [ "$(cat "$ctl/framework.duration" 2>/dev/null)" = 180 ] || exit 1
     read -r bv bb bg bt bi bx < "$ctl/thermal.cap.group" || exit 1
     [ "$bv" = v1 ] && [ -z "$bx" ] &&
@@ -666,7 +666,7 @@ framework_thermal_cap_healthy() {
     for v in "$cp_seq" "$cp_tick" "$cp_level" "$cp_pct"; do watchdog_uint "$v" || return 1; done
     [ "$cp_seq" -gt 0 ] || return 1
     case "$(cat "$CTL/framework.cpu-budget" 2>/dev/null || :)" in
-        cfs-v1-180s)
+        hybrid-v1-180s)
             [ "$cp_level" = 7 ] && [ "$cp_pct" -ge 10 ] && [ "$cp_pct" -le 100 ] &&
                 framework_cpu_budget_group "$CTL" >/dev/null || return 1 ;;
         '')
@@ -1397,7 +1397,7 @@ case "$MODE" in
         at() { AT=$*; echo "oneios inner: $(date +%T) $*"; }
         trap 'echo "oneios inner: $(date +%T) ended with status $? in step: $AT"' EXIT
         die_inner() { echo "oneios inner: $*"; exit 70; }
-        if [ "$FRAMEWORK" = 1 ] && [ "$(cat "$CTL/framework.cpu-budget" 2>/dev/null)" = cfs-v1-180s ]; then
+        if [ "$FRAMEWORK" = 1 ] && [ "$(cat "$CTL/framework.cpu-budget" 2>/dev/null)" = hybrid-v1-180s ]; then
             at "joining isolated guest CPU bandwidth group before publishing PID"
             framework_thermal_cap_healthy || die_inner "CPU budget heartbeat not healthy"
             guest_cpu_group=$(framework_cpu_budget_group "$CTL") || die_inner "CPU bandwidth group identity invalid"
@@ -2234,7 +2234,7 @@ if [ "$FRAMEWORK" = 1 ]; then
                 framework_block "root thermal sensor manifest not qualified on current boot"
             if [ "$FW_DURATION" = 180 ]; then
                 $SH "$STAGE/oneios_sm8850_thermal_cap.sh" --check-bandwidth ||
-                    framework_block "isolated v1 CPU bandwidth unavailable"
+                    framework_block "hybrid frequency ceiling or isolated v1 CPU bandwidth unavailable"
             else
                 $SH "$STAGE/oneios_sm8850_thermal_cap.sh" --check ||
                     framework_block "root CPU cap policy nodes not writable or unverifiable"
@@ -2367,7 +2367,7 @@ if [ "$FRAMEWORK" = 1 ]; then
         printf '%s\n' "$FW_CPU_PROFILE" > "$CTL/framework.cpu-profile" ||
             framework_setup_failed "could not record CPU placement profile"
         if [ "$FW_SOFT_THERMAL_OFF" = 0 ] && [ "$FW_DURATION" = 180 ]; then
-            printf 'cfs-v1-180s\n' > "$CTL/framework.cpu-budget" ||
+            printf 'hybrid-v1-180s\n' > "$CTL/framework.cpu-budget" ||
                 framework_setup_failed "could not record isolated CPU bandwidth profile"
         fi
         if [ "$FW_SOFT_THERMAL_OFF" = 1 ]; then
@@ -2830,8 +2830,8 @@ if [ "$FRAMEWORK" = 1 ]; then
                 fw_recover "prearmed root CPU throttle did not activate after Framework stop"
             printf '%s\n' "$WD_GEN" > "$CTL/thermal.cap.required" ||
                 fw_recover "could not mark mandatory CPU thermal throttle"
-            if [ "$(cat "$CTL/framework.cpu-budget" 2>/dev/null)" = cfs-v1-180s ]; then
-                echo "CPU_THROTTLE=PREARMED_ACTIVATED_POST_STOP_CFS_V1; TARGET_45_70C; HARD_80C_RELEASE_70C; EMERGENCY_GUARD_SEPARATE"
+            if [ "$(cat "$CTL/framework.cpu-budget" 2>/dev/null)" = hybrid-v1-180s ]; then
+                echo "CPU_THROTTLE=PREARMED_ACTIVATED_POST_STOP_CFS_V1; HYBRID_FREQ_CEILING_40_PERCENT; TARGET_45_70C; HARD_80C_RELEASE_70C; EMERGENCY_GUARD_SEPARATE"
             else
                 echo "CPU_THROTTLE=PREARMED_ACTIVATED_POST_STOP_STRICT_60_40_28_18_12_8; TARGET_30_70C; CPU_75C_THROTTLE_NOT_RETURN"
             fi

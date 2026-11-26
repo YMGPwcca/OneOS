@@ -337,9 +337,12 @@ sm8850_cpu_quota_apply() (
 )
 # END SM8850_CPU_BANDWIDTH
 # BEGIN SM8850_CFS_LIFECYCLE
-# No shared cpufreq writes in this exact 180s profile. Only a unique child
-# of the already-mounted v1 CPU hierarchy is controlled. Reboot-only
-# recovery destroys this transient kernel group; never remove foreign groups.
+# Hybrid 180s profile: preserve the previously observed 40% hardware-MAX
+# protective ceiling (downward-only, strict effective bounds) throughout
+# the session, with reversible isolated CFS quota for thermal regulation.
+# CFS alone admitted a 95.7 C CPU junction excursion during guest startup.
+# The frequency request is shared, NOT independently owned; never raise it.
+# Reboot-only recovery destroys the transient group; never remove foreign groups.
 bw_host_ready() {
     [ "$(realpath /dev/cpuctl)" = /dev/cpuctl ] &&
         awk '$2=="/dev/cpuctl" && $3=="cgroup" {n=split($4,a,","); for(i=1;i<=n;i++) if(a[i]=="cpu") ok=1} END {exit !ok}' /proc/mounts &&
@@ -352,8 +355,15 @@ bw_token_valid() {
     case "$1" in ''|*[!0-9a-f]*) return 1 ;; esac
     [ "${#1}" = 32 ]
 }
+bw_frequency_ceiling() {
+    framework_down_for_cpu_cap || return 1
+    # Reuse the audited MAX-first actuator. Subshell prevents its local
+    # shell variables from altering the heartbeat/CPU-budget state.
+    (apply_cap "" 40 strict)
+}
 bw_init() {
     framework_down_for_cpu_cap && bw_host_ready || return 1
+    bw_frequency_ceiling || return 1
     BW_TOKEN=$(cat "$CTL/framework.launch") || return 1
     bw_token_valid "$BW_TOKEN" || return 1
     BW_GROUP="/dev/cpuctl/oneios_guest.$BW_TOKEN"
@@ -367,6 +377,9 @@ bw_init() {
     sm8850_cpu_quota_apply "$BW_GROUP" 40 || return 1
     atom thermal.cap.group "v1 $BOOT $GEN $BW_TOKEN $BW_ID" || return 1
     BW_PCT=40 BW_LATCH=0 BW_DWELL=0 BW_HSEQ=0 BW_STATE=START
+    BW_RAMP_TICK=$(tick) || return 1
+    BW_LAST_HBTICK=0
+    echo "P0_CPU_BUDGET=HYBRID_BOOT_FREQ_CEILING_VERIFIED pct_hw_max=40 boot=$BOOT generation=$GEN"
 }
 bw_member() {
     awk -F: -v expected="$2" '$2=="cpu" && $3==expected {ok=1} END {exit !ok}' "$1"
@@ -418,9 +431,12 @@ bw_aux_limit() {
     if [ "$bat" -ge 440 ] || [ "$lrp" -ge 470 ] || [ "$ap" -ge 650 ]; then bw_limit=10; fi
 }
 bw_step() {
+    # Fail closed if the protective frequency ceiling cannot be enforced.
+    # It is never increased to recover performance; only guest quota may rise.
+    bw_frequency_ceiling || return 1
     # Validate the already-applied quota BEFORE considering another write.
     bw_verify || return 1
-    [ "$hseq" -ge "$BW_HSEQ" ] || return 1
+    [ "$hseq" -ge "$BW_HSEQ" ] && [ "$ht" -ge "$BW_LAST_HBTICK" ] || return 1
     [ "$hseq" != "$BW_HSEQ" ] || return 0
     # The existing independent sensor/emergency contract is not replaced.
     # policy 0 validates all six sensors and refuses last-resort thresholds.
@@ -434,6 +450,20 @@ bw_step() {
     bw_dwell=${bw_tail#*:}
     bw_aux_limit
     if [ "$bw_next" -gt "$bw_limit" ]; then bw_next=$bw_limit; bw_dwell=0; fi
+    # Faster thermal sampling must not accelerate the cool ramp. At least
+    # five monotonic seconds since the last non-cool state or quota change.
+    # Repeated samples in one second can reduce quota, never increase it early.
+    bw_ramp_tick=$BW_RAMP_TICK
+    case "$bw_state" in HARD|RECOVERY|HOLD|SOFT) bw_ramp_tick=$ht ;; esac
+    if [ "$bw_next" -lt "$BW_PCT" ]; then bw_ramp_tick=$ht; fi
+    if [ "$bw_next" -gt "$BW_PCT" ]; then
+        if [ "$ht" -lt "$bw_ramp_tick" ] || [ $((ht-bw_ramp_tick)) -lt 5 ]; then
+            bw_next=$BW_PCT
+            bw_dwell=4
+        else
+            bw_ramp_tick=$ht
+        fi
+    fi
     if [ "$bw_next" != "$BW_PCT" ]; then
         sm8850_cpu_quota_apply "$BW_GROUP" "$bw_next" || return 1
     fi
@@ -441,6 +471,7 @@ bw_step() {
         echo "P0_CPU_BUDGET=APPLIED boot=$BOOT generation=$GEN sample=$hseq cpu_mC=$cpu gpu_mC=$gpu ddr_mC=$ddr from_pct=$BW_PCT pct=$bw_next state=$bw_state hard_latch=$bw_latch auxiliary_limit=$bw_limit"
     fi
     BW_PCT=$bw_next BW_LATCH=$bw_latch BW_DWELL=$bw_dwell BW_STATE=$bw_state BW_HSEQ=$hseq
+    BW_RAMP_TICK=$bw_ramp_tick BW_LAST_HBTICK=$ht
     bw_verify
 }
 # END SM8850_CFS_LIFECYCLE
@@ -472,9 +503,9 @@ case "$MODE" in
         exit 0 ;;
     --check-bandwidth)
         [ "$#" = 1 ] && [ "$(id -u)" = 0 ] || die root_required
-        bw_host_ready || die v1_cpu_bandwidth_unavailable
-        echo "SM8850_CPU_THROTTLE_POLICY=CFS_V1_TARGET_45_70_HARD_80_RELEASE_70"
-        echo "P0_CPU_CAP=READ_ONLY_BANDWIDTH_AVAILABLE_NOT_CERTIFIED"
+        bw_host_ready && policies "" || die hybrid_cpu_actuator_unavailable
+        echo "SM8850_CPU_THROTTLE_POLICY=HYBRID_FREQ40_CFS_V1_TARGET_45_70_HARD_80_RELEASE_70"
+        echo "P0_CPU_CAP=READ_ONLY_HYBRID_AVAILABLE_NOT_CERTIFIED"
         exit 0 ;;
     --check)
         [ "$#" = 1 ] || die args
@@ -537,9 +568,9 @@ case "$MODE" in
           [ "$(cat "$CTL/framework.mode" 2>/dev/null)" = run ] || die stale_session
         BW_MODE=0
         case "$(cat "$CTL/framework.cpu-budget" 2>/dev/null || :)" in
-            cfs-v1-180s)
+            hybrid-v1-180s)
                 [ "$MODE" = --run-prearmed ] && [ "$(cat "$CTL/framework.duration")" = 180 ] &&
-                    bw_host_ready || die bandwidth_profile
+                    bw_host_ready && policies "" || die hybrid_profile
                 BW_MODE=1
                 # Move only this root worker out of any inherited Android
                 # CPU restriction, not an Android service or parent quota.
@@ -669,12 +700,12 @@ case "$MODE" in
                 fault cannot_publish_heartbeat
             if [ "$seq" = 1 ]; then
                 if [ "$BW_MODE" = 1 ]; then
-                    echo "P0_CPU_BUDGET=ARMED_CFS_V1_NOT_THERMAL_CERTIFIED pct=$pct"
+                    echo "P0_CPU_BUDGET=ARMED_HYBRID_FREQ40_CFS_V1_NOT_THERMAL_CERTIFIED pct=$pct"
                 else
                     echo "P0_CPU_CAP=ARMED_INDEPENDENT_ROOT_CAP_NOT_HARDWARE_CERTIFIED pct=$pct floor_aware=$FLOOR_MODE"
                 fi
             fi
-            sleep 1
+            if [ "$BW_MODE" = 1 ]; then sleep 0.25; else sleep 1; fi
         done
         exit 0 ;;
     *) die usage ;;

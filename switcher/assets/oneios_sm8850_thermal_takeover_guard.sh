@@ -154,7 +154,11 @@ case "$MODE" in
         [ "$BOOT" = "$(cat /proc/sys/kernel/random/boot_id)" ] || die stale_session
         [ "$GEN" = "$(cat "$CTL/watchdog.generation" 2>/dev/null)" ] || die generation_mismatch
         [ "$(cat "$CTL/framework.mode" 2>/dev/null)" = run ] || die non_run
-        if [ "$(cat "$CTL/framework.cpu-budget" 2>/dev/null)" = cfs-v1-180s ]; then
+        guard_sleep=1
+        guard_log_every=5
+        if [ "$(cat "$CTL/framework.cpu-budget" 2>/dev/null)" = hybrid-v1-180s ]; then
+            guard_sleep=0.25
+            guard_log_every=20
             # The root monitor must never share the guest CPU quota.
             printf '%s\n' "$$" > /dev/cpuctl/cgroup.procs || die guard_root_cpu_group
             awk -F: '$2=="cpu" && $3=="/" {ok=1} END {exit !ok}' /proc/$$/cgroup ||
@@ -173,15 +177,16 @@ case "$MODE" in
             esac
             # Use the actual completed sample timestamp, never a synthetic heartbeat.
             # Record scan cost for diagnosing starvation; the freshness limit is unchanged.
-            read -r scan_start _ < /proc/uptime || scan_start=
-            scan_start=${scan_start%%.*}
+            read -r scan_begin_uptime _ < /proc/uptime || scan_begin_uptime=
+            scan_start=${scan_begin_uptime%%.*}
             if read_all "$BOOT" "$MAN"; then
                 :
             else
                 rc=$?
                 case "$rc" in
                     2) reason=soft_temperature_abort
-                       detail=$SOFT_FAULT_DETAIL ;;
+                       read -r fault_uptime _ < /proc/uptime || fault_uptime=unknown
+                       detail="$SOFT_FAULT_DETAIL scan_begin_uptime=${scan_begin_uptime:-unknown} fault_uptime=$fault_uptime previous_seq=$seq" ;;
                     *) reason=missing_or_invalid_sensor
                        detail= ;;
                 esac
@@ -206,7 +211,11 @@ case "$MODE" in
             # Bounded root-owned thermal telemetry survives xnuhost bridges=0.
             # Boot/generation distinguish new samples from appended older runs.
             # Never delay or replace the fail-closed fault branch above.
-            case $((seq % 5)) in
+            if [ "$guard_sleep" = 0.25 ]; then
+                read -r scan_end_uptime _ < /proc/uptime || scan_end_uptime=unknown
+                echo "P0_HYBRID_THERMAL_SAMPLE=OK boot=$BOOT generation=$GEN seq=$seq scan_begin_uptime=${scan_begin_uptime:-unknown} scan_end_uptime=$scan_end_uptime cpu_mC=$CPU_MAX cpu_zone=$CPU_MAX_ZONE gpu_mC=$GPU_MAX ddr_mC=$DDR_MAX bat_dC=$BAT lrp_dC=$LRP board_ap_dC=$AP"
+            fi
+            case $((seq % guard_log_every)) in
                 1)
                     echo "P0_THERMAL_SAMPLE=OK boot=$BOOT generation=$GEN seq=$seq uptime=$tick cpu_mC=$CPU_MAX cpu_zone=$CPU_MAX_ZONE gpu_mC=$GPU_MAX gpu_zone=$GPU_MAX_ZONE ddr_mC=$DDR_MAX ddr_zone=$DDR_MAX_ZONE bat_dC=$BAT lrp_dC=$LRP board_ap_dC=$AP scan_seconds=$(
                         if is_uint "$scan_start" && [ "$scan_start" -le "$tick" ]; then
@@ -231,7 +240,7 @@ case "$MODE" in
                     fi
                     ;;
             esac
-            sleep 1
+            sleep "$guard_sleep"
         done
         exit 0 ;;
     *) die usage ;;

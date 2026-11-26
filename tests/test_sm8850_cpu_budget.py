@@ -20,7 +20,7 @@ class CpuBudgetIntegration(unittest.TestCase):
 
     def test_profile_and_guest_join_order(self):
         early = SW.index('--check-bandwidth ||')
-        profile = SW.index("printf 'cfs-v1-180s\\n'")
+        profile = SW.index("printf 'hybrid-v1-180s\\n'")
         prearm = SW.index('--run-prearmed "$CTL" "$WD_GEN"')
         claim = SW.index('APFS_DATA_CLONE=CONSUMED_ONE_SHOT_BEFORE_FRAMEWORK_STOP')
         stop = SW.index('if ! stop_android_framework; then')
@@ -48,15 +48,17 @@ class CpuBudgetIntegration(unittest.TestCase):
         fixture = model + lifecycle + validator + policy + r'''
 BOOT=mock GEN=mock BW_GROUP=/not-a-real-group
 BW_PCT=40 BW_LATCH=0 BW_DWELL=0 BW_HSEQ=0 BW_STATE=START
-FLOOR_MODE=0 writes=0 verify_fail=0 apply_fail=0
+FLOOR_MODE=0 writes=0 verify_fail=0 apply_fail=0 freq_fail=0
+BW_RAMP_TICK=0 BW_LAST_HBTICK=0
 gpu=40000 ddr=40000 bat=300 lrp=320 ap=350
+bw_frequency_ceiling() { [ "$freq_fail" = 0 ]; }
 bw_verify() { [ "$verify_fail" = 0 ]; }
 sm8850_cpu_quota_apply() {
     [ "$apply_fail" = 0 ] || return 1
     writes=$((writes+1))
 }
 sample() {
-    hseq=$1 cpu=$2
+    hseq=$1 cpu=$2 ht=${3:-$1}
     bw_step || { echo REFUSED; return 1; }
     printf 'STEP=%s:%s:%s:%s:%s:%s\n' "$hseq" "$BW_PCT" "$BW_LATCH" "$BW_DWELL" "$BW_STATE" "$writes"
 }
@@ -81,6 +83,22 @@ BW_PCT=40
 apply_fail=1
 sample 10 80000 && exit 9
 [ "$BW_PCT" = 40 ] && [ "$BW_HSEQ" = 9 ] || exit 9
+apply_fail=0
+freq_fail=1
+sample 10 40000 && exit 9
+[ "$BW_PCT" = 40 ] && [ "$BW_HSEQ" = 9 ] || exit 9
+freq_fail=0
+# Fresh 250ms samples must not increase the budget four times faster.
+BW_DWELL=4 BW_RAMP_TICK=9
+sample 10 40000 10
+sample 11 40000 10
+sample 12 40000 11
+sample 13 40000 13
+sample 14 40000 14
+sample 15 80000 14
+sample 16 75000 14
+sample 17 70000 15
+[ "$BW_PCT" = 10 ] && [ "$BW_LATCH" = 0 ] || exit 9
 exit 0
 '''
         p = subprocess.run(["sh", "-c", fixture], capture_output=True,
@@ -92,7 +110,11 @@ exit 0
             "STEP=4:10:0:1:COOL:1", "STEP=5:10:0:2:COOL:1",
             "STEP=6:10:0:3:COOL:1", "STEP=7:10:0:4:COOL:1",
             "STEP=8:20:0:0:COOL:2", "REFUSED", "STEP=9:10:0:0:COOL:3",
-            "REFUSED", "REFUSED"
+            "REFUSED", "REFUSED", "REFUSED",
+            "STEP=10:40:0:4:COOL:3", "STEP=11:40:0:4:COOL:3",
+            "STEP=12:40:0:4:COOL:3", "STEP=13:40:0:4:COOL:3",
+            "STEP=14:50:0:0:COOL:4", "STEP=15:10:1:0:HARD:5",
+            "STEP=16:10:1:0:HARD:5", "STEP=17:10:0:0:RECOVERY:5"
         ], [line for line in p.stdout.splitlines()
             if line.startswith("STEP=") or line == "REFUSED"])
 
@@ -103,6 +125,18 @@ exit 0
         self.assertNotIn("scaling_min_freq", body)
         self.assertNotIn("> /dev/cpuctl/cpu.cfs_", CAP)
         self.assertIn('framework_down_for_cpu_cap && bw_host_ready', body)
+        self.assertIn('(apply_cap "" 40 strict)', body)
+        init = body.split("bw_init() {", 1)[1].split("bw_member() {", 1)[0]
+        self.assertLess(init.index("bw_frequency_ceiling || return 1"),
+                        init.index('mkdir "$BW_GROUP"'))
+        self.assertLess(init.index("bw_frequency_ceiling || return 1"),
+                        init.index('atom thermal.cap.group'))
+        self.assertIn('bw_frequency_ceiling || return 1', body.split("bw_step() {", 1)[1])
+        self.assertIn('[ $((ht-bw_ramp_tick)) -lt 5 ]', body)
+        self.assertIn('guard_sleep=0.25', GUARD)
+        self.assertIn('P0_HYBRID_THERMAL_SAMPLE=OK', GUARD)
+        self.assertIn('sleep 0.25; else sleep 1', CAP)
+        self.assertIn('SM8850_CPU_THROTTLE_POLICY=HYBRID_FREQ40_CFS_V1_TARGET_45_70_HARD_80_RELEASE_70', CAP)
         self.assertIn('bw_verify || return 1', body)
         self.assertIn('[ "$hseq" != "$BW_HSEQ" ] || return 0', body)
         self.assertIn('policy 0 "$cpu" "$gpu" "$ddr" "$bat" "$lrp" "$ap"', body)
