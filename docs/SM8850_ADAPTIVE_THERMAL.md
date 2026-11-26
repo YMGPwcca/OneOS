@@ -81,3 +81,38 @@ The cgroup and scheduler paths above are source-supported implementation
 candidates, not proof that every required operation is supported on this
 specific firmware. No stage, rearm, live run, or recovery test follows
 from this receipt.
+
+
+## G24.1 native owned-group actuator candidate
+
+`switcher/native/sm8850_owned_groups.{c,h}` is a native userspace library,
+not a launch command. It binds exactly two token-named, root-owned leaf
+cgroups using creator-supplied device/inode identities: v1 CPU bandwidth
+under /dev/cpuctl and v2 CPU freezer under /sys/fs/cgroup. The production
+backend checks filesystem type, current name vs held directory identity,
+leaf-only structure, and that the independent caller stays outside the
+groups. It changes only its leaf quota and freeze nodes, with readback;
+no shared CPU/GPU clock or vendor thermal writes. Quota range 10–100% of
+eight cores, 20ms period, no fixed frequency ceiling. Closing a handle
+does not change a group or thaw it. A quota/readback failure latches a
+fault without preventing a verified freeze; thaw is explicit, requires
+an acknowledged freeze and verified quota, and is forbidden after a
+fault. Freeze/thaw have a bounded 2s maximum acknowledgement window.
+A failed thaw attempts to reassert freeze on the same verified group;
+that is not a confirmed freeze.
+
+Local test (ordinary temporary files + asynchronous mock kernel events):
+```sh
+D=$(mktemp -d)
+cc -std=c11 -O2 -Wall -Wextra -Werror -c switcher/native/sm8850_owned_groups.c -o "$D/owned.o"
+cc -std=c11 -O2 -Wall -Wextra -Werror -pthread tests/test_sm8850_owned_groups.c -o "$D/test-owned"
+"$D/test-owned"
+```
+
+Pending: local compile/test, session creator and verified membership
+lifecycle, sensor/policy and actuator integration, GPU/IO quiescence
+proof, and an independent owned adaptive frequency actuator. The
+library is not staged, invoked by the current root switcher, or an
+admission substitute. A cgroup freeze acknowledges stopped userspace
+execution only; it does not drain GPU work, prove temperature control,
+or authorize resume. No change to legacy recovery paths; no live run.
