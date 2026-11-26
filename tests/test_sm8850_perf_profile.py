@@ -74,23 +74,25 @@ class PerfProfile(unittest.TestCase):
 
     def test_metadata_and_exec_are_wired(self):
         self.assertIn('printf \'%s\\n\' "$FW_PERF_PROFILE" > "$CTL/framework.perf-profile"', SOURCE)
-        # The one-shot claim precedes archiving old control/session data.
-        # Do not move that safety boundary or write the new profile into
-        # the previous session's control directory just to satisfy a test.
+        # Archive the previous session and persist the new profile before
+        # the late one-shot claim. A pre-stop wake/setup refusal must not
+        # consume Data; after claim, all paths remain one-shot.
+        early = SOURCE.index('framework_block "isolated APFS Data clone was already consumed"')
         claim = SOURCE.index('APFS_DATA_CLONE=CONSUMED_ONE_SHOT_BEFORE_FRAMEWORK_STOP')
-        archive = SOURCE.index('archive=$(mktemp -d "$STAGE/logs/session.XXXXXX")', claim)
+        archive = SOURCE.index('archive=$(mktemp -d "$STAGE/logs/session.XXXXXX")', early)
         create = SOURCE.index('mkdir -p "$CTL/base" "$CTL/keys" "$SESSION/tmp"', archive)
         launch = SOURCE.index('> "$CTL/framework.launch"', create)
         perf = SOURCE.index('> "$CTL/framework.perf-profile"', launch)
         cpu = SOURCE.index('> "$CTL/framework.cpu-profile"', perf)
-        stop = SOURCE.index('if ! stop_android_framework; then', cpu)
+        stop = SOURCE.index('if ! stop_android_framework; then', claim)
         inner = SOURCE.index('--inner 8>&- </dev/null >>"$SESSION/xnuhost.log"', stop)
-        self.assertLess(claim, archive)
+        self.assertLess(early, archive)
         self.assertLess(archive, create)
         self.assertLess(create, launch)
         self.assertLess(launch, perf)
         self.assertLess(perf, cpu)
-        self.assertLess(cpu, stop)
+        self.assertLess(cpu, claim)
+        self.assertLess(claim, stop)
         self.assertLess(stop, inner)
         # The profile token and native capabilities must be checked before
         # Data is claimed; a metadata write failure aborts before stop.
