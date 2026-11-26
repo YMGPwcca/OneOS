@@ -389,6 +389,90 @@ class FullRunThermalContract(unittest.TestCase):
                     self.assertIn("MOCK_ARMED=switch-panel-wake-refused", proc.stdout)
                     self.assertEqual("0", (root / "count").read_text().strip())
 
+    def test_data_claim_after_wake_and_recovery_before_stop(self):
+        source = SWITCH.read_text()
+        begin = source.index("# BEGIN SM8850_DATA_CLAIM_AT_STOP_GATE")
+        end = source.index("# END SM8850_DATA_CLAIM_AT_STOP_GATE")
+        early = source.index('framework_block "isolated APFS Data clone was already consumed"')
+        wake = source.index("FRAMEWORK_PANEL_WAKE=BLOCKED_BEFORE_FRAMEWORK_STOP")
+        abort = source.index('$SH "$STAGE/oneios_return.sh" switch-not-armed', wake)
+        lock = source.index('until mkdir "$CTL/stop.lock"')
+        ready = source.index('framework_recovery_ready &&', lock)
+        stop = source.index('if ! stop_android_framework; then')
+        inner = source.index('unshare -m /system/bin/sh "$SELF" --inner', stop)
+        self.assertLess(early, wake)
+        self.assertLess(wake, abort)
+        self.assertLess(abort, lock)
+        self.assertLess(lock, ready)
+        self.assertLess(ready, begin)
+        self.assertLess(begin, end)
+        self.assertLess(end, stop)
+        self.assertLess(stop, inner)
+        self.assertEqual(1, source.count('> "$STAGE/data.consumed"'))
+        self.assertNotIn('> "$STAGE/data.consumed"', source[:begin])
+        self.assertNotIn('rm -f "$STAGE/data.consumed"', source)
+        self.assertIn('return_asked &&', source[begin:end])
+
+    def test_data_claim_stop_gate_synthetic(self):
+        source = SWITCH.read_text()
+        fragment = source.split("# BEGIN SM8850_DATA_CLAIM_AT_STOP_GATE\n", 1)[1].split(
+            "# END SM8850_DATA_CLAIM_AT_STOP_GATE", 1)[0]
+        fixture = textwrap.dedent("""\
+            FRAMEWORK=1 FW_MODE="$TEST_MODE" STAGE="$TEST_ROOT"
+            FW_LAUNCH=0123456789abcdef0123456789abcdef
+            SH=sh SELF_RETURN="$TEST_ROOT/return.sh"
+            boot_id() { echo test-boot; }
+            release_stop_lock() { echo MOCK_RELEASE; }
+            return_asked() { [ "$TEST_CANCEL" = 1 ]; }
+            end_for_return() { echo MOCK_CANCEL; exit 4; }
+            chmod() {
+                [ "$TEST_CHMOD_FAIL" = 0 ] || return 1
+                command chmod "$@"
+            }
+            __FRAGMENT__
+            echo MOCK_STOP_BOUNDARY
+            """).replace("__FRAGMENT__", fragment)
+        for name, mode, initial, cancel, chmod_fail, rc, final in (
+            ("fresh", "run", "absent", "0", "0", 0, "claimed"),
+            ("used", "run", "used", "0", "0", 4, "used"),
+            ("symlink", "run", "link", "0", "0", 4, "link"),
+            ("claim_failed", "run", "directory", "0", "0", 4, "directory"),
+            ("cancel_after_claim", "run", "absent", "1", "0", 4, "claimed"),
+            ("chmod_failed", "run", "absent", "0", "1", 4, "claimed"),
+            ("smoke", "smoke", "absent", "0", "0", 0, "absent"),
+        ):
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as td:
+                root = Path(td)
+                marker = root / "data.consumed"
+                (root / "return.sh").write_text("echo MOCK_RETURN\n")
+                if initial == "used":
+                    marker.write_text("old-boot old-launch\n")
+                elif initial == "link":
+                    marker.symlink_to(root / "missing")
+                elif initial == "directory":
+                    marker.mkdir()
+                p = subprocess.run(["sh", "-c", fixture],
+                    env={**os.environ, "TEST_ROOT": td, "TEST_MODE": mode,
+                         "TEST_CANCEL": cancel, "TEST_CHMOD_FAIL": chmod_fail},
+                    capture_output=True, text=True, timeout=5)
+                self.assertEqual(rc, p.returncode, (p.stdout, p.stderr))
+                self.assertEqual(rc == 0, "MOCK_STOP_BOUNDARY" in p.stdout)
+                if final == "claimed":
+                    self.assertEqual("test-boot 0123456789abcdef0123456789abcdef\n", marker.read_text())
+                    self.assertEqual(0o600, marker.stat().st_mode & 0o777)
+                elif final == "used":
+                    self.assertEqual("old-boot old-launch\n", marker.read_text())
+                elif final == "link":
+                    self.assertTrue(marker.is_symlink())
+                    self.assertFalse((root / "missing").exists())
+                elif final == "directory":
+                    self.assertTrue(marker.is_dir())
+                else:
+                    self.assertFalse(marker.exists())
+                if rc == 4:
+                    self.assertIn("MOCK_RELEASE", p.stdout)
+                    self.assertIn("MOCK_CANCEL" if cancel == "1" else "MOCK_RETURN", p.stdout)
+
     def test_final_wakeup_precedes_framework_stop(self):
         source = SWITCH.read_text()
         start = source.index('stop_android_framework() {')

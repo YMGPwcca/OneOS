@@ -2258,15 +2258,11 @@ if [ "$MODE" = --check ] || [ "$MODE" = --framework-check ]; then
     exit 0
 fi
 if [ "$FRAMEWORK" = 1 ] && [ "$FW_MODE" = run ]; then
-    # Consume this independently cloned APFS Data BEFORE the first possible
-    # writable guest open. A failed/aborted takeover cannot reuse the clone.
+    # The Framework session holds start.lock. Refuse used Data before
+    # creating any session helpers, but do not spend a fresh clone on
+    # pre-stop wake/cooldown or recovery admission failures.
     [ ! -L "$STAGE/data.consumed" ] && [ ! -e "$STAGE/data.consumed" ] ||
         framework_block "isolated APFS Data clone was already consumed"
-    (set -C; printf '%s %s\n' "$(boot_id)" "$FW_LAUNCH" > "$STAGE/data.consumed") ||
-        framework_block "could not atomically claim isolated APFS Data clone"
-    chmod 600 "$STAGE/data.consumed" ||
-        framework_block "could not protect APFS Data consumption record"
-    echo "APFS_DATA_CLONE=CONSUMED_ONE_SHOT_BEFORE_FRAMEWORK_STOP"
 fi
 
 # --- THE SESSION -----------------------------------------------------------
@@ -2643,6 +2639,26 @@ case "$FRAMEWORK:$shmem_mode" in
         fi ;;
 esac
 return_asked && { release_stop_lock; end_for_return "One UI's framework was stopped"; }
+# BEGIN SM8850_DATA_CLAIM_AT_STOP_GATE
+# Both start.lock and stop.lock are held. All panel wake, recovery readiness
+# and return-request gates have passed. No writable guest mount/open or
+# Framework stop has occurred. Spend the clone now, before crossing the
+# stop boundary. A failure from this point on never clears the marker.
+if [ "$FRAMEWORK" = 1 ] && [ "$FW_MODE" = run ]; then
+    if [ -L "$STAGE/data.consumed" ] || [ -e "$STAGE/data.consumed" ] ||
+        ! (umask 077; set -C; printf '%s %s\n' "$(boot_id)" "$FW_LAUNCH" > "$STAGE/data.consumed") ||
+        ! chmod 600 "$STAGE/data.consumed"; then
+        release_stop_lock
+        echo "APFS_DATA_CLAIM=BLOCKED_BEFORE_FRAMEWORK_STOP"
+        $SH "$SELF_RETURN" switch-data-claim-failed
+        exit 4
+    fi
+    echo "APFS_DATA_CLONE=CONSUMED_ONE_SHOT_BEFORE_FRAMEWORK_STOP"
+    # A cancellation racing the claim is still fail-closed: no stop,
+    # and no permission to reuse the just-claimed Data.
+    return_asked && { release_stop_lock; end_for_return "One UI's framework was stopped"; }
+fi
+# END SM8850_DATA_CLAIM_AT_STOP_GATE
 # From here One UI's framework is down: the return starts it again. Without
 # this mark the return only tidies up (a switch that ended before the stop).
 if [ "$FRAMEWORK" = 1 ] &&
