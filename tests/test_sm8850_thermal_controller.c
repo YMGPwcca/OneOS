@@ -221,6 +221,85 @@ static void refusal_and_missing(void)
     CHECK(oneios_thermal_controller_tick(&x.c, NULL) == ONEIOS_THERMAL_FAULT_QUIESCED);
 }
 
+static void setup_stock(struct fixture *x)
+{
+    memset(x, 0, sizeof *x); active = x;
+    x->owned = true; x->freq = 73; x->g.cpu_pct = 100;
+    snprintf(x->g.name, sizeof x->g.name, "oneios_guest.%s", id.token);
+    struct oneios_thermal_ops stock = ops;
+    stock.frequency_verify = NULL; stock.frequency_set = NULL;
+    CHECK(!oneios_thermal_controller_init_stock(&x->c, &x->g, &id, &stock, x));
+    CHECK(x->c.stock_managed && !x->c.freq_applied && !x->used);
+}
+static enum oneios_thermal_result stock_tick(struct fixture *x, uint64_t seq, int temp, int sev)
+{
+    struct oneios_thermal_sample raw = sample(seq, temp);
+    struct oneios_thermal_native_sample native = {id, seq, raw.ms, sev};
+    x->now = raw.ms;
+    return oneios_thermal_controller_tick_stock(&x->c, &raw, sev < 0 ? NULL : &native);
+}
+static void stock_native_and_raw(void)
+{
+    struct fixture x; setup_stock(&x);
+    CHECK(stock_tick(&x, 1, 65000, 2) == ONEIOS_THERMAL_RUNNING);
+    CHECK(x.g.cpu_pct == 60 && x.freq == 73 && !strcmp(x.trace, "c"));
+    CHECK(stock_tick(&x, 2, 65000, 3) == ONEIOS_THERMAL_RUNNING);
+    CHECK(x.g.cpu_pct == 25 && x.freq == 73);
+    CHECK(stock_tick(&x, 3, 80000, 0) == ONEIOS_THERMAL_RUNNING);
+    CHECK(x.g.cpu_pct == 10 && x.c.policy.hard && x.freq == 73);
+    CHECK(stock_tick(&x, 4, 70001, 0) == ONEIOS_THERMAL_RUNNING && x.c.policy.hard);
+    CHECK(stock_tick(&x, 5, 70000, 0) == ONEIOS_THERMAL_RUNNING && !x.c.policy.hard);
+    clear_trace(&x);
+    for (unsigned i=6; i<22; i++) CHECK(stock_tick(&x, i, 45000, -1) == ONEIOS_THERMAL_RUNNING);
+    CHECK(x.g.cpu_pct == 10 && !x.used); // HAL loss cannot authorize recovery.
+    for (unsigned i=22; i<=60; i++) CHECK(stock_tick(&x, i, 44000, 0) == ONEIOS_THERMAL_RUNNING);
+    CHECK(x.g.cpu_pct > 40 && x.freq == 73 && !strchr(x.trace,'V') && !strchr(x.trace,'v'));
+
+    setup_stock(&x);
+    CHECK(stock_tick(&x, 1, 95000, -1) == ONEIOS_THERMAL_PAUSED);
+    CHECK(x.g.cpu_pct == 10 && !strcmp(x.trace, "cQF"));
+    clear_trace(&x);
+    for (unsigned i=2; i<=10; i++) CHECK(stock_tick(&x, i, 64000, -1) == ONEIOS_THERMAL_PAUSED);
+    CHECK(!x.used);
+    for (unsigned i=11; i<15; i++) CHECK(stock_tick(&x, i, 64000, 0) == ONEIOS_THERMAL_PAUSED);
+    CHECK(stock_tick(&x, 15, 64000, 0) == ONEIOS_THERMAL_RUNNING);
+    CHECK(!strcmp(x.trace, "TR") && x.freq == 73);
+
+    setup_stock(&x);
+    CHECK(stock_tick(&x, 1, 55000, 4) == ONEIOS_THERMAL_PAUSED);
+    CHECK(x.g.cpu_pct == 10 && x.freq == 73 && !strcmp(x.trace,"cQF"));
+    CHECK(stock_tick(&x, 2, 55000, 3) == ONEIOS_THERMAL_PAUSED);
+    CHECK(oneios_thermal_controller_tick(&x.c, NULL) == ONEIOS_THERMAL_FAULT_QUIESCED);
+    CHECK(x.freq == 73);
+}
+static void stock_identity_and_refusal(void)
+{
+    struct fixture x; setup_stock(&x);
+    struct oneios_thermal_controller c;
+    struct oneios_thermal_ops mixed = ops;
+    CHECK(oneios_thermal_controller_init_stock(&c, &x.g, &id, &mixed, &x) != 0);
+    mixed.frequency_set = NULL;
+    CHECK(oneios_thermal_controller_init_stock(&c, &x.g, &id, &mixed, &x) != 0);
+    CHECK(stock_tick(&x, 1, 65000, 3) == ONEIOS_THERMAL_RUNNING);
+    clear_trace(&x);
+    for (uint64_t i=2; i<20; i++) {
+        struct oneios_thermal_sample raw = sample(i, 44000);
+        struct oneios_thermal_native_sample stale = {id, 1, 1000, 0};
+        x.now = raw.ms;
+        CHECK(oneios_thermal_controller_tick_stock(&x.c, &raw, &stale) == ONEIOS_THERMAL_RUNNING);
+    }
+    CHECK(x.g.cpu_pct == 25 && !x.used); // stale or conflicting native replay
+    struct oneios_thermal_sample hot = sample(20, 80000);
+    struct oneios_thermal_native_sample wrong = {id,20,hot.ms,0};
+    wrong.id.token[0] = 'a'; x.now = hot.ms;
+    CHECK(oneios_thermal_controller_tick_stock(&x.c, &hot, &wrong) == ONEIOS_THERMAL_RUNNING);
+    CHECK(x.g.cpu_pct == 10 && x.freq == 73);
+    CHECK(oneios_thermal_controller_tick(&x.c, NULL) == ONEIOS_THERMAL_FAULT_QUIESCED);
+    CHECK(x.freq == 73 && !strchr(x.trace,'v') && !strchr(x.trace,'V'));
+    setup(&x);
+    CHECK(oneios_thermal_controller_tick_stock(&x.c, &hot, &wrong) == ONEIOS_THERMAL_REFUSED);
+}
+
 /* Batch interface used ONLY by the host parity test. A trajectory starts
  * with three explicit budgets, followed by valid sample rows. */
 static int policy_trace(void)
@@ -258,6 +337,7 @@ int main(int argc, char **argv)
     if (argc != 1) return 2;
     normal_and_hard(); pause_and_resume(); stale_duplicate_and_wrong_session();
     failure_paths(); refusal_and_missing();
+    stock_native_and_raw(); stock_identity_and_refusal();
     printf("THERMAL_CONTROLLER=PASS checks=%u DEVICE_ACCESS=NONE\n", checks);
     return 0;
 }

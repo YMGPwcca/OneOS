@@ -1929,7 +1929,7 @@ if [ "$FRAMEWORK" = 1 ]; then
     # Existing active-session recovery and separately requested smoke are
     # deliberately not changed. No environment/risk-token bypass.
     if [ "$FW_MODE" = run ]; then
-        framework_block "SM8850_THERMAL_POLICY=BLOCKED_LEGACY_RETIRED; adaptive owned ceiling and non-reboot guest quiesce not qualified"
+        framework_block "SM8850_THERMAL_POLICY=BLOCKED_LEGACY_RETIRED; stock-managed thermal runner and non-reboot guest quiesce not integrated/qualified"
     fi
     # Bounded, operator-selected duration measured from Framework stop.
     FW_DURATION=600

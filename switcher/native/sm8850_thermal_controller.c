@@ -143,16 +143,20 @@ static bool same_sample(const struct oneios_thermal_sample *a,
         a->battery_dc == b->battery_dc && a->lrp_dc == b->lrp_dc &&
         a->board_ap_dc == b->board_ap_dc;
 }
+static bool frequency_ok(struct oneios_thermal_controller *c)
+{
+    return c->stock_managed || !c->ops.frequency_verify(c->ctx, c->freq_applied);
+}
 static bool healthy(struct oneios_thermal_controller *c, bool paused)
 {
     return session_ok(c) && !oneios_owned_groups_verify(c->groups, paused) &&
-        !c->ops.frequency_verify(c->ctx, c->freq_applied) &&
+        frequency_ok(c) &&
         !c->ops.gpu_verify(c->ctx, paused);
 }
 static int set_freq(struct oneios_thermal_controller *c, unsigned pct)
 {
-    if (!session_ok(c) || c->ops.frequency_verify(c->ctx, c->freq_applied))
-        return -1;
+    if (c->stock_managed || !session_ok(c) ||
+        c->ops.frequency_verify(c->ctx, c->freq_applied)) return -1;
     if (pct == c->freq_applied) return 0;
     if (c->ops.frequency_set(c->ctx, pct) ||
         c->ops.frequency_verify(c->ctx, pct)) return -1;
@@ -175,7 +179,7 @@ static enum oneios_thermal_result fault(struct oneios_thermal_controller *c)
     c->fault_result = ONEIOS_THERMAL_FAULT_UNCONFIRMED;
     if (!session_ok(c)) return c->fault_result;
     (void)set_cpu(c, 10);
-    (void)set_freq(c, c->policy.floor_pct);
+    if (!c->stock_managed) (void)set_freq(c, c->policy.floor_pct);
     if (!session_ok(c)) return c->fault_result;
     /* When already paused, do not demand a new ACK from frozen workers.
      * An independent verified GPU gate/drain can be reused. */
@@ -190,16 +194,17 @@ static enum oneios_thermal_result fault(struct oneios_thermal_controller *c)
     return c->fault_result;
 }
 
-int oneios_thermal_controller_init(struct oneios_thermal_controller *c,
+static int controller_init(struct oneios_thermal_controller *c,
     struct oneios_owned_groups *g, const struct oneios_thermal_identity *id,
     const struct oneios_thermal_ops *ops, void *ctx,
-    unsigned initial_freq_pct, unsigned qualified_floor_pct)
+    unsigned initial_freq_pct, unsigned qualified_floor_pct, bool stock)
 {
     if (!c) { errno = EINVAL; return -1; }
     memset(c, 0, sizeof *c);
     if (!g || !identity_valid(id) || !ops || !ops->now_ms || !ops->session_verify ||
-        !ops->frequency_verify || !ops->frequency_set || !ops->gpu_quiesce ||
-        !ops->gpu_verify || !ops->gpu_resume || !pct_valid(g->cpu_pct) ||
+        (stock ? (ops->frequency_verify || ops->frequency_set) :
+                 (!ops->frequency_verify || !ops->frequency_set)) ||
+        !ops->gpu_quiesce || !ops->gpu_verify || !ops->gpu_resume || !pct_valid(g->cpu_pct) ||
         !pct_valid(initial_freq_pct) || !pct_valid(qualified_floor_pct) ||
         initial_freq_pct < qualified_floor_pct) { errno = EINVAL; return -1; }
     char group[sizeof g->name];
@@ -208,7 +213,8 @@ int oneios_thermal_controller_init(struct oneios_thermal_controller *c,
         errno = EPERM; return -1;
     }
     c->groups = g; c->id = *id; c->ops = *ops; c->ctx = ctx;
-    c->freq_applied = initial_freq_pct;
+    c->stock_managed = stock;
+    c->freq_applied = stock ? 0 : initial_freq_pct;
     c->policy = (struct oneios_thermal_policy){
         .freq_pct = initial_freq_pct, .cpu_pct = g->cpu_pct, .floor_pct = qualified_floor_pct
     };
@@ -217,8 +223,69 @@ int oneios_thermal_controller_init(struct oneios_thermal_controller *c,
     return 0;
 }
 
-enum oneios_thermal_result oneios_thermal_controller_tick(
-    struct oneios_thermal_controller *c, const struct oneios_thermal_sample *s)
+int oneios_thermal_controller_init(struct oneios_thermal_controller *c,
+    struct oneios_owned_groups *g, const struct oneios_thermal_identity *id,
+    const struct oneios_thermal_ops *ops, void *ctx,
+    unsigned initial_freq_pct, unsigned qualified_floor_pct)
+{
+    return controller_init(c, g, id, ops, ctx, initial_freq_pct, qualified_floor_pct, false);
+}
+int oneios_thermal_controller_init_stock(struct oneios_thermal_controller *c,
+    struct oneios_owned_groups *g, const struct oneios_thermal_identity *id,
+    const struct oneios_thermal_ops *ops, void *ctx)
+{
+    return controller_init(c, g, id, ops, ctx, 100, 100, true);
+}
+
+static int native_severity(struct oneios_thermal_controller *c,
+                           const struct oneios_thermal_native_sample *n)
+{
+    uint64_t now;
+    if (!n || !n->seq || n->severity < 0 || n->severity > 6 ||
+        !identity_equal(&c->id, &n->id) || c->ops.now_ms(c->ctx, &now) ||
+        now < n->ms || now - n->ms > ONEIOS_THERMAL_MAX_SAMPLE_AGE_MS ||
+        n->seq < c->last_native.seq || n->ms < c->last_native.ms ||
+        (n->seq == c->last_native.seq &&
+         (n->ms != c->last_native.ms || n->severity != c->last_native.severity)))
+        return -1;
+    c->last_native = *n;
+    return n->severity;
+}
+
+/* CPU demand budgets, NOT MHz or vendor vote percentages. The independent
+ * raw policy remains authoritative for junction/auxiliary protection.
+ * These are provisional workload ceilings, not calibrated skin thresholds.
+ * Unknown HAL data allows tightening but never recovery. */
+static enum oneios_thermal_action stock_adjust(
+    struct oneios_thermal_controller *c, const struct oneios_thermal_sample *s,
+    const struct oneios_thermal_native_sample *native,
+    struct oneios_thermal_policy *next, enum oneios_thermal_action action)
+{
+    const unsigned budgets[] = {100, 80, 60, 25, 10, 10, 10};
+    int sev = native_severity(c, native);
+    if (sev >= 4 || (c->paused && sev != 0)) {
+        next->cpu_pct = 10;
+        next->paused = next->hard = true;
+        next->cool_samples = 0;
+        next->last_change_ms = s->ms;
+        return ONEIOS_THERMAL_QUIESCE;
+    }
+    unsigned limit = sev < 0 ? c->groups->cpu_pct : budgets[sev];
+    if (next->cpu_pct > limit) {
+        next->cpu_pct = limit;
+        next->cool_samples = 0;
+        next->last_change_ms = s->ms;
+    }
+    if (sev < 0) {
+        next->cool_samples = 0;
+        next->last_change_ms = s->ms;
+    }
+    return action;
+}
+
+static enum oneios_thermal_result controller_tick(
+    struct oneios_thermal_controller *c, const struct oneios_thermal_sample *s,
+    const struct oneios_thermal_native_sample *native)
 {
     if (!c || !c->ready) return ONEIOS_THERMAL_REFUSED;
     if (c->fault) return c->fault_result;
@@ -230,14 +297,19 @@ enum oneios_thermal_result oneios_thermal_controller_tick(
     if (action == ONEIOS_THERMAL_DUPLICATE)
         return c->paused ? ONEIOS_THERMAL_PAUSED : ONEIOS_THERMAL_RUNNING;
 
+    if (c->stock_managed) action = stock_adjust(c, s, native, &next, action);
+
     /* Apply all reductions before any relaxation. Recheck freshness and
      * ownership immediately before each increase or resume. */
     if (next.cpu_pct < c->groups->cpu_pct && set_cpu(c, next.cpu_pct)) return fault(c);
-    if (next.freq_pct < c->freq_applied && set_freq(c, next.freq_pct)) return fault(c);
-    if (next.freq_pct > c->freq_applied &&
-        (!fresh(c, s) || set_freq(c, next.freq_pct))) return fault(c);
+    if (!c->stock_managed) {
+        if (next.freq_pct < c->freq_applied && set_freq(c, next.freq_pct)) return fault(c);
+        if (next.freq_pct > c->freq_applied &&
+            (!fresh(c, s) || set_freq(c, next.freq_pct))) return fault(c);
+    }
     if (next.cpu_pct > c->groups->cpu_pct &&
-        (!fresh(c, s) || set_cpu(c, next.cpu_pct))) return fault(c);
+        (!fresh(c, s) || (c->stock_managed && native_severity(c, native) < 0) ||
+         set_cpu(c, next.cpu_pct))) return fault(c);
 
     if (next.paused && !c->paused) {
         /* Stop submissions and drain first; freezing a worker required for
@@ -250,17 +322,32 @@ enum oneios_thermal_result oneios_thermal_controller_tick(
         if (action != ONEIOS_THERMAL_RESUME_MINIMUM ||
             next.cpu_pct != 10 || next.freq_pct != next.floor_pct ||
             !fresh(c, s) || !healthy(c, true) ||
+            (c->stock_managed && native_severity(c, native) != 0) ||
             oneios_owned_thaw(c->groups, ONEIOS_THERMAL_ACK_MS))
             return fault(c);
         c->paused = false;
         /* The GPU gate stays closed until thaw and current sample verified. */
         if (!fresh(c, s) || oneios_owned_groups_verify(c->groups, false) ||
-            c->ops.frequency_verify(c->ctx, next.floor_pct) ||
+            !frequency_ok(c) ||
             c->ops.gpu_verify(c->ctx, true) || !fresh(c, s) ||
+            (c->stock_managed && native_severity(c, native) != 0) ||
             c->ops.gpu_resume(c->ctx, ONEIOS_THERMAL_ACK_MS))
             return fault(c);
     }
     if (!healthy(c, c->paused)) return fault(c);
     c->policy = next; c->last = *s;
     return c->paused ? ONEIOS_THERMAL_PAUSED : ONEIOS_THERMAL_RUNNING;
+}
+
+enum oneios_thermal_result oneios_thermal_controller_tick(
+    struct oneios_thermal_controller *c, const struct oneios_thermal_sample *s)
+{
+    return controller_tick(c, s, NULL);
+}
+enum oneios_thermal_result oneios_thermal_controller_tick_stock(
+    struct oneios_thermal_controller *c, const struct oneios_thermal_sample *s,
+    const struct oneios_thermal_native_sample *native)
+{
+    if (!c || !c->stock_managed) return ONEIOS_THERMAL_REFUSED;
+    return controller_tick(c, s, native);
 }

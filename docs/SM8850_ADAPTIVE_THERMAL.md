@@ -388,3 +388,44 @@ in particular the synchronous VirtIO block transport must park ingress
 and verify host flush before any qualified freeze. Such a host-side
 receipt is not an APFS clean-unmount receipt or proof all other
 bridges and display work have stopped. No device test authorized.
+
+## Operator clarification — stock-managed frequency, not an owned-clock prerequisite (2026-11-27)
+
+Supersedes the prior requirement that every replacement must provide an
+independently owned frequency vote. Samsung/Qualcomm retain frequency
+authority; OneiOS adapts its own demand, preserves the independent raw
+guard and the existing non-temperature fault/recovery protections. A
+valid hot reading selects throttle/quiescence rather than being an
+admission rejection or automatic reboot. A missing sensor or failed
+controller is a different condition. Physical emergency protections
+remain authoritative. No promise of continuous execution at a hardware
+shutdown threshold.
+
+New explicit controller initializer oneios_thermal_controller_init_stock:
+both frequency callbacks MUST be NULL. No clock set/verify operation
+is made in that mode, including faults and resume. freq_applied is zero
+(no vote); the existing pure-policy frequency field is an internal
+100/100 placeholder, never a requested/effective hardware limit.
+The old owned-mode contract and parity oracle are unchanged.
+Stock-managed ticks consume mandatory raw samples and an optional
+separately identified/fresh native HAL severity sample. Native severity
+0/1/2/3 constrains guest-owned CPU demand at provisional 100/80/60/25%
+ceilings; severity >=4 requests existing drain/freeze at minimum
+demand. Unknown/stale/replayed/conflicting native samples cannot
+authorize demand recovery or resume. Raw 70/80/70 policy and existing
+auxiliary thresholds still apply and severe raw readings can request
+quiescence without any HAL response. These workload ceilings are not
+Samsung frequency percentages or a calibrated physical policy.
+No PerfLock calls or shared clock writes. Added fixture cases for
+native moderate/severe, raw hard latch, cooling recovery above 40% CPU
+budget, severe pause/resume, loss/staleness, identity mismatch, missing
+raw guard and rejection of mixed frequency authority.
+
+This is a source controller integration candidate, not a runner.
+BLOCKED_NO_OWNED_READBACK remains a fact about the optional PerfLock
+provider; it is no longer a design blocker for stock-managed mode.
+The legacy launch block remains until the stock-managed runner, real
+owned-demand/quiesce providers, raw guard and native-stack functionality
+are connected and qualified. Do not re-enable the old guard-off,
+fixed-40%, or CFS-only unqualified launch. No additional peripheral
+milestones, changes to stock services, reboot, staging or phone access.
