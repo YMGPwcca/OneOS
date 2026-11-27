@@ -429,3 +429,29 @@ owned-demand/quiesce providers, raw guard and native-stack functionality
 are connected and qualified. Do not re-enable the old guard-off,
 fixed-40%, or CFS-only unqualified launch. No additional peripheral
 milestones, changes to stock services, reboot, staging or phone access.
+
+## 2026-11-28 — mandatory raw source bound to the stock controller
+
+The native source pins the existing stage's boot-bound v1 sensor
+manifest (root-owned mode 0600), checks every listed zone type before
+and after reading its temperature, requires all CPU/GPU/DDR maxima and
+auxiliary readings, verifies boot identity, and timestamps at scan
+start using CLOCK_BOOTTIME. A valid 104.8 C sample is data; no new
+temperature admission refusal or temperature reboot. Missing, malformed,
+wrong-boot or over-age raw data is passed as NULL to the existing
+controller fault path, never reported as cold. Stock source tick is
+a direct binding to oneios_thermal_controller_tick_stock; optional
+native HAL samples arrive from a separately supervised/authenticated
+reader. No frequency callback or sysfs clock writes. Test builds have
+a separate fixture entry and cannot call the production open path.
+
+This is usable source integration, not a qualified process launcher:
+the native source read can block in sysfs; its caller must supervise
+it independently. The trusted creator and external runtime providers
+must still establish real guest group membership and bounded
+drain/resume. Camera, encoder, network and active audio capture remain
+unqualified for the full-profile park contract; do not fake an ACK,
+disable those features silently, or reopen retired legacy admission.
+Fixture runs real manifest reads and controller policy with mock group
+and GPU providers; no physical admission evidence. Local build/test
+pending. No device action.

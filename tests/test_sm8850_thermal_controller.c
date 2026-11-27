@@ -6,6 +6,10 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#ifdef ONEIOS_RAW_SOURCE_TEST
+#include "../switcher/native/sm8850_thermal_source.h"
+#include <time.h>
+#endif
 
 static unsigned checks;
 #define CHECK(x) do { checks++; if (!(x)) { fprintf(stderr, "FAIL line %d: %s\n", __LINE__, #x); exit(1); } } while (0)
@@ -19,6 +23,9 @@ struct fixture {
     struct oneios_thermal_controller c;
     struct oneios_owned_groups g;
     uint64_t now;
+#ifdef ONEIOS_RAW_SOURCE_TEST
+    bool use_clock;
+#endif
     unsigned freq;
     bool owned, gpu_closed, drain_failed, resume_failed, freeze_failed,
         freq_failed, expire_on_thaw;
@@ -62,7 +69,18 @@ int oneios_owned_thaw(struct oneios_owned_groups *g, unsigned ms)
     if (active->expire_on_thaw) active->now += 3000;
     return 0;
 }
-static int now_ms(void *ctx, uint64_t *v) { *v = ((struct fixture *)ctx)->now; return 0; }
+static int now_ms(void *ctx, uint64_t *v)
+{
+#ifdef ONEIOS_RAW_SOURCE_TEST
+    if (((struct fixture *)ctx)->use_clock) {
+        struct timespec t;
+        if (clock_gettime(CLOCK_BOOTTIME,&t)) return -1;
+        *v=(uint64_t)t.tv_sec*1000+(uint64_t)t.tv_nsec/1000000;
+        return 0;
+    }
+#endif
+    *v=((struct fixture *)ctx)->now; return 0;
+}
 static int session(void *ctx, const struct oneios_thermal_identity *key)
 {
     return ((struct fixture *)ctx)->owned && !strcmp(key->token, id.token) &&
@@ -300,6 +318,52 @@ static void stock_identity_and_refusal(void)
     CHECK(oneios_thermal_controller_tick_stock(&x.c, &hot, &wrong) == ONEIOS_THERMAL_REFUSED);
 }
 
+#ifdef ONEIOS_RAW_SOURCE_TEST
+static void fixture_write(const char *root,const char *rel,const char *value)
+{
+    char path[1024];
+    int n=snprintf(path,sizeof path,"%s%s",root,rel);
+    CHECK(n>0 && (size_t)n<sizeof path);
+    FILE *f=fopen(path,"w"); CHECK(f);
+    CHECK(fputs(value,f)>=0 && fclose(f)==0);
+}
+static void stock_source_fixture(const char *root)
+{
+    struct fixture x; setup_stock(&x); x.use_clock=true;
+    struct oneios_raw_source src;
+    struct oneios_thermal_sample s={0};
+    CHECK(oneios_raw_source_open(&src,&id)!=0);
+    CHECK(!oneios_raw_source_fixture(&src,&id,root));
+    CHECK(!oneios_raw_source_read(&src,&s) && s.seq==1 &&
+          s.cpu_mc==45000 && s.gpu_mc==42000 && s.ddr_mc==40000 &&
+          s.battery_dc==300 && s.lrp_dc==300 && s.board_ap_dc==400);
+    CHECK(oneios_stock_source_tick(&src,&x.c,NULL)==ONEIOS_THERMAL_RUNNING);
+    CHECK(x.g.cpu_pct==100 && x.freq==73 && !x.used);
+    fixture_write(root,"/sys/class/thermal/thermal_zone2/temp","80000\n");
+    CHECK(oneios_stock_source_tick(&src,&x.c,NULL)==ONEIOS_THERMAL_RUNNING);
+    CHECK(x.g.cpu_pct==10 && x.c.policy.hard && x.freq==73);
+    fixture_write(root,"/sys/class/thermal/thermal_zone2/temp","104800\n");
+    CHECK(oneios_stock_source_tick(&src,&x.c,NULL)==ONEIOS_THERMAL_PAUSED);
+    CHECK(x.g.freeze_confirmed && x.gpu_closed && x.freq==73);
+    uint64_t seq=src.seq;
+    fixture_write(root,"/sys/class/thermal/thermal_zone2/type","cpu-wrong\n");
+    CHECK(oneios_raw_source_read(&src,&s)!=0 && src.seq==seq);
+    CHECK(oneios_stock_source_tick(&src,&x.c,NULL)==ONEIOS_THERMAL_FAULT_QUIESCED);
+    CHECK(x.g.freeze_confirmed && x.gpu_closed && x.freq==73);
+    fixture_write(root,"/sys/class/thermal/thermal_zone2/type","cpu-1\n");
+    fixture_write(root,"/sys/class/thermal/thermal_zone2/temp","45000\n45000\n");
+    CHECK(oneios_raw_source_read(&src,&s)!=0 && src.seq==seq);
+    fixture_write(root,"/sys/class/thermal/thermal_zone2/temp","45000\n");
+    fixture_write(root,"/proc/sys/kernel/random/boot_id","wrong\n");
+    CHECK(oneios_raw_source_read(&src,&s)!=0 && src.seq==seq);
+    fixture_write(root,"/proc/sys/kernel/random/boot_id","51ca8a7b-7fe0-4075-be5f-6a9029b8d392\n");
+    const char *manifest="/data/adb/oneios-m3q-framework/thermal.guard.manifest";
+    fixture_write(root,manifest,"v1 51ca8a7b-7fe0-4075-be5f-6a9029b8d392 3\nz 2 cpu-1 cpu\nz 2 gpuss-0 gpu\nz 4 ddr ddr\n");
+    CHECK(oneios_raw_source_fixture(&src,&id,root)!=0 && !src.ready);
+    printf("STOCK_SOURCE_CONTROLLER=PASS checks=%u DEVICE_ACCESS=NONE\n",checks);
+}
+#endif
+
 /* Batch interface used ONLY by the host parity test. A trajectory starts
  * with three explicit budgets, followed by valid sample rows. */
 static int policy_trace(void)
@@ -333,6 +397,11 @@ static int policy_trace(void)
 
 int main(int argc, char **argv)
 {
+#ifdef ONEIOS_RAW_SOURCE_TEST
+    if (argc == 3 && !strcmp(argv[1],"--source-fixture")) {
+        stock_source_fixture(argv[2]); return 0;
+    }
+#endif
     if (argc == 2 && !strcmp(argv[1], "--policy")) return policy_trace();
     if (argc != 1) return 2;
     normal_and_hard(); pause_and_resume(); stale_duplicate_and_wrong_session();
