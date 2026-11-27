@@ -1618,11 +1618,28 @@ case "$MODE" in
                 [ -s "$CTL/stopped" ] && framework_recovery_ready || exit 3
             printf '%s %s\n' "$$" "$(watchdog_birth $$)" > "$CTL/framework.stoploop" || exit 3
         fi
+        # SM8850 retains host SurfaceFlinger and the display composer.
+        # Samsung's bootanim can restart after system_server goes away.
+        # Stop only that init-managed service, never the compositor or HAL.
+        # Check immediately, then every five 200ms ticks (as upstream
+        # OneOS does for bootanim); preserve the zygote polling cadence.
+        bootanim_tick=0
         while [ ! -e "$CTL/stop-loop.off" ]; do
             [ "$(getprop init.svc.zygote)" = running ] && setprop ctl.stop zygote
             [ "$(getprop init.svc.zygote_secondary)" = running ] && setprop ctl.stop zygote_secondary
             if [ "$FRAMEWORK" = 1 ]; then
                 [ "$(getprop init.svc.zygote_next)" = running ] && setprop ctl.stop zygote_next
+                if [ "$bootanim_tick" = 0 ] && [ ! -e "$SESSION/return.request" ]; then
+                    case "$(getprop init.svc.bootanim)" in
+                        running|restarting)
+                            # Return already waits for this loop to leave
+                            # before restoring its own boot animation.
+                            if [ ! -e "$CTL/stop-loop.off" ] && [ ! -e "$SESSION/return.request" ]; then
+                                setprop ctl.stop bootanim
+                            fi ;;
+                    esac
+                fi
+                bootanim_tick=$(( (bootanim_tick + 1) % 5 ))
             else
                 [ "$(getprop init.svc.bootanim)" = running ] && setprop ctl.stop bootanim
             fi

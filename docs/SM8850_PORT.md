@@ -52,3 +52,31 @@
 ---
 
 **Source of truth:** [SM8850 experiment ledger](SM8850_ONEIOS_FULL_RUN_STATUS.md) · [OneiOS performance backlog](https://github.com/YMGPwcca/OneiOS/blob/feat/oneios-sm8850-m3q/docs/TODO.md)
+
+### SM8850 display handoff — Samsung boot animation suppression
+
+The 2026-11-28 passive Framework OFF observation on SM-S948B
+(S948BXXS4BZIG) saw bootanim running and a samsungani565 SurfaceFlinger
+layer. The prior Framework=1 branch suppressed zygote_next but skipped
+bootanim, unlike OneOS Android takeover. Upstream reference:
+fahadalijaved/OneOS 5d0cddf6c063527522b201e4359172071d9d4178
+switcher/assets/oneos_switch.sh:1537,1558-1569.
+
+The existing boot-pinned, recovery-admitted stop-loop now also stops
+the init-managed bootanim service when running/restarting in SM8850
+Framework mode. It samples immediately then every five existing 200ms
+iterations; zygote polling is unchanged. The extra stop is suppressed
+once a return request or stop-loop.off is visible, including a second
+check just before writing ctl.stop. Existing return Gate B already
+ends the loop before it restores bootanim. The non-Framework branch
+is unchanged. Do not copy upstream's host compositor freeze/restart or
+blanket bootanimation PID kill into hosted iOS: the host compositor is
+the actual display provider. No new guest splash renderer is enabled:
+the existing renderer redraws every 150ms and SM8850 stages have not
+qualified its assets/handoff. A blank or retained frame during startup
+is possible; a low-overhead change-driven splash belongs to the future
+display integration. This is source-only, not a physical verification
+of layer exit or a performance/thermal claim. No admission, thermal,
+watchdog, deadline, recovery or APFS change. Run
+python3 tests/test_sm8850_bootanim.py offline to exercise the real
+loop body with inert property/sleep stand-ins.
