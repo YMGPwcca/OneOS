@@ -301,3 +301,74 @@ falling back to shared sysfs writes. Any subsequent stock-One-UI,
 restrictive-only, finite-duration qualification requires an independent
 operator decision, no guest workload, and verified noninterference.
 No admission or live-run change.
+
+
+## G24.7 static PerfLock analysis (2026-11-27)
+
+Operator supplied perflock-static.zip from the exact SM-S948B /
+S948BXXS4BZIG / SoC 660 collection. All seven ELF64 little-endian
+AArch64 images matched the manifest's sizes and SHA256 hashes. Analysis
+used host readelf, LLVM objdump, and a host parser of Android APS2
+packed relocations; no vendor code executed. Key binary hashes:
+libqti-perfd.so 774ba41c7b9fb9411384fad9206d85b3f8912d1b1865d9e311d40ad00a2feefd;
+vendor libqti-perfd-client.so 5e2d2adb2d41b2d0a82fddc18c787ed9a08d9007de286ffff2a759cd47b8be4d.
+Addresses below are ELF virtual addresses for these exact images, not
+runtime addresses or a stable interface. Do not commit the vendor ELFs.
+
+Positive static evidence:
+- ResourceInfo::ParseNewRequest (0x7882c) extracts major bits 22..28,
+  minor bits 14..19, cluster bits 8..11. Both CPU MAX opcodes map to
+  major 2/minor 1, queue index 9 (major offset table 0x1a8cc).
+  InitializeOptsTable (0x4cbec) sets index 9 comparator at offset 0xe8
+  via GOT 0x885b8, whose APS2 relocation resolves to lower_is_better
+  (0x81ff8). CompareOpt (0x611a8) returns action 1 for unsigned new <
+  current, 2 otherwise, in this branch. Ordinary AddAndApply
+  (0x737ac) dispatches action 1 to ApplyOpt at 0x73990. This supports
+  lower-wins in ordinary PerfLock queue arbitration. It does not
+  establish all priority/display-mode exceptions, external direct
+  sysfs writers or stock thermal aggregation. RemoveAndApply
+  (0x73fe8) contains pending-request removal and reset/reapply paths;
+  CPU MAX is not in IsResAlwaysResetOnRelease's special resource set.
+- cpu_options (0x81d98 -> 0x4e300) converts normal finite input by
+  multiplying by 1000 at 0x4e59c and calls find_next_cpu_frequency
+  at 0x4e5ac. At 0x65d24..0x65d28 the latter accepts the first scanned
+  OPP at or above the input; it also has fallback/error branches.
+  The provider must conservatively encode MHz so the resulting OPP
+  stays within a requested kHz ceiling, subject to physical minimum.
+  0xffff has a special capped-value path, UINT_MAX a reset path;
+  neither sentinel is needed for finite owned caps. Do not treat
+  arbitrary finite-looking stock launch values as safe requests.
+- Client perf_lock_acq (0xe300 -> 0x8bf4) consumes four arguments
+  (handle, duration, integer array, count); perf_lock_rel (0xe350)
+  consumes handle, and both collect PID/TID. Server has request list,
+  timer creation, timer callback that submits release, and per-client
+  reset infrastructure. These establish mechanism, not caller
+  authorization or guaranteed death cleanup/expiry.
+- Important async gap: SubmitPerflocksDRequest (0x80d6c) allocates a
+  handle at 0x81034, wakes server at 0x81054, returns handle at 0x81088.
+  Actual AddAndApply is in internal_perf_lock_acq_apply at 0x68a84.
+  A positive handle is not an acknowledged hardware write, and a
+  release return is not proof that the aggregate is already restored.
+- A diagnostic path exists: vendor perf_sync_request (0xe330 ->
+  0xc104) takes one integer and returns a strdup'd result (or NULL).
+  Server SubmitSyncRequest (0x813e0) uses request 0 for DumpActive,
+  request 1 for history. It requires nonzero ro.debuggable OR
+  vendor.debug.trace.perf.level (property reads at 0x8143c, 0x81480,
+  branch at 0x814e0). DumpActive contains PID/TID, duration, timestamp,
+  handle, hint, thermal and opcode columns. It is a snapshot, not
+  a guaranteed per-handle apply ACK, and may be unavailable on stock
+  production settings. Earlier default binder dump was empty; cannot
+  infer these property values from that result.
+
+Disposition: STATIC_ANALYSIS_COMPLETE; ordinary MAX comparator and
+finite conversion identified; FREQUENCY_PROVIDER=NOT_QUALIFIED.
+No stock property has been changed and no vendor API called. Check
+only current ro.debuggable and vendor.debug.trace.perf.level (read
+only). If both disabled, do not enable debug just to manufacture a
+readback interface or claim that aggregate sysfs proves ownership.
+If an existing supported diagnostic is available, evaluate its actual
+returned format and apply/expiry verification before an independently
+approved restrictive-only stock qualification. Remaining blockers:
+independent exact-handle readback, competing/special request semantics,
+service/lifetime and expiry/fault evidence. No forced reboot, thermal
+protection relaxation, shared sysfs fallback, or live admission change.
