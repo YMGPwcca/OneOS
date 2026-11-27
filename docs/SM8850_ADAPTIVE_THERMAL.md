@@ -372,3 +372,19 @@ approved restrictive-only stock qualification. Remaining blockers:
 independent exact-handle readback, competing/special request semantics,
 service/lifetime and expiry/fault evidence. No forced reboot, thermal
 protection relaxation, shared sysfs fallback, or live admission change.
+
+
+### G24.7 stock diagnostic gate result (2026-11-27)
+
+Operator reported ro.debuggable=0, vendor.debug.trace.perf.level empty,
+ro.build.type=user. Under the statically identified server diagnostic
+gate, active-request readback is not available on these settings.
+PERFLOCK_QUALIFICATION=BLOCKED_NO_OWNED_READBACK.
+Do not change either property, substitute aggregate sysfs readback for
+handle ownership, or issue speculative acquire/release. Keep the
+frequency provider unqualified and full-run admission retired.
+Continue independently useful GPU/IO and supervisor lifecycle work;
+in particular the synchronous VirtIO block transport must park ingress
+and verify host flush before any qualified freeze. Such a host-side
+receipt is not an APFS clean-unmount receipt or proof all other
+bridges and display work have stopped. No device test authorized.
