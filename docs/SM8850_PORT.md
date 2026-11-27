@@ -80,3 +80,19 @@ of layer exit or a performance/thermal claim. No admission, thermal,
 watchdog, deadline, recovery or APFS change. Run
 python3 tests/test_sm8850_bootanim.py offline to exercise the real
 loop body with inert property/sleep stand-ins.
+
+### Physical verification — bootanim fix and ON/OFF thermal observations
+
+The source-only status immediately above is superseded for the bootanim fix
+by two operator-run 20-second Framework-only smokes with the fix installed.
+Both show bootanim stopped/no PID throughout the sampled OFF window,
+an empty successful SurfaceFlinger layer list, retained compositor/HAL
+PID/birth identities and zero direct compositor CPU ticks in the window.
+Before-fix OFF CPU busy 12.57%; retests 8.17% and 8.73% (fan throughout
+the latter), descriptive only. CPU hotspot still rises 34.6->38.9 C and
+37.7->38.9 C respectively; fan retest GPU 36.3->34.3 C, DDR 36.3->34.7 C,
+SKIN 32.0->29.9 C, battery 29.7->27.8 C. Both raw and HAL readers PASS.
+See [complete findings, exact zone values and provenance](SM8850_FRAMEWORK_THERMAL_DISPLAY_FINDINGS.md).
+Boot animation suppression is physically verified in these smokes;
+no repeat test is needed for that task. No iOS boot/FPS or independent
+recovery qualification follows; observer exit 4 is preserved.

@@ -164,3 +164,17 @@ One UI trace qos-20261125-111139.txt observed UFS MIN requests at 3628800/474240
 This separate candidate lowers the observed MAX where necessary, then verifies both effective MIN/MAX bounds on policy0 and policy6 against the unrelaxed requested ceiling. At most three 50ms sleeps permit asynchronous policy settlement; no heartbeat OK is published on invalid data, unresolved MIN, or an excessive MAX. Recheck the original thermal sample freshness and guard fault after settlement. No change to temperature thresholds, pre-stop read-only gate, firmware/vendor votes, independent emergency guard, deadline, or explicitly selected legacy floor mode. The kernel may update constraints asynchronously; a shared sysfs request does not give exclusive MAX ownership or continuous enforcement, and readback is sampled, not hardware certification. No automatic reboost. The new fixture tests model clamping, delayed updates, ignored writes, conflicting MIN, cross-policy revalidation and tighter existing limits; they do not demonstrate Samsung hardware arbitration.
 
 Do not stage or run a live takeover from this candidate solely because offline tests pass. First run local CachyOS regressions on the exact candidate revision and review the remaining hardware qualification gap. Keep the active OneiOS gitlink and performance branch unchanged until that review. No new GitHub Actions run or APK/kernel rebuild is required for these shell-only tests.
+
+## Later evidence — Framework-only display and thermal, not a full run
+
+Two post-fix 20s Framework-only smokes, including the operator's fan-cooled
+comparison, completed their native raw/HAL and display observations.
+Samsung bootanim was stopped with no PID, layer list empty, host
+SurfaceFlinger/composer retained. Both logs show
+REBOOT_SMOKE=DEADLINE_REQUEST_CONFIRMED_ONEUI_OBSERVED and
+OBSERVER_EXIT=4; unassisted return, physical-key reboot and independent
+watchdog qualification remain NOT VERIFIED. No guest or FPS measurement.
+The consolidated stock-source local CI also passed; the production
+thermal runner remains incomplete and legacy full-run admission retired.
+See [detailed evidence and limitations](SM8850_FRAMEWORK_THERMAL_DISPLAY_FINDINGS.md).
+These are later physical smoke receipts, not new full iOS run acceptance.

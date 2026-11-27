@@ -455,3 +455,22 @@ disable those features silently, or reopen retired legacy admission.
 Fixture runs real manifest reads and controller policy with mock group
 and GPU providers; no physical admission evidence. Local build/test
 pending. No device action.
+
+## Consolidated local CI and physical Framework ON/OFF receipts
+
+OneOS 497d4cc / OneiOS fe11aee stock-source consolidated local CI completed
+with exit 0 in 335.222s, including native source/controller/HAL fixtures,
+Android compilation, full runtime regressions and runtime-only package
+validation. This supersedes the pending offline status immediately above,
+not the production integration gaps. Both subsequent Framework-only
+20s retests confirmed raw and AIDL v3 reader availability, all five
+native services running with the same within-run PID/birth identity,
+HAL severity 0 and unchanged sampled CPU/GPU ceilings. Suppression of
+the Samsung boot animation is physically confirmed. Fan-cooled retest:
+CPU 37.7->38.9 C, GPU 36.3->34.3 C, DDR 36.3->34.7 C, SKIN 32.0->29.9 C,
+battery raw 29.7->27.8 C, LRP 33.0->29.9 C, board AP 32.6->30.4 C.
+Raw ON/OFF starts 89.492s apart; not steady-state or an isolated OFF
+cooling effect. Native mitigation under sustained iOS load remains NOT
+QUALIFIED. See [complete physical findings](SM8850_FRAMEWORK_THERMAL_DISPLAY_FINDINGS.md).
+No new temperature policy, clock write, run authorization or repeat
+smoke is required by this receipt.
