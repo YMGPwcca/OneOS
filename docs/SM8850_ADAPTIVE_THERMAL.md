@@ -474,3 +474,47 @@ cooling effect. Native mitigation under sustained iOS load remains NOT
 QUALIFIED. See [complete physical findings](SM8850_FRAMEWORK_THERMAL_DISPLAY_FINDINGS.md).
 No new temperature policy, clock write, run authorization or repeat
 smoke is required by this receipt.
+
+
+## Stock-managed session assembly candidate — 60 FPS integration scope
+
+The fresh group creator and native stock-session assembly connect the
+existing raw source, private cgroup actuator and actual stock controller
+within one single-use root-side object. Preparation requires a complete
+boot-pinned raw sample before creating fresh token leaves; no existing
+leaf adoption, shared CPU/GPU clock write or temperature-only rejection.
+Activation requires real provider callbacks and returns the first actual
+policy result. A paused or faulted result is never launch permission.
+Cleanup removes only identity-pinned empty leaves after external
+retirement; it cannot migrate, thaw or reboot. Startup budget is explicit,
+not a newly selected 40% or 100% default.
+
+This is a **source-only partial integration**, not a production launcher.
+The trusted parent still must attach the blocked XNUHost/display process
+tree to both leaves, prove exact membership and exclude stock services,
+supervise mandatory raw sampling and native HAL independently, and connect
+the real XNUHost park/resume worker with verified drain receipts. Existing
+unqualified mapped providers cannot be silently disabled or treated as
+drained. No change to the retired full-run admission, current stock
+thermal authority, recovery, or performance profile. Keep this candidate
+separate from the last offline-validated performance artifact.
+
+Focused local checks, from OneOS:
+
+```sh
+D=$(mktemp -d)
+cc -std=gnu11 -O2 -g -Wall -Wextra -Werror -pthread \
+  tests/test_sm8850_owned_groups.c -o "$D/groups"
+"$D/groups"
+cc -std=gnu11 -O2 -g -Wall -Wextra -Werror \
+  tests/test_sm8850_stock_session.c \
+  switcher/native/sm8850_stock_session.c \
+  switcher/native/sm8850_thermal_controller.c -o "$D/session"
+"$D/session"
+```
+
+The new assembly fixture exercises the real controller with mocked
+transport; the owned-group fixture emulates kernel-created nodes using
+ordinary files. Both require local execution; no physical cgroup, HAL,
+guest park, or FPS result is claimed. No live run, staging or CI workflow
+is authorized by this candidate.

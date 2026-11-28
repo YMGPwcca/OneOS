@@ -29,6 +29,16 @@ int oneios_owned_groups_open(struct oneios_owned_groups *g, const char *token,
     struct oneios_group_id cpu_id, struct oneios_group_id freezer_id,
     unsigned initial_pct);
 
+/* Create fresh, empty, token-owned leaves; never adopt an existing name.
+ * initial_pct is explicit and must be qualified by the external owner.
+ * No membership migration or launch. Failure may leave an unconfirmed
+ * empty leaf for trusted cleanup; never reuse that token. */
+int oneios_owned_groups_create(struct oneios_owned_groups *, const char *token,
+                               unsigned initial_pct);
+/* After retirement only. Verify both leaves are empty and identity-pinned.
+ * Does not thaw or move anything. Partial deletion is reported as failure. */
+int oneios_owned_groups_remove_empty(struct oneios_owned_groups *);
+
 /* Aggregate CFS bandwidth of eight CPUs; NOT MHz or utilization clamp. */
 int oneios_owned_cpu_set(struct oneios_owned_groups *g, unsigned pct);
 

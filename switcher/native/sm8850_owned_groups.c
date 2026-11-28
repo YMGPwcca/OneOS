@@ -345,3 +345,108 @@ fault:
     g->fault = true;
     return -1;
 }
+
+
+/* A fresh session creator, never adopt an existing token name. The caller
+ * still owns the blocked-start barrier and ALL membership transitions. */
+#ifdef ONEIOS_OWNED_GROUPS_TEST
+static int fixture_create_nodes(int fd, bool cpu);
+static int fixture_remove_nodes(int fd, bool cpu);
+#endif
+static int empty_group(int fd)
+{
+    char b[2];
+    return read_text(fd, "cgroup.procs", b, sizeof b) || b[0] ? refuse() : 0;
+}
+static int create_leaf(int parent, const char *name, long magic, bool cpu,
+                       int *fd, struct oneios_group_id *id)
+{
+    if (mkdirat(parent, name, 0700)) return -1;
+    int f = openat(parent, name, DIR_FLAGS);
+    struct stat st;
+    if (f < 0) return -1; /* no pinned identity: leave for trusted cleanup */
+    if (fstat(f, &st) || !S_ISDIR(st.st_mode) || st.st_uid != geteuid() ||
+        (st.st_mode & 0022)) { close(f); return refuse(); }
+    *fd = f;
+    *id = (struct oneios_group_id){ st.st_dev, st.st_ino };
+    if (correct_fs(f, magic) || same_leaf(parent, f, name, *id)) return -1;
+#ifdef ONEIOS_OWNED_GROUPS_TEST
+    if (fixture_create_nodes(f, cpu)) return -1;
+#else
+    (void)cpu;
+#endif
+    return empty_group(f);
+}
+static int remove_leaf_empty(int parent, int fd, const char *name,
+                             struct oneios_group_id id, bool cpu)
+{
+    if (same_leaf(parent, fd, name, id) || empty_group(fd)) return -1;
+#ifdef ONEIOS_OWNED_GROUPS_TEST
+    if (fixture_remove_nodes(fd, cpu)) return -1;
+#else
+    (void)cpu;
+#endif
+    return unlinkat(parent, name, AT_REMOVEDIR);
+}
+/* Consumes the parent descriptors; no adoption, migration, thaw or changes
+ * to a parent. On failure, remove only identity-pinned, still-empty leaves
+ * created by this call. Unconfirmed rollback must not be reused. */
+static int create_parents(struct oneios_owned_groups *g, int cp, int fp,
+                          const char *token, unsigned pct)
+{
+    init_handle(g);
+    int c = -1, f = -1, rc = -1;
+    struct oneios_group_id ci = {0}, fi = {0};
+    char name[sizeof g->name] = {0};
+    if (cp < 0 || fp < 0 || !valid_token(token) || !valid_pct(pct) ||
+        correct_fs(cp, CGROUP_V1_MAGIC) || correct_fs(fp, CGROUP_V2_MAGIC) ||
+        monitor_outside_groups()) goto done;
+    snprintf(name, sizeof name, "oneios_guest.%s", token);
+    if (create_leaf(cp, name, CGROUP_V1_MAGIC, true, &c, &ci) ||
+        create_leaf(fp, name, CGROUP_V2_MAGIC, false, &f, &fi)) goto done;
+    if (write_number(c, "cpu.cfs_period_us", PERIOD_US) ||
+        write_number(c, "cpu.cfs_quota_us", quota_for(pct)) ||
+        empty_group(c) || empty_group(f) ||
+        bind_parents(g, fcntl(cp, F_DUPFD_CLOEXEC, 0),
+                        fcntl(fp, F_DUPFD_CLOEXEC, 0), token, ci, fi, pct)) goto done;
+    rc = 0;
+done:;
+    int saved = errno;
+    if (rc) {
+        if (f >= 0 && remove_leaf_empty(fp, f, name, fi, false)) saved = EIO;
+        if (c >= 0 && remove_leaf_empty(cp, c, name, ci, true)) saved = EIO;
+    }
+    if (f >= 0) close(f);
+    if (c >= 0) close(c);
+    if (fp >= 0) close(fp);
+    if (cp >= 0) close(cp);
+    if (rc) errno = saved ? saved : EPERM;
+    return rc;
+}
+int oneios_owned_groups_create(struct oneios_owned_groups *g, const char *token,
+                               unsigned initial_pct)
+{
+    if (!g) return invalid();
+    init_handle(g);
+#ifdef ONEIOS_OWNED_GROUPS_TEST
+    (void)token; (void)initial_pct;
+    return refuse(); /* fixture build never opens live cgroup paths */
+#else
+    if (geteuid() != 0 || !valid_token(token) || !valid_pct(initial_pct)) return refuse();
+    return create_parents(g, open("/dev/cpuctl", DIR_FLAGS),
+                          open("/sys/fs/cgroup", DIR_FLAGS), token, initial_pct);
+#endif
+}
+/* Call only after the external owner retired all producers. A nonempty
+ * group is never touched. A partial rmdir failure invalidates the handle;
+ * report it and leave any remaining leaf for the trusted owner. */
+int oneios_owned_groups_remove_empty(struct oneios_owned_groups *g)
+{
+    if (verify_groups(g) || empty_group(g->cpu) || empty_group(g->freezer)) return -1;
+    if (remove_leaf_empty(g->cpu_parent, g->cpu, g->name, g->cpu_id, true)) return -1;
+    int b = remove_leaf_empty(g->freezer_parent, g->freezer, g->name, g->freezer_id, false);
+    int saved = errno;
+    oneios_owned_groups_close(g);
+    if (b) { errno = saved; return -1; }
+    return 0;
+}

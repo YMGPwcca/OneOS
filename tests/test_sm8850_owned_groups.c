@@ -24,6 +24,75 @@ static void put(int dir, const char *name, const char *data)
     CHECK(close(fd) == 0);
 }
 
+
+/* Emulate kernel-created nodes only inside the existing host-only fixture. */
+static int fixture_create_nodes(int fd, bool cpu)
+{
+    put(fd, "cgroup.procs", "");
+    if (cpu) {
+        put(fd, "cpu.cfs_period_us", "100000\n");
+        put(fd, "cpu.cfs_quota_us", "-1\n");
+        put(fd, "cpu.cfs_burst_us", "0\n");
+    } else {
+        put(fd, "cgroup.freeze", "0\n");
+        put(fd, "cgroup.events", "populated 0\nfrozen 0\n");
+    }
+    return 0;
+}
+static int fixture_remove_nodes(int fd, bool cpu)
+{
+    if (unlinkat(fd, "cgroup.procs", 0)) return -1;
+    if (cpu) {
+        if (unlinkat(fd, "cpu.cfs_period_us", 0) ||
+            unlinkat(fd, "cpu.cfs_quota_us", 0) ||
+            unlinkat(fd, "cpu.cfs_burst_us", 0)) return -1;
+    } else if (unlinkat(fd, "cgroup.freeze", 0) ||
+               unlinkat(fd, "cgroup.events", 0)) return -1;
+    return 0;
+}
+static void creator_fresh_only(void)
+{
+    char dir[] = "/tmp/oneios-owned-creator.XXXXXX";
+    CHECK(mkdtemp(dir));
+    int root = open(dir, DIR_FLAGS);
+    CHECK(root >= 0);
+    CHECK(!mkdirat(root, "cpu", 0700) && !mkdirat(root, "freezer", 0700));
+    int cp = openat(root, "cpu", DIR_FLAGS), fp = openat(root, "freezer", DIR_FLAGS);
+    CHECK(cp >= 0 && fp >= 0);
+    put(cp, "cpu.cfs_quota_us", "-1\n");
+    struct oneios_owned_groups g, other;
+    CHECK(oneios_owned_groups_create(&other, token, 70) != 0);
+    CHECK(create_parents(&other, dup(cp), dup(fp), "../bad", 70) != 0);
+    CHECK(create_parents(&other, dup(cp), dup(fp), token, 0) != 0);
+    CHECK(!create_parents(&g, dup(cp), dup(fp), token, 70));
+    CHECK(!oneios_owned_groups_verify(&g, false));
+    CHECK(!expect_number(g.cpu, "cpu.cfs_quota_us", 112000));
+    CHECK(!expect_number(cp, "cpu.cfs_quota_us", -1));
+    /* An existing leaf may never be adopted or removed by failed creation. */
+    CHECK(create_parents(&other, dup(cp), dup(fp), token, 10) != 0);
+    CHECK(!expect_number(g.cpu, "cpu.cfs_quota_us", 112000));
+    put(g.freezer, "cgroup.procs", "123\n");
+    CHECK(oneios_owned_groups_remove_empty(&g) != 0);
+    CHECK(!expect_number(g.cpu, "cpu.cfs_quota_us", 112000));
+    put(g.freezer, "cgroup.procs", "");
+    CHECK(!oneios_owned_groups_remove_empty(&g));
+    CHECK(g.cpu == -1 && g.freezer == -1);
+    CHECK(faccessat(cp, leaf, F_OK, 0) != 0 && errno == ENOENT);
+    CHECK(faccessat(fp, leaf, F_OK, 0) != 0 && errno == ENOENT);
+    /* Failure on second mkdir rolls back only the newly created first leaf. */
+    CHECK(!mkdirat(fp, leaf, 0700));
+    CHECK(create_parents(&other, dup(cp), dup(fp), token, 70) != 0);
+    CHECK(faccessat(cp, leaf, F_OK, 0) != 0 && errno == ENOENT);
+    CHECK(!faccessat(fp, leaf, F_OK, 0));
+    CHECK(!unlinkat(fp, leaf, AT_REMOVEDIR));
+    CHECK(!expect_number(cp, "cpu.cfs_quota_us", -1));
+    CHECK(!unlinkat(cp, "cpu.cfs_quota_us", 0));
+    close(cp); close(fp);
+    CHECK(!unlinkat(root, "cpu", AT_REMOVEDIR));
+    CHECK(!unlinkat(root, "freezer", AT_REMOVEDIR));
+    close(root); CHECK(!rmdir(dir));
+}
+
 static struct oneios_group_id identity(int fd)
 {
     struct stat s;
@@ -200,6 +269,7 @@ static void unexpected_freeze_latches(void)
 
 int main(void)
 {
+    creator_fresh_only();
     unexpected_freeze_latches();
     happy_path();
     timeout_is_latched();
