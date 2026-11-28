@@ -1444,7 +1444,10 @@ case "$MODE" in
         DH="$STAGE/runtime/bin/oneios-display"
         root_only "$DH" && [ -x "$DH" ] || exit 3
         echo 0 2>/dev/null > "/proc/$$/oom_score_adj"
-        exec "$DH" --socket "$SESSION/display.sock" --wait 30 >>"$CTL/display.log" 2>&1
+        # Startup may be held by the owner. Do not turn a valid thermal
+        # hold before socket creation into the old 30s helper failure.
+        # The independent session deadline still owns terminal return.
+        exec "$DH" --socket "$SESSION/display.sock" --wait 600 >>"$CTL/display.log" 2>&1
         ;;
     --inner|--stock-inner)
         STOCK_INNER=0
@@ -3131,11 +3134,25 @@ fi
 n=0
 inner_wait=150
 [ "$FRAMEWORK" = 0 ] || inner_wait=40
-[ "$FW_STOCK" = 0 ] || inner_wait=150
-while [ $n -lt "$inner_wait" ] && [ ! -s "$SESSION/xnuhost.pid" ]; do
+while [ ! -s "$SESSION/xnuhost.pid" ]; do
     [ "$FRAMEWORK" = 0 ] || ! return_asked || end_for_return "xnuhost was ready"
     if [ "$FW_STOCK" = 1 ]; then
+        # Root owner may be sampling while no guest root has been
+        # released. Honor the same fixed independent deadline, not a
+        # second arbitrary 30s timeout that converts heat to reboot.
         framework_stock_healthy || break
+        stock_tick=$(watchdog_now) || break
+        stock_limit=$(cat "$CTL/framework.deadline" 2>/dev/null) || break
+        watchdog_uint "$stock_tick" && watchdog_uint "$stock_limit" || break
+        if [ "$stock_tick" -ge "$stock_limit" ]; then
+            release_stop_lock
+            echo "STOCK_STARTUP_WAIT=FIXED_SESSION_DEADLINE"
+            # Deadline guard independently owns the return. No
+            # thermal-only request or new failure reason.
+            exit 0
+        fi
+    elif [ "$n" -ge "$inner_wait" ]; then
+        break
     elif [ $n -ge 10 ]; then
         ip=$(cat "$CTL/inner.pid" 2>/dev/null)
         [ -n "$ip" ] && kill -0 "$ip" 2>/dev/null || break
