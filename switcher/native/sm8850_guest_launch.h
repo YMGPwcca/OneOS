@@ -47,6 +47,10 @@ int oneios_guest_launch_release(struct oneios_guest_launch *);
  * snapshots, not a proof of escape. This alone cannot prove that no
  * descendant has escaped both groups or that all producers are parked. */
 int oneios_guest_launch_check_roots(struct oneios_guest_launch *);
+/* Root owner must be a child subreaper and retain waitpid ownership.
+ * Known independent sampler children are excluded. EAGAIN denotes an
+ * inconsistent snapshot; this is not an atomic containment proof. */
+int oneios_guest_launch_check_tree(struct oneios_guest_launch *,const pid_t *,unsigned);
 /* Close the private gates and pidfds only. No thaw, migration, signals,
  * implicit waitpid, group deletion, or Android return. PIDs are retained. */
 void oneios_guest_launch_close(struct oneios_guest_launch *);

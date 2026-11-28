@@ -10,6 +10,7 @@
 #include <poll.h>
 #include <signal.h>
 #include <sys/socket.h>
+#include <sys/prctl.h>
 #include <sys/syscall.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -698,4 +699,121 @@ void oneios_guest_launch_close(struct oneios_guest_launch *l)
         p->gate=p->pidfd=-1;
     }
     l->phase=ONEIOS_LAUNCH_CLOSED;
+}
+
+
+/* Terminal retirement of the pinned leaf, NOT a GPU drain receipt. */
+int oneios_owned_groups_kill(struct oneios_owned_groups *g)
+{
+#ifdef ONEIOS_OWNED_GROUPS_TEST
+    (void)g; return refuse();
+#else
+    if (verify_groups(g)) return -1;
+    return write_number(g->freezer,"cgroup.kill",1);
+#endif
+}
+
+#define TREE_MAX_PROCS 32768u
+struct proc_row { pid_t pid, parent; char state; };
+static int row_order(const void *a,const void *b)
+{
+    const struct proc_row *x=a,*y=b;
+    return (x->pid>y->pid)-(x->pid<y->pid);
+}
+static int scan_rows(struct proc_row *rows,unsigned *count)
+{
+    DIR *d=opendir("/proc");
+    if(!d)return -1;
+    int rc=0; unsigned n=0;
+    for(;;){
+        errno=0;
+        struct dirent *e=readdir(d);
+        if(!e){if(errno)rc=-1;break;}
+        if(!*e->d_name||strspn(e->d_name,"0123456789")!=strlen(e->d_name))continue;
+        char *end;long pid=strtol(e->d_name,&end,10);
+        if(*end||pid<=0||pid>INT_MAX||n==TREE_MAX_PROCS){rc=invalid();break;}
+        char path[64],buf[4096];
+        snprintf(path,sizeof path,"/proc/%ld/stat",pid);
+        if(read_text(AT_FDCWD,path,buf,sizeof buf)){
+            if(errno==ENOENT||errno==ESRCH)continue;
+            rc=-1;break;
+        }
+        char *tail=strrchr(buf,')');
+        char state;long parent;
+        if(!tail||sscanf(tail+1," %c %ld",&state,&parent)!=2||parent<0||parent>INT_MAX){
+            rc=invalid();break;
+        }
+        rows[n++]=(struct proc_row){(pid_t)pid,(pid_t)parent,state};
+    }
+    int saved=errno;closedir(d);
+    if(rc){errno=saved;return rc;}
+    qsort(rows,n,sizeof *rows,row_order);*count=n;return 0;
+}
+/* 1 = guest root tree, 2 = known independent control child tree,
+ * 0 = unrelated, -1 = unresolved snapshot. */
+static int tree_role(const struct proc_row *rows,unsigned n,pid_t pid,
+    const struct oneios_guest_launch *l,const pid_t *control,unsigned nc)
+{
+    for(unsigned depth=0;depth<=n;depth++){
+        if(pid<=1)return 0;
+        if(pid==l->owner_pid)return -1;
+        struct proc_row key={.pid=pid};
+        const struct proc_row *r=bsearch(&key,rows,n,sizeof *rows,row_order);
+        if(!r)return -1;
+        if(r->parent==l->owner_pid){
+            for(unsigned i=0;i<ONEIOS_GUEST_ROOTS;i++)
+                if(pid==l->root[i].pid)return 1;
+            for(unsigned i=0;i<nc;i++)
+                if(pid==control[i])return 2;
+            return -1;
+        }
+        if(r->parent==pid)return -1;
+        pid=r->parent;
+    }
+    return -1;
+}
+/* Reconcile both private leaf PID sets around an ancestry snapshot.
+ * A subreaper prevents live orphans from being silently reparented to
+ * init. Fork/exit races are retryable, never a successful receipt.
+ * This is an observation under the trusted-runtime model, not an
+ * atomic kernel snapshot or security boundary against hostile root. */
+int oneios_guest_launch_check_tree(struct oneios_guest_launch *l,
+    const pid_t *control,unsigned nc)
+{
+    int sub=0;
+    if(!l||l->phase!=ONEIOS_LAUNCH_RELEASED||nc>8||(nc&&!control)||
+       prctl(PR_GET_CHILD_SUBREAPER,&sub,0,0,0)||!sub)return refuse();
+    if(oneios_guest_launch_check_roots(l))return -1;
+    pid_t before[LAUNCH_MAX_PROCS],after[LAUNCH_MAX_PROCS],cpu[LAUNCH_MAX_PROCS];
+    unsigned nb,na,nn,n=0;
+    if(group_pids(l->groups->freezer,before,&nb))return -1;
+    struct proc_row *rows=calloc(TREE_MAX_PROCS,sizeof *rows);
+    if(!rows)return -1;
+    int rc=scan_rows(rows,&n);
+    if(!rc&&(group_pids(l->groups->freezer,after,&na)||group_pids(l->groups->cpu,cpu,&nn)))rc=-1;
+    if(!rc&&(nb!=na||na!=nn||memcmp(before,after,nb*sizeof *before)||
+       memcmp(after,cpu,na*sizeof *after))){errno=EAGAIN;rc=-1;}
+    if(!rc){
+        unsigned seen=0;
+        for(unsigned i=0;i<n;i++){
+            const struct proc_row *r=&rows[i];
+            if(r->pid==l->owner_pid)continue;
+            bool in=bsearch(&r->pid,before,nb,sizeof *before,pid_order)!=NULL;
+            if(r->state=='Z'||r->state=='X'){
+                if(in){errno=EAGAIN;rc=-1;break;}
+                continue;
+            }
+            int role=tree_role(rows,n,r->pid,l,control,nc);
+            if(role<0){
+                if(in||r->parent==l->owner_pid){errno=EAGAIN;rc=-1;break;}
+                continue;
+            }
+            if((role==1)!=in){errno=EAGAIN;rc=-1;break;}
+            if(in)seen++;
+        }
+        if(!rc&&seen!=nb){errno=EAGAIN;rc=-1;}
+    }
+    int saved=errno;free(rows);
+    if(rc){errno=saved;return rc;}
+    return oneios_guest_launch_check_roots(l);
 }

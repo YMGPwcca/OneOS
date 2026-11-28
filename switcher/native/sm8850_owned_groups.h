@@ -39,6 +39,9 @@ int oneios_owned_groups_create(struct oneios_owned_groups *, const char *token,
 /* After retirement only. Verify both leaves are empty and identity-pinned.
  * Does not thaw or move anything. Partial deletion is reported as failure. */
 int oneios_owned_groups_remove_empty(struct oneios_owned_groups *);
+/* Terminal kill of the pinned private v2 leaf only. Never thaw or
+ * claim GPU drain. Verify empty separately. */
+int oneios_owned_groups_kill(struct oneios_owned_groups *);
 
 /* Aggregate CFS bandwidth of eight CPUs; NOT MHz or utilization clamp. */
 int oneios_owned_cpu_set(struct oneios_owned_groups *g, unsigned pct);
