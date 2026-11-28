@@ -39,6 +39,12 @@ enum oneios_thermal_result oneios_stock_session_activate(
 enum oneios_thermal_result oneios_stock_session_activate_sample(
     struct oneios_stock_session *, const struct oneios_thermal_ops *, void *,
     const struct oneios_thermal_sample *, const struct oneios_thermal_native_sample *);
+/* Transfer only a real pre-READY policy latch, with actual quota
+ * already reduced to 10. The controller obtains its own pause receipt. */
+enum oneios_thermal_result oneios_stock_session_activate_held_sample(
+    struct oneios_stock_session *, const struct oneios_thermal_ops *, void *,
+    const struct oneios_thermal_sample *, const struct oneios_thermal_native_sample *,
+    bool hard, bool paused);
 enum oneios_thermal_result oneios_stock_session_tick_sample(
     struct oneios_stock_session *, const struct oneios_thermal_sample *,
     const struct oneios_thermal_native_sample *);

@@ -557,6 +557,9 @@ framework_deadline() {
             why="invalid framework deadline"
         elif ! framework_pid_alive "$CTL/framework.watcher"; then
             why="framework watcher lost"
+        elif framework_stock_mode && [ "$tick" -ge "$limit" ]; then
+            expired=1
+            why="framework deadline reached at $tick (deadline $limit)"
         elif framework_stock_mode && ! framework_stock_healthy; then
             why="independent stock session owner missing, stale or faulted"
         elif [ "$(cat "$CTL/framework.mode" 2>/dev/null)" = run ] &&
@@ -1929,7 +1932,16 @@ case "$MODE" in
             [ "$(watchdog_generation)" = "$WD_GEN" ] || exit 0
             watchdog_lost && SCREEN="The watchdog feeder failed" && go "watchdog feeder failed"
             [ -e "$SESSION/return.request" ] && SCREEN="A return to One UI was asked for" && go "return asked before xnuhost started ($(head -c 200 "$SESSION/return.request" 2>/dev/null))"
-            [ $t -lt 60 ] || { SCREEN="iOS did not start within 60 s"; go "the switch did not start xnuhost within 60 s"; }
+            if [ "$t" -ge 60 ]; then
+                # Only the independently monitored stock session can
+                # remain in starting while valid heat holds setup.
+                # The existing fixed deadline is never extended.
+                if ! framework_stock_healthy ||
+                   ! watchdog_uint "$(cat "$CTL/framework.deadline" 2>/dev/null)"; then
+                    SCREEN="iOS did not start within 60 s"
+                    go "the switch did not start xnuhost within 60 s"
+                fi
+            fi
             sleep 1; t=$((t + 1))
         done
         case "$(cat "$CTL/state" 2>/dev/null)" in
@@ -1968,7 +1980,15 @@ case "$MODE" in
                     if grep -Eq "memory: the guest.s RAM is held: .*not (locked|prefaulted further)" "$SESSION/xnuhost.log"; then
                         go "benchmark guest RAM locking or prefaulting failed"
                     fi
-                    if [ "$t" -ge 20 ]; then
+                    if framework_stock_mode; then
+                        # Setup may still be parked before allocation.
+                        # Once its real board-init hint exists, the
+                        # original mandatory mlock evidence must exist.
+                        if [ -f "$SESSION/stock.setup-ready" ]; then
+                            grep -Fq 'locked (mlock: the host cannot swap it)' "$SESSION/xnuhost.log" ||
+                                go "locked guest RAM was not confirmed at stock board bind"
+                        fi
+                    elif [ "$t" -ge 20 ]; then
                         grep -Fq 'locked (mlock: the host cannot swap it)' "$SESSION/xnuhost.log" ||
                             go "locked guest RAM was not confirmed"
                     fi
@@ -1986,7 +2006,7 @@ case "$MODE" in
                 SCREEN=$(why_ended)
                 go "xnuhost $pid ended (last log lines: $(tail -n 3 "$SESSION/xnuhost.log" 2>/dev/null | tr '\n' '|' | cut -c1-300))"
             fi
-            if [ "$MAX" -gt 0 ] && [ ! -e "$SESSION/ready" ] && [ $t -ge "$MAX" ]; then
+            if ! framework_stock_mode && [ "$MAX" -gt 0 ] && [ ! -e "$SESSION/ready" ] && [ $t -ge "$MAX" ]; then
                 SCREEN="iOS did not come up within ${MAX} s"
                 go "the guest did not report ready within ${MAX}s"
             fi

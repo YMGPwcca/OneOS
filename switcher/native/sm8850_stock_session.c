@@ -55,6 +55,23 @@ enum oneios_thermal_result oneios_stock_session_activate_sample(
     return oneios_stock_session_tick_sample(s, raw, n);
 }
 
+enum oneios_thermal_result oneios_stock_session_activate_held_sample(
+    struct oneios_stock_session *s, const struct oneios_thermal_ops *ops,
+    void *ctx, const struct oneios_thermal_sample *raw,
+    const struct oneios_thermal_native_sample *n, bool hard, bool paused)
+{
+    if (!s || (paused && !hard) || (hard && s->groups.cpu_pct != 10))
+        return ONEIOS_THERMAL_REFUSED;
+    if (bind_controller(s, ops, ctx)) return ONEIOS_THERMAL_REFUSED;
+    /* Transfer policy intent, never a fabricated physical freeze ACK.
+     * Controller's actual paused remains false. A pending severe hold
+     * must now obtain real drain and freezer receipts. Restart the cool
+     * streak on the first new sample, not a stale pre-READY timestamp. */
+    s->controller.policy.hard = hard;
+    s->controller.policy.paused = paused;
+    return oneios_stock_session_tick_sample(s, raw, n);
+}
+
 enum oneios_thermal_result oneios_stock_session_tick_sample(
     struct oneios_stock_session *s, const struct oneios_thermal_sample *raw,
     const struct oneios_thermal_native_sample *n)
