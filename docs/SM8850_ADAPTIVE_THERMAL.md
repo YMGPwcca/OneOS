@@ -518,3 +518,39 @@ transport; the owned-group fixture emulates kernel-created nodes using
 ordinary files. Both require local execution; no physical cgroup, HAL,
 guest park, or FPS result is claimed. No live run, staging or CI workflow
 is authorized by this candidate.
+
+
+### Root-owned two-process bootstrap (60 FPS launcher integration)
+
+The original switcher starts the display helper before migrating it to
+the legacy freezer group; the old guest launcher independently enters
+that group and the old bandwidth worker's CPU leaf. That is not the
+stock-managed session's two-leaf ownership contract.
+
+The new root-side guest launcher API creates only its own direct children
+for XNUHost and display, pins them with pidfds, holds each on a private
+startup socket, closes every non-whitelisted descriptor before the ready
+ACK, and joins each to both freshly created private leaves. It checks
+that the two kernel cgroup.procs PID sets exactly equal its held roots
+before releasing either target to exec. A missing/dead child, mismatched
+group or unexpected member refuses bootstrap; no adoption, implicit
+migration of existing processes, or writes to stock services. Failure
+retains child identities for explicit retirement. Both release operations
+must succeed; a partial release is not an admission or recovery receipt.
+
+This is a root-side launcher building block, not yet invoked by the
+switcher. Bootstrap execution is not permission to run an iOS workload.
+Namespace entry, runtime worker readiness, independently bounded
+raw-source/HAL supervision, exact descendant verification (including
+possible escape from both groups), startup thermal control and integration
+with the existing independent recovery/deadline owner remain required.
+The check_roots API is a root-liveness / equal-membership observation,
+not full descendant proof. It must not be passed off as a complete
+session_verify callback. No user-selected UI-only profile, startup quota,
+or existing launch gate is changed. No live run.
+
+The focused owned-groups fixture now also exercises real fork, pidfd,
+socket barrier, inherited FD whitelist, exec, no-release EOF and
+membership mismatch with simulated cgroup.procs files. Host and Android
+compile/test pending. No production cgroup path is accessible in the
+fixture build.

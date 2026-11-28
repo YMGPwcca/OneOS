@@ -3,6 +3,8 @@
 #include "../switcher/native/sm8850_owned_groups.c"
 #include <assert.h>
 #include <pthread.h>
+#include <sys/wait.h>
+#include <signal.h>
 
 static const char token[] = "0123456789abcdef0123456789abcdef";
 static const char leaf[] = "oneios_guest.0123456789abcdef0123456789abcdef";
@@ -267,8 +269,93 @@ static void unexpected_freeze_latches(void)
     cleanup(&x);
 }
 
-int main(void)
+
+/* Real child gate/exec, simulated cgroup membership. No device or actual
+ * cgroup writes. The test target cannot call the live creator. */
+static void launch_fixture(void)
 {
+    char dir[]="/tmp/oneios-guest-launch.XXXXXX";
+    CHECK(mkdtemp(dir));
+    int root=open(dir,DIR_FLAGS);
+    CHECK(root>=0 && !mkdirat(root,"cpu",0700) && !mkdirat(root,"freezer",0700));
+    int cp=openat(root,"cpu",DIR_FLAGS),fp=openat(root,"freezer",DIR_FLAGS);
+    CHECK(cp>=0 && fp>=0);
+    struct oneios_owned_groups g;
+    CHECK(!create_parents(&g,dup(cp),dup(fp),token,70));
+
+    char exe[512], a[512], b[512], keep[32], omit[32];
+    ssize_t len=readlink("/proc/self/exe",exe,sizeof exe-1);
+    CHECK(len>0 && (size_t)len<sizeof exe-1);exe[len]=0;
+    CHECK(snprintf(a,sizeof a,"%s/a",dir)>0 && snprintf(b,sizeof b,"%s/b",dir)>0);
+    int fd=open("/dev/null",O_RDONLY|O_CLOEXEC), other=open("/dev/null",O_RDONLY);
+    CHECK(fd>=3 && other>=3 && fd!=other);
+    snprintf(keep,sizeof keep,"%d",fd);snprintf(omit,sizeof omit,"%d",other);
+    char *const env[]={"PATH=/usr/bin:/bin",NULL};
+    char *const aa[]={exe,"--launch-fixture-child",a,keep,omit,NULL};
+    char *const bb[]={exe,"--launch-fixture-child",b,keep,omit,NULL};
+    struct oneios_guest_launch l={0};
+    CHECK(!oneios_guest_launch_init(&l,&g));
+    CHECK(oneios_guest_launch_release(&l)!=0);
+    CHECK(!oneios_guest_launch_hold(&l,ONEIOS_GUEST_XNUHOST,exe,aa,env,&fd,1));
+    CHECK(l.root[ONEIOS_GUEST_XNUHOST].pid>0 && !l.root[ONEIOS_GUEST_XNUHOST].released);
+    CHECK(access(a,F_OK)!=0 && errno==ENOENT);
+    CHECK(oneios_guest_launch_release(&l)!=0);
+    CHECK(oneios_guest_launch_hold(&l,ONEIOS_GUEST_XNUHOST,exe,aa,env,&fd,1)!=0);
+    CHECK(!oneios_guest_launch_hold(&l,ONEIOS_GUEST_DISPLAY,exe,bb,env,&fd,1));
+    CHECK(l.root[0].pid!=l.root[1].pid && !oneios_guest_launch_check_roots(&l));
+    CHECK(access(a,F_OK)!=0 && access(b,F_OK)!=0);
+    CHECK(!oneios_guest_launch_release(&l) && l.phase==ONEIOS_LAUNCH_RELEASED);
+    CHECK(l.root[0].released && l.root[1].released);
+    CHECK(oneios_guest_launch_release(&l)!=0);
+    for(unsigned i=0;i<ONEIOS_GUEST_ROOTS;i++){
+        int status;
+        CHECK(waitpid(l.root[i].pid,&status,0)==l.root[i].pid);
+        CHECK(WIFEXITED(status) && !WEXITSTATUS(status));
+    }
+    CHECK(!access(a,F_OK) && !access(b,F_OK));
+    CHECK(oneios_guest_launch_check_roots(&l)!=0);
+    oneios_guest_launch_close(&l);
+    CHECK(l.root[0].pid>0 && l.root[0].pidfd==-1 && l.root[1].gate==-1);
+    CHECK(oneios_guest_launch_init(&l,&g)!=0);
+    CHECK(!unlink(a) && !unlink(b));
+    /* A held child's EOF is not release. Verify unexpected PID drift is
+     * rejected before the target can execute. */
+    put(g.cpu,"cgroup.procs","");put(g.freezer,"cgroup.procs","");
+    struct oneios_guest_launch bad={0};
+    CHECK(!oneios_guest_launch_init(&bad,&g));
+    CHECK(!oneios_guest_launch_hold(&bad,ONEIOS_GUEST_XNUHOST,exe,aa,env,&fd,1));
+    CHECK(!oneios_guest_launch_hold(&bad,ONEIOS_GUEST_DISPLAY,exe,bb,env,&fd,1));
+    /* Disagreeing group sets must not permit bootstrap. */
+    put(g.freezer,"cgroup.procs","123456789\n");
+    CHECK(oneios_guest_launch_release(&bad)!=0 && bad.phase==ONEIOS_LAUNCH_FAULT);
+    CHECK(!bad.root[0].released && !bad.root[1].released);
+    oneios_guest_launch_close(&bad);
+    for(unsigned i=0;i<ONEIOS_GUEST_ROOTS;i++){
+        int status;
+        CHECK(waitpid(bad.root[i].pid,&status,0)==bad.root[i].pid);
+        CHECK(WIFEXITED(status) && WEXITSTATUS(status)==125);
+    }
+    CHECK(access(a,F_OK)!=0 && access(b,F_OK)!=0);
+    put(g.cpu,"cgroup.procs","");put(g.freezer,"cgroup.procs","");
+    CHECK(!oneios_owned_groups_remove_empty(&g));
+    close(fd);close(other);close(cp);close(fp);
+    CHECK(!unlinkat(root,"cpu",AT_REMOVEDIR) && !unlinkat(root,"freezer",AT_REMOVEDIR));
+    close(root);CHECK(!rmdir(dir));
+}
+static int launch_fixture_child(char **argv)
+{
+    int keep=atoi(argv[3]),omit=atoi(argv[4]);
+    if (fcntl(keep,F_GETFD)<0 || fcntl(omit,F_GETFD)>=0 || errno!=EBADF) return 2;
+    int fd=open(argv[2],O_WRONLY|O_CREAT|O_EXCL|O_CLOEXEC,0600);
+    return fd<0 || close(fd) ? 3 : 0;
+}
+
+int main(int argc,char **argv)
+{
+    if (argc==5 && !strcmp(argv[1],"--launch-fixture-child")) return launch_fixture_child(argv);
+    if (argc!=1) return 2;
+    alarm(30);
+    launch_fixture();
     creator_fresh_only();
     unexpected_freeze_latches();
     happy_path();

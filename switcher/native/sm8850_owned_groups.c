@@ -1,10 +1,15 @@
 /* SPDX-License-Identifier: MIT */
 #define _GNU_SOURCE
 #include "sm8850_owned_groups.h"
+#include "sm8850_guest_launch.h"
 
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
+#include <poll.h>
+#include <sys/socket.h>
+#include <sys/syscall.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -449,4 +454,232 @@ int oneios_owned_groups_remove_empty(struct oneios_owned_groups *g)
     oneios_owned_groups_close(g);
     if (b) { errno = saved; return -1; }
     return 0;
+}
+
+
+/* Actual two-root blocked-start ownership, using only the existing
+ * identity-pinned private leaves. No mutation of stock cgroups. */
+#define LAUNCH_MAX_PROCS 4096u
+#define LAUNCH_READY_MS 1000u
+
+static int pid_order(const void *a, const void *b)
+{
+    pid_t x = *(const pid_t *)a, y = *(const pid_t *)b;
+    return (x > y) - (x < y);
+}
+static int group_pids(int fd, pid_t *pids, unsigned *n)
+{
+    char buf[LAUNCH_MAX_PROCS * 12u + 1u];
+    if (read_text(fd, "cgroup.procs", buf, sizeof buf)) return -1;
+    unsigned count = 0;
+    char *p = buf;
+    while (*p) {
+        char *end;
+        if (count == LAUNCH_MAX_PROCS || *p < '0' || *p > '9') return invalid();
+        errno = 0;
+        long v = strtol(p, &end, 10);
+        if (errno || v <= 0 || v > INT_MAX || *end != '\n') return invalid();
+        pids[count++] = (pid_t)v;
+        p = end + 1;
+    }
+    qsort(pids, count, sizeof *pids, pid_order);
+    unsigned unique = 0; /* cgroup.procs can contain duplicate PIDs */
+    for (unsigned i = 0; i < count; i++)
+        if (!unique || pids[i] != pids[unique-1]) pids[unique++] = pids[i];
+    *n = unique;
+    return 0;
+}
+static int launch_live(const struct oneios_guest_child *p)
+{
+    if (!p || p->pid <= 0 || p->pidfd < 0) return invalid();
+    struct pollfd f = { .fd = p->pidfd, .events = POLLIN };
+    int n;
+    do n = poll(&f, 1, 0); while (n < 0 && errno == EINTR);
+    if (n < 0) return -1;
+    if (n) { errno = ESRCH; return -1; }
+    return 0;
+}
+static int launch_members(struct oneios_guest_launch *l, bool exact)
+{
+    if (oneios_owned_groups_verify(l->groups, l->groups->freeze_confirmed)) return -1;
+    pid_t cpu[LAUNCH_MAX_PROCS], freezer[LAUNCH_MAX_PROCS];
+    unsigned nc, nf, roots = 0;
+    if (group_pids(l->groups->cpu,cpu,&nc) || group_pids(l->groups->freezer,freezer,&nf)) return -1;
+    if (nc != nf || memcmp(cpu, freezer, nc * sizeof *cpu)) {
+        errno = EAGAIN; return -1;
+    }
+    for (unsigned i = 0; i < ONEIOS_GUEST_ROOTS; i++) {
+        const struct oneios_guest_child *p = &l->root[i];
+        if (!p->pid) continue;
+        if (launch_live(p)) return -1;
+        if (!bsearch(&p->pid,cpu,nc,sizeof *cpu,pid_order)) return refuse();
+        roots++;
+    }
+    if (exact && nc != roots) return refuse();
+    return 0;
+}
+static int attach_created(int fd, pid_t pid)
+{
+#ifdef ONEIOS_OWNED_GROUPS_TEST
+    /* Ordinary-file fixture models cgroup.procs append; never real cgroups. */
+    int f = openat(fd,"cgroup.procs",O_WRONLY|O_APPEND|O_CLOEXEC|O_NOFOLLOW);
+    if (f < 0) return -1;
+    char b[32];
+    int n = snprintf(b,sizeof b,"%ld\n",(long)pid);
+    ssize_t got = write(f,b,(size_t)n);
+    int rc = close(f);
+    return got == n && !rc ? 0 : refuse();
+#else
+    return write_number(fd,"cgroup.procs",(long)pid);
+#endif
+}
+static int launch_fault(struct oneios_guest_launch *l)
+{
+    if (l) l->phase = ONEIOS_LAUNCH_FAULT;
+    return -1;
+}
+int oneios_guest_launch_init(struct oneios_guest_launch *l, struct oneios_owned_groups *g)
+{
+    if (!l || l->phase != ONEIOS_LAUNCH_NEW || !g) return invalid();
+    l->groups = g;
+    for (unsigned i=0;i<ONEIOS_GUEST_ROOTS;i++)
+        l->root[i].gate=l->root[i].pidfd=-1;
+    l->phase=ONEIOS_LAUNCH_FAULT;
+    if (g->freeze_confirmed || oneios_owned_groups_verify(g,false) ||
+        empty_group(g->cpu) || empty_group(g->freezer)) return refuse();
+    l->phase=ONEIOS_LAUNCH_HELD;
+    return 0;
+}
+/* The freshly forked child cannot run the target while the gate is held.
+ * Close all descriptors except stdio, the gate, and the explicit
+ * whitelist. In particular it must not inherit an earlier child's gate
+ * or the parent's endpoint of a supervisor channel. No best-effort
+ * fallback on a kernel without close_range. */
+static int close_except(int gate,const int *fds,unsigned n)
+{
+#if defined(SYS_close_range)
+    int keep[ONEIOS_LAUNCH_PASS_FDS+1];
+    keep[0]=gate;
+    for (unsigned i=0;i<n;i++) keep[i+1]=fds[i];
+    for (unsigned i=1;i<=n;i++) {
+        int a=keep[i]; unsigned j=i;
+        while(j && keep[j-1]>a) { keep[j]=keep[j-1];j--; }
+        keep[j]=a;
+    }
+    unsigned first=3;
+    for (unsigned i=0;i<=n;i++) {
+        unsigned last=(unsigned)keep[i];
+        if (last<first) return invalid();
+        if (last>first && syscall(SYS_close_range,first,last-1,0u)) return -1;
+        first=last+1;
+    }
+    if (syscall(SYS_close_range,first,UINT_MAX,0u)) return -1;
+    for (unsigned i=0;i<n;i++)
+        if (fcntl(fds[i],F_SETFD,0)) return -1;
+    return 0;
+#else
+    (void)gate;(void)fds;(void)n;
+    errno=ENOTSUP;return -1;
+#endif
+}
+static void launch_child(int gate,const char *path,char *const argv[],
+                         char *const envp[],const int *fds,unsigned n)
+{
+    char c=0;
+    if (close_except(gate,fds,n) || send(gate,"R",1,MSG_NOSIGNAL)!=1) _exit(125);
+    ssize_t got;
+    do got=recv(gate,&c,1,MSG_TRUNC); while(got<0 && errno==EINTR);
+    if (got!=1 || c!='G') _exit(125);
+    close(gate);
+    execve(path,argv,envp);
+    _exit(126);
+}
+static int wait_child_ready(const struct oneios_guest_child *p)
+{
+    unsigned long long start,now;
+    if (boot_ms(&start)) return -1;
+    struct pollfd f[]={{.fd=p->gate,.events=POLLIN},{.fd=p->pidfd,.events=POLLIN}};
+    for (;;) {
+        if (boot_ms(&now)) return -1;
+        if (now<start || now-start>=LAUNCH_READY_MS) {errno=ETIMEDOUT;return -1;}
+        int n=poll(f,2,(int)(LAUNCH_READY_MS-(now-start)));
+        if (n<0) {if(errno==EINTR)continue;return -1;}
+        if (!n) {errno=ETIMEDOUT;return -1;}
+        if (f[1].revents || (f[0].revents&(POLLHUP|POLLERR|POLLNVAL))) return refuse();
+        if (!(f[0].revents&POLLIN)) return refuse();
+        char c;
+        if (recv(p->gate,&c,1,MSG_DONTWAIT|MSG_TRUNC)!=1 || c!='R') return refuse();
+        return launch_live(p);
+    }
+}
+int oneios_guest_launch_hold(struct oneios_guest_launch *l,enum oneios_guest_role role,
+    const char *path,char *const argv[],char *const envp[],const int *fds,unsigned n)
+{
+    if (!l || l->phase!=ONEIOS_LAUNCH_HELD || (unsigned)role>=ONEIOS_GUEST_ROOTS ||
+        l->root[role].pid || !path || path[0]!='/' || !argv || !argv[0] || !envp ||
+        n>ONEIOS_LAUNCH_PASS_FDS || (n && !fds)) return invalid();
+    for (int i=0;i<3;i++) if (fcntl(i,F_GETFD)<0) return invalid();
+    for (unsigned i=0;i<n;i++) {
+        if (fds[i]<3 || fcntl(fds[i],F_GETFD)<0) return invalid();
+        for (unsigned j=0;j<i;j++) if (fds[i]==fds[j]) return invalid();
+    }
+    if (launch_members(l,true)) return launch_fault(l);
+    int pair[2];
+    if (socketpair(AF_UNIX,SOCK_SEQPACKET|SOCK_CLOEXEC,0,pair)) return launch_fault(l);
+    pid_t pid=fork();
+    if (!pid) {
+        close(pair[0]);
+        launch_child(pair[1],path,argv,envp,fds,n);
+    }
+    close(pair[1]);
+    if (pid<0) {close(pair[0]);return launch_fault(l);}
+    struct oneios_guest_child *p=&l->root[role];
+    p->pid=pid;p->gate=pair[0];
+#if defined(SYS_pidfd_open)
+    p->pidfd=(int)syscall(SYS_pidfd_open,pid,0);
+#else
+    errno=ENOTSUP;
+#endif
+    if (p->pidfd<0 || wait_child_ready(p) ||
+        oneios_owned_groups_verify(l->groups,false) ||
+        attach_created(l->groups->cpu,pid) || launch_live(p) ||
+        attach_created(l->groups->freezer,pid) || launch_members(l,true)) {
+        int saved=errno;
+        close(p->gate);p->gate=-1;errno=saved;
+        return launch_fault(l);
+    }
+    return 0;
+}
+int oneios_guest_launch_release(struct oneios_guest_launch *l)
+{
+    if (!l || l->phase!=ONEIOS_LAUNCH_HELD) return invalid();
+    for (unsigned i=0;i<ONEIOS_GUEST_ROOTS;i++)
+        if (!l->root[i].pid || l->root[i].gate<0) return invalid();
+    if (l->groups->freeze_confirmed || launch_members(l,true)) return launch_fault(l);
+    for (unsigned i=0;i<ONEIOS_GUEST_ROOTS;i++) {
+        struct oneios_guest_child *p=&l->root[i];
+        if (launch_live(p) || send(p->gate,"G",1,MSG_DONTWAIT|MSG_NOSIGNAL)!=1)
+            return launch_fault(l);
+        p->released=true;
+        close(p->gate);p->gate=-1;
+    }
+    l->phase=ONEIOS_LAUNCH_RELEASED;
+    return 0;
+}
+int oneios_guest_launch_check_roots(struct oneios_guest_launch *l)
+{
+    if (!l || (l->phase!=ONEIOS_LAUNCH_HELD && l->phase!=ONEIOS_LAUNCH_RELEASED))
+        return invalid();
+    return launch_members(l,l->phase==ONEIOS_LAUNCH_HELD);
+}
+void oneios_guest_launch_close(struct oneios_guest_launch *l)
+{
+    if (!l || l->phase==ONEIOS_LAUNCH_NEW || l->phase==ONEIOS_LAUNCH_CLOSED) return;
+    for (unsigned i=0;i<ONEIOS_GUEST_ROOTS;i++) {
+        struct oneios_guest_child *p=&l->root[i];
+        if (p->gate>=0) close(p->gate);
+        if (p->pidfd>=0) close(p->pidfd);
+        p->gate=p->pidfd=-1;
+    }
+    l->phase=ONEIOS_LAUNCH_CLOSED;
 }
