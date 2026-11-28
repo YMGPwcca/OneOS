@@ -8,6 +8,7 @@
 #include <fcntl.h>
 #include <limits.h>
 #include <poll.h>
+#include <signal.h>
 #include <sys/socket.h>
 #include <sys/syscall.h>
 #include <stdio.h>
@@ -501,6 +502,7 @@ static int launch_live(const struct oneios_guest_child *p)
 }
 static int launch_members(struct oneios_guest_launch *l, bool exact)
 {
+    if (l->owner_pid != getpid()) return refuse();
     if (oneios_owned_groups_verify(l->groups, l->groups->freeze_confirmed)) return -1;
     pid_t cpu[LAUNCH_MAX_PROCS], freezer[LAUNCH_MAX_PROCS];
     unsigned nc, nf, roots = 0;
@@ -538,14 +540,24 @@ static int launch_fault(struct oneios_guest_launch *l)
     if (l) l->phase = ONEIOS_LAUNCH_FAULT;
     return -1;
 }
+/* The creator must retain exclusive waitpid ownership until bootstrap
+ * ends: a zombie pins its numeric PID until reaped. Reject auto-reaping
+ * or an asynchronous SIGCHLD handler before any numeric cgroup write. */
+static int launch_wait_owner(void)
+{
+    struct sigaction sa;
+    if (sigaction(SIGCHLD,NULL,&sa)) return -1;
+    return sa.sa_handler == SIG_DFL && !(sa.sa_flags & SA_NOCLDWAIT) ? 0 : refuse();
+}
 int oneios_guest_launch_init(struct oneios_guest_launch *l, struct oneios_owned_groups *g)
 {
     if (!l || l->phase != ONEIOS_LAUNCH_NEW || !g) return invalid();
     l->groups = g;
+    l->owner_pid=getpid();
     for (unsigned i=0;i<ONEIOS_GUEST_ROOTS;i++)
         l->root[i].gate=l->root[i].pidfd=-1;
     l->phase=ONEIOS_LAUNCH_FAULT;
-    if (g->freeze_confirmed || oneios_owned_groups_verify(g,false) ||
+    if (launch_wait_owner() || g->freeze_confirmed || oneios_owned_groups_verify(g,false) ||
         empty_group(g->cpu) || empty_group(g->freezer)) return refuse();
     l->phase=ONEIOS_LAUNCH_HELD;
     return 0;
@@ -582,7 +594,7 @@ static int close_except(int gate,const int *fds,unsigned n)
     errno=ENOTSUP;return -1;
 #endif
 }
-static void launch_child(int gate,const char *path,char *const argv[],
+static _Noreturn void launch_child(int gate,const char *path,char *const argv[],
                          char *const envp[],const int *fds,unsigned n)
 {
     char c=0;
@@ -615,15 +627,19 @@ static int wait_child_ready(const struct oneios_guest_child *p)
 int oneios_guest_launch_hold(struct oneios_guest_launch *l,enum oneios_guest_role role,
     const char *path,char *const argv[],char *const envp[],const int *fds,unsigned n)
 {
-    if (!l || l->phase!=ONEIOS_LAUNCH_HELD || (unsigned)role>=ONEIOS_GUEST_ROOTS ||
+    if (!l || l->owner_pid!=getpid() || l->phase!=ONEIOS_LAUNCH_HELD || (unsigned)role>=ONEIOS_GUEST_ROOTS ||
         l->root[role].pid || !path || path[0]!='/' || !argv || !argv[0] || !envp ||
         n>ONEIOS_LAUNCH_PASS_FDS || (n && !fds)) return invalid();
     for (int i=0;i<3;i++) if (fcntl(i,F_GETFD)<0) return invalid();
     for (unsigned i=0;i<n;i++) {
-        if (fds[i]<3 || fcntl(fds[i],F_GETFD)<0) return invalid();
+        if (fds[i]<3 || fcntl(fds[i],F_GETFD)<0 || fds[i]==l->groups->cpu ||
+            fds[i]==l->groups->freezer || fds[i]==l->groups->cpu_parent ||
+            fds[i]==l->groups->freezer_parent) return invalid();
+        for (unsigned j=0;j<ONEIOS_GUEST_ROOTS;j++)
+            if (fds[i]==l->root[j].gate || fds[i]==l->root[j].pidfd) return invalid();
         for (unsigned j=0;j<i;j++) if (fds[i]==fds[j]) return invalid();
     }
-    if (launch_members(l,true)) return launch_fault(l);
+    if (launch_wait_owner() || launch_members(l,true)) return launch_fault(l);
     int pair[2];
     if (socketpair(AF_UNIX,SOCK_SEQPACKET|SOCK_CLOEXEC,0,pair)) return launch_fault(l);
     pid_t pid=fork();
@@ -652,10 +668,10 @@ int oneios_guest_launch_hold(struct oneios_guest_launch *l,enum oneios_guest_rol
 }
 int oneios_guest_launch_release(struct oneios_guest_launch *l)
 {
-    if (!l || l->phase!=ONEIOS_LAUNCH_HELD) return invalid();
+    if (!l || l->owner_pid!=getpid() || l->phase!=ONEIOS_LAUNCH_HELD) return invalid();
     for (unsigned i=0;i<ONEIOS_GUEST_ROOTS;i++)
         if (!l->root[i].pid || l->root[i].gate<0) return invalid();
-    if (l->groups->freeze_confirmed || launch_members(l,true)) return launch_fault(l);
+    if (launch_wait_owner() || l->groups->freeze_confirmed || launch_members(l,true)) return launch_fault(l);
     for (unsigned i=0;i<ONEIOS_GUEST_ROOTS;i++) {
         struct oneios_guest_child *p=&l->root[i];
         if (launch_live(p) || send(p->gate,"G",1,MSG_DONTWAIT|MSG_NOSIGNAL)!=1)

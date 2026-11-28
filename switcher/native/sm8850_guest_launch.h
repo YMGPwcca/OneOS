@@ -6,6 +6,8 @@
 /* Root session bootstrap only. No Android admission, namespace setup,
  * runtime-ready receipt or authority to launch a legacy full run.
  * Call from a trusted single-threaded parent, before starting HAL/readers.
+ * Retain exclusive waitpid ownership; SIGCHLD must have default disposition
+ * and no SA_NOCLDWAIT until bootstrap has ended.
  * Children enter both fresh private leaves BEFORE exec. The owner,
  * sampler, recovery and watchdog stay outside. Never adopt existing PIDs.
  * Initialize with {0}; no reuse after any failure or close. */
@@ -22,6 +24,7 @@ struct oneios_guest_child {
 };
 struct oneios_guest_launch {
     struct oneios_owned_groups *groups;
+    pid_t owner_pid;
     struct oneios_guest_child root[ONEIOS_GUEST_ROOTS];
     enum oneios_guest_launch_phase phase;
 };

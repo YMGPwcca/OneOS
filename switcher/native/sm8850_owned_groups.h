@@ -9,7 +9,8 @@
  * Native userspace actuator primitives, NOT a complete thermal controller.
  * The root session creator must create these private leaf groups, pin their
  * identities, own all membership transitions, and keep the independent
- * monitor/deadline outside them. No group creation or migration here.
+ * monitor/deadline outside them. Fresh-leaf creation is explicit; only the
+ * separate blocked-start launcher API may join newly created children.
  * Never use these primitives on a legacy live session.
  */
 struct oneios_group_id { dev_t dev; ino_t ino; };
