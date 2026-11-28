@@ -1432,18 +1432,18 @@ case "$MODE" in
         SO="$STAGE/runtime/bin/oneios-stock-session"
         root_only "$SO" && [ -x "$SO" ] && root_only "$5" && [ -x "$5" ] || exit 3
         out_of_the_way
-        [ "$(readlink /proc/$/ns/mnt)" = "$(readlink /proc/1/ns/mnt)" ] || exit 3
-        printf '%s %s\n' "$" "$(watchdog_birth $)" > "$CTL/stock.owner.pid" || exit 3
+        [ "$(readlink /proc/$$/ns/mnt)" = "$(readlink /proc/1/ns/mnt)" ] || exit 3
+        printf '%s %s\n' "$$" "$(watchdog_birth $$)" > "$CTL/stock.owner.pid" || exit 3
         exec "$SO" --prearm "$(boot_id)" "$2" "$3" "$4" "$5"
         ;;
     --stock-display)
         [ -z "$T" ] && [ "$(id -u)" = 0 ] && framework_stock_admitted || exit 3
         read -r sx sd extra < "$CTL/stock.roots" || exit 3
-        [ "$sd" = "$" ] && [ -z "$extra" ] &&
-            [ "$(readlink /proc/$/ns/mnt)" = "$(readlink /proc/1/ns/mnt)" ] || exit 3
+        [ "$sd" = "$$" ] && [ -z "$extra" ] &&
+            [ "$(readlink /proc/$$/ns/mnt)" = "$(readlink /proc/1/ns/mnt)" ] || exit 3
         DH="$STAGE/runtime/bin/oneios-display"
         root_only "$DH" && [ -x "$DH" ] || exit 3
-        echo 0 2>/dev/null > "/proc/$/oom_score_adj"
+        echo 0 2>/dev/null > "/proc/$$/oom_score_adj"
         exec "$DH" --socket "$SESSION/display.sock" --wait 30 >>"$CTL/display.log" 2>&1
         ;;
     --inner|--stock-inner)
@@ -1451,7 +1451,7 @@ case "$MODE" in
         if [ "$MODE" = --stock-inner ]; then
             [ -z "$T" ] && [ "$(id -u)" = 0 ] && framework_stock_admitted || exit 3
             read -r sx sd extra < "$CTL/stock.roots" || exit 3
-            [ "$sx" = "$" ] && [ -z "$extra" ] &&
+            [ "$sx" = "$$" ] && [ -z "$extra" ] &&
                 [ "$ONEIOS_STOCK_TOKEN" = "$(cat "$CTL/framework.launch")" ] &&
                 [ "$ONEIOS_STOCK_GENERATION" = "$(watchdog_generation)" ] &&
                 [ "$ONEIOS_CAMERA" = 0 ] || exit 3
