@@ -58,6 +58,7 @@ P="$T/proc"
 STAGE="$T/data/local/tmp/oneios"
 FRAMEWORK_STAGE=/data/adb/oneios-m3q-framework
 FRAMEWORK=0
+FW_STOCK=0
 case "$0:$1" in
     "$FRAMEWORK_STAGE/oneios_switch.sh":*|*":--framework-audit"|*":--framework-audit-reboot")
         FRAMEWORK=1
@@ -556,8 +557,10 @@ framework_deadline() {
             why="invalid framework deadline"
         elif ! framework_pid_alive "$CTL/framework.watcher"; then
             why="framework watcher lost"
+        elif framework_stock_mode && ! framework_stock_healthy; then
+            why="independent stock session owner missing, stale or faulted"
         elif [ "$(cat "$CTL/framework.mode" 2>/dev/null)" = run ] &&
-             ! sm8850_no_userspace_thermal &&
+             ! framework_stock_mode && ! sm8850_no_userspace_thermal &&
              { [ "$(cat "$CTL/thermal.guard.required" 2>/dev/null)" != "$WD_GEN" ] ||
                ! framework_thermal_guard_healthy ||
                [ "$(cat "$CTL/thermal.cap.prearm.required" 2>/dev/null)" != "$WD_GEN" ] ||
@@ -607,6 +610,43 @@ framework_pid_alive() {
 # init's mount namespace. Exact boot, watchdog generation, PID birth and
 # heartbeat age are verified independently of xnuhost. 80 C means throttle,
 # not return; 90 C is a last-resort emergency guard fault.
+# Stock mode uses its own root process and fresh sample heartbeat.
+# The source integration is deliberately NOT physical qualification.
+# No environment variable, marker or risk token can enable it yet.
+framework_stock_startup_qualified() {
+    return 1
+}
+framework_stock_mode() {
+    [ "$FRAMEWORK" = 1 ] &&
+        [ "$(cat "$CTL/framework.mode" 2>/dev/null)" = run ] &&
+        [ "$(cat "$CTL/framework.stock-profile" 2>/dev/null)" = ui-v1 ]
+}
+framework_stock_healthy() {
+    framework_stock_mode || return 1
+    [ ! -e "$CTL/stock.owner.fault" ] || return 1
+    framework_pid_alive "$CTL/stock.owner.pid" || return 1
+    root_only "$CTL/stock.owner.heartbeat" || return 1
+    read -r so_version so_boot so_gen so_token so_pid so_seq so_tick so_phase so_extra \
+        < "$CTL/stock.owner.heartbeat" || return 1
+    read -r so_expected so_birth < "$CTL/stock.owner.pid" || return 1
+    [ -z "$so_extra" ] && [ "$so_version" = v1 ] &&
+        [ "$so_boot" = "$(boot_id)" ] && [ "$so_boot" = "$(cat "$CTL/boot")" ] &&
+        [ "$so_gen" = "$(watchdog_generation)" ] &&
+        [ "$so_token" = "$(cat "$CTL/framework.launch")" ] &&
+        [ "$so_pid" = "$so_expected" ] || return 1
+    watchdog_uint "$so_seq" && [ "$so_seq" -gt 0 ] && watchdog_uint "$so_tick" || return 1
+    case "$so_phase" in prearm|setup|running|paused) ;; *) return 1 ;; esac
+    so_now=$(watchdog_now) || return 1
+    [ "$so_tick" -le "$so_now" ] && [ $((so_now - so_tick)) -le 5 ]
+}
+framework_stock_admitted() {
+    framework_stock_healthy &&
+        [ "$(cat "$CTL/framework.stock-admission" 2>/dev/null)" = "$(watchdog_generation) $(cat "$CTL/framework.launch") $(boot_id)" ] &&
+        [ ! -e "$CTL/thermal.guard.required" ] && [ ! -e "$CTL/thermal.cap.required" ] &&
+        [ ! -e "$CTL/thermal.cap.prearm.required" ] &&
+        framework_down
+}
+
 framework_thermal_guard_healthy() {
     [ ! -e "$CTL/thermal.guard.fault" ] || return 1
     framework_pid_alive "$CTL/thermal.guard.pid" || return 1
@@ -678,7 +718,9 @@ framework_thermal_cap_healthy() {
 }
 framework_recovery_ready() {
     framework_pid_alive "$CTL/framework.guard" && framework_pid_alive "$CTL/framework.watcher" || return 1
-    if [ "$(cat "$CTL/framework.mode" 2>/dev/null)" = run ] && ! sm8850_no_userspace_thermal; then
+    if framework_stock_mode; then
+        framework_stock_healthy || return 1
+    elif [ "$(cat "$CTL/framework.mode" 2>/dev/null)" = run ] && ! sm8850_no_userspace_thermal; then
         [ "$(cat "$CTL/thermal.guard.required" 2>/dev/null)" = "$(watchdog_generation)" ] &&
             framework_thermal_guard_healthy || return 1
         # The CPU-cap PROCESS is prearmed before Framework stop but
@@ -1381,7 +1423,41 @@ case "$MODE" in
             returning|returned) exit 0 ;;
             *) exit 3 ;;
         esac ;;
-    --inner)
+    --stock-owner)
+        # Invoked by the root switch after preflight, not an admission mode.
+        [ -z "$T" ] && [ "$(id -u)" = 0 ] && [ "$#" = 5 ] &&
+            framework_stock_mode && [ "$2" = "$(watchdog_generation)" ] &&
+            [ "$3" = "$(cat "$CTL/framework.launch")" ] &&
+            [ "$4" = "$(cat "$CTL/framework.stock-budget")" ] || exit 3
+        SO="$STAGE/runtime/bin/oneios-stock-session"
+        root_only "$SO" && [ -x "$SO" ] && root_only "$5" && [ -x "$5" ] || exit 3
+        out_of_the_way
+        [ "$(readlink /proc/$/ns/mnt)" = "$(readlink /proc/1/ns/mnt)" ] || exit 3
+        printf '%s %s\n' "$" "$(watchdog_birth $)" > "$CTL/stock.owner.pid" || exit 3
+        exec "$SO" --prearm "$(boot_id)" "$2" "$3" "$4" "$5"
+        ;;
+    --stock-display)
+        [ -z "$T" ] && [ "$(id -u)" = 0 ] && framework_stock_admitted || exit 3
+        read -r sx sd extra < "$CTL/stock.roots" || exit 3
+        [ "$sd" = "$" ] && [ -z "$extra" ] &&
+            [ "$(readlink /proc/$/ns/mnt)" = "$(readlink /proc/1/ns/mnt)" ] || exit 3
+        DH="$STAGE/runtime/bin/oneios-display"
+        root_only "$DH" && [ -x "$DH" ] || exit 3
+        echo 0 2>/dev/null > "/proc/$/oom_score_adj"
+        exec "$DH" --socket "$SESSION/display.sock" --wait 30 >>"$CTL/display.log" 2>&1
+        ;;
+    --inner|--stock-inner)
+        STOCK_INNER=0
+        if [ "$MODE" = --stock-inner ]; then
+            [ -z "$T" ] && [ "$(id -u)" = 0 ] && framework_stock_admitted || exit 3
+            read -r sx sd extra < "$CTL/stock.roots" || exit 3
+            [ "$sx" = "$" ] && [ -z "$extra" ] &&
+                [ "$ONEIOS_STOCK_TOKEN" = "$(cat "$CTL/framework.launch")" ] &&
+                [ "$ONEIOS_STOCK_GENERATION" = "$(watchdog_generation)" ] &&
+                [ "$ONEIOS_CAMERA" = 0 ] || exit 3
+            STOCK_INNER=1
+            exec >>"$SESSION/xnuhost.log" 2>&1
+        fi
         # Inside the new mount namespace (unshare -m), still root. The stage
         # becomes /data: nothing else of One UI's /data exists in here.
         [ -z "$T" ] || exit 3
@@ -1397,7 +1473,7 @@ case "$MODE" in
         at() { AT=$*; echo "oneios inner: $(date +%T) $*"; }
         trap 'echo "oneios inner: $(date +%T) ended with status $? in step: $AT"' EXIT
         die_inner() { echo "oneios inner: $*"; exit 70; }
-        if [ "$FRAMEWORK" = 1 ] && [ "$(cat "$CTL/framework.cpu-budget" 2>/dev/null)" = hybrid-v1-180s ]; then
+        if [ "$STOCK_INNER" = 0 ] && [ "$FRAMEWORK" = 1 ] && [ "$(cat "$CTL/framework.cpu-budget" 2>/dev/null)" = hybrid-v1-180s ]; then
             at "joining isolated guest CPU bandwidth group before publishing PID"
             framework_thermal_cap_healthy || die_inner "CPU budget heartbeat not healthy"
             guest_cpu_group=$(framework_cpu_budget_group "$CTL") || die_inner "CPU bandwidth group identity invalid"
@@ -1486,7 +1562,9 @@ case "$MODE" in
         # namespace alone, as before.
         at "the session's cgroup"
         CG=/sys/fs/cgroup/oneios_session
-        if [ -f /sys/fs/cgroup/cgroup.controllers ] && mkdir -p "$CG" 2>/dev/null && echo $$ > "$CG/cgroup.procs" 2>/dev/null; then
+        if [ "$STOCK_INNER" = 1 ]; then
+            echo "oneios inner: held-launch private leaves retained; no legacy migration"
+        elif [ -f /sys/fs/cgroup/cgroup.controllers ] && mkdir -p "$CG" 2>/dev/null && echo $ > "$CG/cgroup.procs" 2>/dev/null; then
             echo "oneios inner: cgroup $CG"
         else
             echo "oneios inner: no cgroup of its own ($CG); the return ends the session by its mount namespace"
@@ -1541,7 +1619,9 @@ case "$MODE" in
             # battery and thermal bridge, not the former affinity-only bench.
             # Radio, haptics and encoder remain separately disabled on this
             # first integration. The root thermal guard/cap NEVER relax.
-            if [ "$(cat /data/control/framework.soft-thermal 2>/dev/null)" = disabled-180s ]; then
+            if [ "$STOCK_INNER" = 1 ]; then
+                echo "STOCK_UI_PROFILE=ui-v1 CAMERA=OFF INPUT_SCRIPT=OFF; stock DVFS retained"
+            elif [ "$(cat /data/control/framework.soft-thermal 2>/dev/null)" = disabled-180s ]; then
                 echo "ONEIOS_BENCH_THERMAL_BRIDGE=ACTIVE_WITH_NO_ROOT_THERMAL_MONITOR"
             else
                 echo "ONEIOS_BENCH_THERMAL_BRIDGE=ACTIVE_READ_ONLY_ROOT_GUARD_SEPARATE"
@@ -1895,7 +1975,9 @@ case "$MODE" in
                 fi
                 if [ "$ready_at" = -1 ] && [ -e "$SESSION/ready" ] &&
                     grep -q 'first frame posted' "$CTL/display.log" 2>/dev/null; then ready_at=$t; fi
-                [ "$ready_at" = -1 ] || framework_capture
+                if ! framework_stock_mode; then
+                    [ "$ready_at" = -1 ] || framework_capture
+                fi
             fi
             if ! { [ -n "$pid" ] && [ "$(readlink "$P/$pid/ns/mnt" 2>/dev/null)" = "$ns" ]; }; then
                 SCREEN=$(why_ended)
@@ -1946,7 +2028,18 @@ if [ "$FRAMEWORK" = 1 ]; then
     # Existing active-session recovery and separately requested smoke are
     # deliberately not changed. No environment/risk-token bypass.
     if [ "$FW_MODE" = run ]; then
-        framework_block "SM8850_THERMAL_POLICY=BLOCKED_LEGACY_RETIRED; stock-managed thermal runner and non-reboot guest quiesce not integrated/qualified"
+        # Only the new explicit UI profile can ever be considered. Its
+        # startup qualification is intentionally not established here.
+        for stock_arg in "$@"; do
+            [ "$stock_arg" != stock-ui-v1 ] || FW_STOCK=1
+        done
+        [ "$FW_STOCK" = 1 ] ||
+            framework_block "SM8850_THERMAL_POLICY=BLOCKED_LEGACY_RETIRED; use the separately qualified stock profile when available"
+        framework_stock_startup_qualified ||
+            framework_block "SM8850_STOCK_UI_V1=BLOCKED_STARTUP_UNQUALIFIED"
+        case "$FW_STOCK_BUDGET" in ''|*[!0-9]*) framework_block "missing qualified initial CPU demand budget" ;; esac
+        [ "$FW_STOCK_BUDGET" -ge 10 ] && [ "$FW_STOCK_BUDGET" -le 100 ] ||
+            framework_block "invalid qualified initial CPU demand budget"
     fi
     # Bounded, operator-selected duration measured from Framework stop.
     FW_DURATION=600
@@ -2078,13 +2171,19 @@ if [ "$FRAMEWORK" = 1 ]; then
         if [ "$MODE" = --framework-check ]; then
             FW_PROFILE_ARG=${4:-}
             [ "$#" -lt 4 ] || [ "$FW_PROFILE_ARG" = I_ACCEPT_SOFT_GUARD_OFF_180S ] ||
+                { [ "$FW_STOCK" = 1 ] && [ "$FW_PROFILE_ARG" = stock-ui-v1 ]; } ||
                 framework_block "invalid explicit preflight thermal profile"
         else
             FW_PROFILE_ARG=${7:-}
             [ "$#" -lt 7 ] || [ "$FW_PROFILE_ARG" = I_ACCEPT_SOFT_GUARD_OFF_180S ] ||
+                { [ "$FW_STOCK" = 1 ] && [ "$FW_PROFILE_ARG" = stock-ui-v1 ]; } ||
                 framework_block "invalid explicit live thermal profile"
         fi
-        if [ "$FW_PROFILE_ARG" = I_ACCEPT_SOFT_GUARD_OFF_180S ]; then
+        if [ "$FW_STOCK" = 1 ]; then
+            [ "$FW_PROFILE_ARG" = stock-ui-v1 ] && [ -z "${ONEIOS_SM8850_EXPERIMENT_NO_SOFT_THERMAL:-}" ] &&
+                [ "$FW_INTERACTION_PROFILE" = off ] && [ "$FW_OWN_PRESENCE" = 0 ] ||
+                framework_block "stock UI profile cannot combine legacy thermal, input-script or own-presence modes"
+        elif [ "$FW_PROFILE_ARG" = I_ACCEPT_SOFT_GUARD_OFF_180S ]; then
             FW_SOFT_THERMAL_OFF=1
         elif [ "$MODE" = --framework-check ] &&
              [ "${ONEIOS_SM8850_EXPERIMENT_NO_SOFT_THERMAL:-}" = I_ACCEPT_SOFT_GUARD_OFF_180S ]; then
@@ -2113,7 +2212,9 @@ if [ "$FRAMEWORK" = 1 ]; then
                 framework_block "own-presence requires guarded 180s run"
         fi
         if [ "$MODE" = --framework-session ]; then
-            if [ "$FW_SOFT_THERMAL_OFF" = 1 ]; then
+            if [ "$FW_STOCK" = 1 ]; then
+                echo "SM8850_LIVE_THERMAL_PROFILE=STOCK_UI_V1"
+            elif [ "$FW_SOFT_THERMAL_OFF" = 1 ]; then
                 echo "SM8850_LIVE_THERMAL_PROFILE=NO_SOFT_GUARD_EXPLICIT_180S"
             else
                 echo "SM8850_LIVE_THERMAL_PROFILE=ROOT_GUARD_DEFAULT"
@@ -2302,7 +2403,9 @@ if [ "$FRAMEWORK" = 1 ]; then
         # remains bench/bridges=0 for exclusive touch: the OneiOS thermal
         # bridge and CPU topology/affinity bridge are not started here.
         echo "SM8850_FULL_RUN_GUEST_BOOT=PRIOR_PHYSICAL_OBSERVATION_NOT_A_NEW_SESSION_PASS"
-        if [ "$FW_SOFT_THERMAL_OFF" = 1 ]; then
+        if [ "$FW_STOCK" = 1 ]; then
+            echo "SM8850_FULL_RUN_THERMAL_BRIDGE=STOCK_MANAGED_OWNER"
+        elif [ "$FW_SOFT_THERMAL_OFF" = 1 ]; then
             echo "SM8850_FULL_RUN_THERMAL_BRIDGE=NO_ROOT_THERMAL_GUARD; HOST_READ_ONLY_TELEMETRY_ONLY"
             echo "SM8850_FULL_RUN_CPU_CAP=DISABLED_NO_ROOT_WORKER"
         else
@@ -2311,7 +2414,16 @@ if [ "$FRAMEWORK" = 1 ]; then
         echo "SM8850_FULL_RUN_CPU_AFFINITY=REQUIRES_XNUHOST_BENCH_AFFINITY_8_DISTINCT_CORES_LOG"
         echo "SM8850_FULL_RUN_GPU_3D=KGSL_OBSERVED_PRIOR_RUN_AUTO_FALLBACK_POSSIBLE"
         echo "SM8850_FULL_RUN_RECOVERY=DEADLINE_AND_UNASSISTED_RETURN_NOT_FULLY_VERIFIED"
-        if [ "$FW_SOFT_THERMAL_OFF" = 1 ]; then
+        if [ "$FW_STOCK" = 1 ]; then
+            root_only "$STAGE/thermal.guard.manifest" &&
+                root_only "$STAGE/runtime/bin/oneios-stock-session" &&
+                [ -x "$STAGE/runtime/bin/oneios-stock-session" ] ||
+                framework_block "stock owner or raw manifest missing/untrusted"
+            "$STAGE/runtime/bin/oneios-stock-session" --build-info |
+                grep -q 'SM8850_STOCK_OWNER_ABI=1' || framework_block "stock owner ABI mismatch"
+            grep -Fq 'STOCK_GUEST_START=AUTHORIZED_BY_CONTROLLER' "$X" ||
+                framework_block "stock-ready XNUHost runtime missing"
+        elif [ "$FW_SOFT_THERMAL_OFF" = 1 ]; then
             # Exact 180s experimental mode only: no root thermal guard and
             # no root CPU cap worker; kernel/vendor thermal policy is unchanged.
             echo "SM8850_SOFTWARE_THERMAL_MONITOR=DISABLED_FOR_180S"
@@ -2470,7 +2582,12 @@ if [ "$FRAMEWORK" = 1 ]; then
             framework_setup_failed "could not record own-presence profile"
         printf '%s\n' "$FW_INTERACTION_PROFILE" > "$CTL/framework.interaction-profile" ||
             framework_setup_failed "could not record interaction profile"
-        if [ "$FW_SOFT_THERMAL_OFF" = 0 ] && [ "$FW_DURATION" = 180 ]; then
+        if [ "$FW_STOCK" = 1 ]; then
+            printf 'ui-v1\n' > "$CTL/framework.stock-profile" &&
+                printf '%s\n' "$FW_STOCK_BUDGET" > "$CTL/framework.stock-budget" ||
+                framework_setup_failed "could not record qualified stock profile"
+            echo "STOCK_UI_PROFILE=ui-v1 CAMERA=OFF INPUT_SCRIPT=OFF AUTOMATIC_SCREENSHOTS=OFF"
+        elif [ "$FW_SOFT_THERMAL_OFF" = 0 ] && [ "$FW_DURATION" = 180 ]; then
             printf 'hybrid-v1-180s\n' > "$CTL/framework.cpu-budget" ||
                 framework_setup_failed "could not record isolated CPU bandwidth profile"
         fi
@@ -2539,7 +2656,17 @@ for p in $(cat "$CTL/keys/pids" 2>/dev/null); do
         framework_pid_alive "$CTL/keys/reader.$p" || armed="key reader $p is not in the protected recovery context"
     fi
 done
-if [ "$FRAMEWORK" = 1 ] && [ "$FW_MODE" = run ] && [ -z "$armed" ]; then
+if [ "$FRAMEWORK" = 1 ] && [ "$FW_MODE" = run ] && [ "$FW_STOCK" = 1 ] && [ -z "$armed" ]; then
+    "$BB" setsid "$SH" "$SELF" --stock-owner "$WD_GEN" "$FW_LAUNCH" "$FW_STOCK_BUDGET" "$BB" \
+        8>&- </dev/null >>"$STAGE/stock-owner.log" 2>&1 &
+    n=0
+    until framework_stock_healthy; do
+        [ "$n" -lt 25 ] || break
+        sleep 0.2; n=$((n + 1))
+    done
+    framework_stock_healthy || armed="stock owner could not prearm current raw sampling"
+fi
+if [ "$FRAMEWORK" = 1 ] && [ "$FW_MODE" = run ] && [ "$FW_STOCK" = 0 ] && [ -z "$armed" ]; then
     # Arm both root-side workers BEFORE Framework stops. Their PIDs,
     # birth tokens, heartbeat and emergency faults stay OUTSIDE the guest
     # cgroup. A failed admission never proceeds to stop system_server.
@@ -2564,7 +2691,7 @@ if [ "$FRAMEWORK" = 1 ] && [ "$FW_MODE" = run ] && [ -z "$armed" ]; then
         [ -n "$armed" ] || echo "THERMAL_GUARD=ARMED_ROOT_BEFORE_FRAMEWORK_STOP; CPU_THROTTLE=PREARM_BEFORE_STOP; LAST_RESORT_CPU=90C"
     fi
 fi
-if [ "$FRAMEWORK" = 1 ] && [ "$FW_MODE" = run ] && [ -z "$armed" ]; then
+if [ "$FRAMEWORK" = 1 ] && [ "$FW_MODE" = run ] && [ "$FW_STOCK" = 0 ] && [ -z "$armed" ]; then
     # Launch the independent root CPU cap before stopping system_server,
     # but do NOT allow ANY sysfs clock writes while One UI is still alive.
     # The cap publishes PID/birth immediately, then only monitors until:
@@ -2593,7 +2720,7 @@ fi
 # remain elevated and the post-stop CPU cap cannot enforce a lower ceiling.
 # Do this with One UI still alive, BEFORE the 45s framework-start cutoff.
 # Do not change kernel votes, thermal trips, or the CPU-cap fail-safe.
-if [ "$FRAMEWORK" = 1 ] && [ "$FW_MODE" = run ] && [ -z "$armed" ]; then
+if [ "$FRAMEWORK" = 1 ] && [ "$FW_MODE" = run ] && [ "$FW_STOCK" = 0 ] && [ -z "$armed" ]; then
     if [ "$FW_SOFT_THERMAL_OFF" = 1 ]; then
         # Android lock screen may darken the panel after ~5s. Send
         # KEYCODE_WAKEUP every 2s while system_server still owns input.
@@ -2704,7 +2831,9 @@ if [ "$FRAMEWORK_REBOOT" = 1 ]; then
     echo "SM8850 USB safety: DO NOT press Volume Up + Volume Down during the experimental session."
     echo "Samsung may enter Download Mode if the phone restarts while both volume keys are held with USB connected."
     if [ "$FW_MODE" = run ]; then
-        if [ "$FW_SOFT_THERMAL_OFF" = 1 ]; then
+        if [ "$FW_STOCK" = 1 ]; then
+            echo "FULL iOS UI profile: independent ${FW_DURATION}s deadline; stock owner prearmed."
+        elif [ "$FW_SOFT_THERMAL_OFF" = 1 ]; then
             echo "FULL iOS guest, 8 vCPUs, GPU 3D and touch: ${FW_DURATION}s reboot deadline; NO software thermal guard, CPU cap best effort only."
         else
             echo "FULL iOS guest, 8 vCPUs, GPU 3D and touch: independent ${FW_DURATION}s deadline from Framework stop; root throttle guard ACTIVE."
@@ -2920,7 +3049,9 @@ if [ "$FRAMEWORK" = 1 ]; then
     # system_server is absent, before app-group drain and watchdog handoff.
     # Here only confirm its current, enforced heartbeat before guest launch.
     if [ "$FW_MODE" = run ]; then
-        if [ "$FW_SOFT_THERMAL_OFF" = 1 ]; then
+        if [ "$FW_STOCK" = 1 ]; then
+            framework_stock_healthy || fw_recover "prearmed stock owner lost before guest setup"
+        elif [ "$FW_SOFT_THERMAL_OFF" = 1 ]; then
             # Explicit no-guard 180s: no root CPU cap worker is launched.
             # The kernel/vendor/firmware may still throttle the CPU.
             echo "CPU_THROTTLE=OFF_NO_ROOT_CAP_WORKER"
@@ -2945,6 +3076,13 @@ if [ "$FRAMEWORK" = 1 ]; then
         mv -f "$CTL/framework.deadline.tmp" "$CTL/framework.deadline" ||
         fw_recover "could not arm the phase deadline"
     echo "Framework stopped, app groups drained and Android input absent at uptime $fw_tick. Deadline: $((fw_tick + fw_seconds))"
+    if [ "$FW_STOCK" = 1 ]; then
+        framework_down && framework_stock_healthy && framework_recovery_ready ||
+            fw_recover "stock admission lost before setup"
+        printf '%s %s %s\n' "$WD_GEN" "$FW_LAUNCH" "$(boot_id)" > "$CTL/framework.stock-admission.tmp" &&
+            mv -f "$CTL/framework.stock-admission.tmp" "$CTL/framework.stock-admission" ||
+            fw_recover "stock admission record could not be published"
+    fi
     if [ "$FRAMEWORK_REBOOT" = 1 ]; then
         printf '%s\n' "$WD_GEN" > "$CTL/framework.takeover-confirmed" ||
             fw_recover "could not record verified Framework stop"
@@ -2980,16 +3118,25 @@ echo "=== [4/5] $(date +%T) Starting xnuhost ==="
 screen status "Starting xnuhost"
 # A new mount namespace made from init's; --inner binds the stage over /data
 # there and execs xnuhost, so the pid it writes is xnuhost's own.
-"$BB" setsid "$BB" unshare -m /system/bin/sh "$SELF" --inner 8>&- </dev/null >>"$SESSION/xnuhost.log" 2>&1 &
+if [ "$FW_STOCK" = 1 ]; then
+    # The prearmed root owner, not this shell, forks/holds/attaches both
+    # roots and supervises setup. It releases CPU0 only via authenticated START.
+    framework_stock_admitted || fw_recover "stock owner unavailable at launch"
+else
+    "$BB" setsid "$BB" unshare -m /system/bin/sh "$SELF" --inner 8>&- </dev/null >>"$SESSION/xnuhost.log" 2>&1 &
+fi
 # Waited for by its progress, not for a fixed time: until it wrote the pid, for
 # as long as that shell runs (control/inner.pid), 30 s at most. A shell that
 # ended is not waited for; its trace in the log says where it stopped.
 n=0
 inner_wait=150
 [ "$FRAMEWORK" = 0 ] || inner_wait=40
+[ "$FW_STOCK" = 0 ] || inner_wait=150
 while [ $n -lt "$inner_wait" ] && [ ! -s "$SESSION/xnuhost.pid" ]; do
     [ "$FRAMEWORK" = 0 ] || ! return_asked || end_for_return "xnuhost was ready"
-    if [ $n -ge 10 ]; then
+    if [ "$FW_STOCK" = 1 ]; then
+        framework_stock_healthy || break
+    elif [ $n -ge 10 ]; then
         ip=$(cat "$CTL/inner.pid" 2>/dev/null)
         [ -n "$ip" ] && kill -0 "$ip" 2>/dev/null || break
     fi
@@ -3024,7 +3171,17 @@ echo "xnuhost: pid $XP in mount namespace $XNS, log $SESSION/xnuhost.log"
 # (control/, where the guest cannot write; its log is there too). Nothing
 # waits for it: without it the session runs with a dark screen.
 DH="$STAGE/runtime/bin/oneios-display"
-if [ -f "$DH" ] && [ ! -L "$DH" ] && [ -x "$DH" ] && root_only "$DH"; then
+if [ "$FW_STOCK" = 1 ]; then
+    framework_stock_admitted &&
+        read -r owned_xp owned_dp owned_extra < "$CTL/stock.roots" &&
+        [ "$owned_xp" = "$XP" ] && [ -z "$owned_extra" ] &&
+        watchdog_uint "$owned_dp" && [ "$owned_dp" -gt 1 ] &&
+        [ "$(readlink "/proc/$owned_dp/ns/mnt")" = "$INIT_NS" ] &&
+        kill -0 "$owned_dp" 2>/dev/null ||
+        fw_recover "stock display ownership proof missing"
+    printf '%s\n' "$owned_dp" > "$CTL/display.pid" || fw_recover "could not record stock display PID"
+    echo "Display helper: held-launch stock owner PID $owned_dp, no legacy cgroup migration"
+elif [ -f "$DH" ] && [ ! -L "$DH" ] && [ -x "$DH" ] && root_only "$DH"; then
     # This session's log only: the boot screen's hand-off (display_up) reads its markers, and a
     # "first frame posted" of an earlier session must not end this session's boot screen early.
     [ -f "$CTL/display.log" ] && mv -f "$CTL/display.log" "$CTL/display.log.1" 2>/dev/null
