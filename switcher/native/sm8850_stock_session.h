@@ -30,6 +30,18 @@ int oneios_stock_session_prepare(struct oneios_stock_session *,
 enum oneios_thermal_result oneios_stock_session_activate(
     struct oneios_stock_session *, const struct oneios_thermal_ops *, void *,
     const struct oneios_thermal_native_sample *);
+/* Preferred supervised-source variants: the caller obtains a raw sample
+ * through its independent bounded transport. Do not call synchronous raw
+ * sysfs reads in that owner loop. NULL raw remains a latched fault; the
+ * controller rechecks identity, sequence, freshness and provider state.
+ * The existing synchronous entry points are retained for fixtures and
+ * compatibility, not a substitute for independent supervision. */
+enum oneios_thermal_result oneios_stock_session_activate_sample(
+    struct oneios_stock_session *, const struct oneios_thermal_ops *, void *,
+    const struct oneios_thermal_sample *, const struct oneios_thermal_native_sample *);
+enum oneios_thermal_result oneios_stock_session_tick_sample(
+    struct oneios_stock_session *, const struct oneios_thermal_sample *,
+    const struct oneios_thermal_native_sample *);
 /* Invoke on each independently supervised sample interval, including
  * while paused. Missing native data is unknown; raw failure is a fault. */
 enum oneios_thermal_result oneios_stock_session_tick(

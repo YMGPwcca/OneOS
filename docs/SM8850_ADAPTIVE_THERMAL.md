@@ -554,3 +554,19 @@ socket barrier, inherited FD whitelist, exec, no-release EOF and
 membership mismatch with simulated cgroup.procs files. Host and Android
 compile/test pending. No production cgroup path is accessible in the
 fixture build.
+
+
+### Guest launcher receipt and externally supervised samples
+
+Operator local result at OneOS 209640c194a6e8eea23e98979542c60f016fe676 / OneiOS
+2b394a0a79b21002405141c2a48d0779ad8cb345: owned groups + real held-child
+bootstrap fixture 479 checks PASS, Android API30 ARM64 native compilation
+PASS, GUEST_LAUNCH_HOST_OFFLINE=PASS, DEVICE_ACCESS=NONE, evidence
+/tmp/oneios-guest-launch.Jo0F7X. The cgroup filesystem is simulated.
+
+The stock-session assembly now also accepts a complete externally
+supervised raw sample on activation and tick, keeping the same actual
+controller, identity/freshness checks and fault policy. A NULL raw sample
+is not a successful heartbeat. The root runner can obtain raw data from a
+separately bounded process rather than synchronously opening sysfs in its
+controller loop. This does not change startup thresholds or live admission.

@@ -23,20 +23,44 @@ int oneios_stock_session_prepare(struct oneios_stock_session *s,
     return 0;
 }
 
-enum oneios_thermal_result oneios_stock_session_activate(
-    struct oneios_stock_session *s, const struct oneios_thermal_ops *ops,
-    void *ctx, const struct oneios_thermal_native_sample *n)
+static int bind_controller(struct oneios_stock_session *s,
+    const struct oneios_thermal_ops *ops, void *ctx)
 {
     if (!s || s->phase != ONEIOS_STOCK_PREPARED || !s->groups_owned)
-        return ONEIOS_THERMAL_REFUSED;
+        return reject();
     if (oneios_thermal_controller_init_stock(&s->controller, &s->groups,
                                                &s->id, ops, ctx)) {
         /* Retain group handles for the external owner to fence/retire. */
         s->phase = ONEIOS_STOCK_FAILED;
-        return ONEIOS_THERMAL_REFUSED;
+        return -1;
     }
     s->phase = ONEIOS_STOCK_BOUND;
+    return 0;
+}
+
+enum oneios_thermal_result oneios_stock_session_activate(
+    struct oneios_stock_session *s, const struct oneios_thermal_ops *ops,
+    void *ctx, const struct oneios_thermal_native_sample *n)
+{
+    if (bind_controller(s, ops, ctx)) return ONEIOS_THERMAL_REFUSED;
     return oneios_stock_session_tick(s, n);
+}
+
+enum oneios_thermal_result oneios_stock_session_activate_sample(
+    struct oneios_stock_session *s, const struct oneios_thermal_ops *ops,
+    void *ctx, const struct oneios_thermal_sample *raw,
+    const struct oneios_thermal_native_sample *n)
+{
+    if (bind_controller(s, ops, ctx)) return ONEIOS_THERMAL_REFUSED;
+    return oneios_stock_session_tick_sample(s, raw, n);
+}
+
+enum oneios_thermal_result oneios_stock_session_tick_sample(
+    struct oneios_stock_session *s, const struct oneios_thermal_sample *raw,
+    const struct oneios_thermal_native_sample *n)
+{
+    if (!s || s->phase != ONEIOS_STOCK_BOUND) return ONEIOS_THERMAL_REFUSED;
+    return oneios_thermal_controller_tick_stock(&s->controller, raw, n);
 }
 
 enum oneios_thermal_result oneios_stock_session_tick(
